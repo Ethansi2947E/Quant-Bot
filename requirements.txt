@@ -1,0 +1,13 @@
+MetaTrader5==5.0.4803
+pandas>=2.1.1
+numpy>=1.26.0
+python-telegram-bot==20.6
+requests==2.31.0
+openai==1.3.5
+loguru==0.7.2
+dash==2.13.0
+openpyxl==3.1.2
+python-dotenv==1.0.0
+SQLAlchemy==2.0.22
+newsapi-python==0.2.7
+pandas-ta==0.3.14b0 

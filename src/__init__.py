@@ -1,0 +1,3 @@
+"""
+Trading Bot source package
+""" 

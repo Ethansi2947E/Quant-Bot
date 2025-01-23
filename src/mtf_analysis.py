@@ -1,0 +1,345 @@
+from typing import Dict, List, Optional
+import pandas as pd
+import numpy as np
+from loguru import logger
+
+class MTFAnalysis:
+    def __init__(self):
+        self.timeframes = ["M5", "M15", "H1", "H4", "D1"]
+        self.weights = {
+            "D1": 0.30,  # Higher timeframe has more weight
+            "H4": 0.25,
+            "H1": 0.20,
+            "M15": 0.15,
+            "M5": 0.10
+        }
+    
+    def analyze_mtf(self, dataframes: Dict[str, pd.DataFrame]) -> Dict:
+        """Analyze price action across multiple timeframes."""
+        try:
+            # Check which timeframes are available
+            available_timeframes = list(dataframes.keys())
+            if not available_timeframes:
+                logger.warning("No timeframe data available for MTF analysis")
+                return self._get_default_analysis()
+            
+            # Recalculate weights based on available timeframes
+            total_weight = sum(self.weights[tf] for tf in available_timeframes)
+            adjusted_weights = {
+                tf: self.weights[tf] / total_weight 
+                for tf in available_timeframes
+            }
+            
+            logger.info(f"Analyzing {len(available_timeframes)} timeframes: {', '.join(available_timeframes)}")
+            logger.debug(f"Adjusted weights: {adjusted_weights}")
+            
+            # Analyze available timeframes
+            trend_analysis = self._analyze_trend_alignment(dataframes, adjusted_weights)
+            structure_analysis = self._analyze_structure_alignment(dataframes, adjusted_weights)
+            momentum_analysis = self._analyze_momentum_alignment(dataframes, adjusted_weights)
+            
+            # Calculate overall bias with confidence adjustment
+            confidence_factor = len(available_timeframes) / len(self.timeframes)
+            bias = self._calculate_mtf_bias(
+                trend_analysis,
+                structure_analysis,
+                momentum_analysis,
+                confidence_factor
+            )
+            
+            return {
+                'trend_alignment': trend_analysis,
+                'structure_alignment': structure_analysis,
+                'momentum_alignment': momentum_analysis,
+                'overall_bias': bias,
+                'available_timeframes': available_timeframes,
+                'confidence_factor': confidence_factor
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in MTF analysis: {str(e)}")
+            return self._get_default_analysis()
+    
+    def _analyze_trend_alignment(self, dataframes: Dict[str, pd.DataFrame], weights: Dict[str, float]) -> Dict:
+        """Analyze trend alignment across timeframes."""
+        try:
+            trends = {}
+            alignment_score = 0
+            available_weights_sum = 0
+            
+            # Only analyze available timeframes
+            for tf in dataframes.keys():
+                if tf not in self.weights:
+                    logger.warning(f"Skipping unknown timeframe: {tf}")
+                    continue
+                    
+                df = dataframes[tf]
+                available_weights_sum += self.weights[tf]
+                
+                # Calculate EMAs
+                df['ema_20'] = df['close'].ewm(span=20).mean()
+                df['ema_50'] = df['close'].ewm(span=50).mean()
+                df['ema_200'] = df['close'].ewm(span=200).mean()
+                
+                # Determine trend
+                current_price = df['close'].iloc[-1]
+                if current_price > df['ema_20'].iloc[-1] > df['ema_50'].iloc[-1] > df['ema_200'].iloc[-1]:
+                    trend = 'bullish'
+                    score = 1
+                elif current_price < df['ema_20'].iloc[-1] < df['ema_50'].iloc[-1] < df['ema_200'].iloc[-1]:
+                    trend = 'bearish'
+                    score = -1
+                else:
+                    trend = 'neutral'
+                    score = 0
+                
+                trends[tf] = {
+                    'trend': trend,
+                    'score': score
+                }
+                
+                alignment_score += score * self.weights[tf]
+            
+            # Normalize alignment score based on available weights
+            if available_weights_sum > 0:
+                alignment_score = alignment_score / available_weights_sum
+            
+            return {
+                'timeframes': trends,
+                'alignment_score': alignment_score,
+                'aligned': abs(alignment_score) > 0.5,
+                'available_timeframes': list(trends.keys())
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing trend alignment: {str(e)}")
+            return {
+                'timeframes': {},
+                'alignment_score': 0,
+                'aligned': False,
+                'available_timeframes': []
+            }
+    
+    def _analyze_structure_alignment(self, dataframes: Dict[str, pd.DataFrame], weights: Dict[str, float]) -> Dict:
+        """Analyze market structure alignment across timeframes."""
+        try:
+            structures = {}
+            alignment_score = 0
+            available_weights_sum = 0
+            
+            # Only analyze available timeframes
+            for tf in dataframes.keys():
+                if tf not in self.weights:
+                    logger.warning(f"Skipping unknown timeframe: {tf}")
+                    continue
+                    
+                df = dataframes[tf]
+                available_weights_sum += self.weights[tf]
+                
+                # Find swing points
+                highs = []
+                lows = []
+                
+                for i in range(2, len(df)-2):
+                    # Swing high
+                    if df['high'].iloc[i] > df['high'].iloc[i-1] and \
+                       df['high'].iloc[i] > df['high'].iloc[i-2] and \
+                       df['high'].iloc[i] > df['high'].iloc[i+1] and \
+                       df['high'].iloc[i] > df['high'].iloc[i+2]:
+                        highs.append(df['high'].iloc[i])
+                    
+                    # Swing low
+                    if df['low'].iloc[i] < df['low'].iloc[i-1] and \
+                       df['low'].iloc[i] < df['low'].iloc[i-2] and \
+                       df['low'].iloc[i] < df['low'].iloc[i+1] and \
+                       df['low'].iloc[i] < df['low'].iloc[i+2]:
+                        lows.append(df['low'].iloc[i])
+                
+                # Determine structure
+                if len(highs) >= 2 and len(lows) >= 2:
+                    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+                        structure = 'bullish'
+                        score = 1
+                    elif highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+                        structure = 'bearish'
+                        score = -1
+                    else:
+                        structure = 'neutral'
+                        score = 0
+                else:
+                    structure = 'neutral'
+                    score = 0
+                
+                structures[tf] = {
+                    'structure': structure,
+                    'score': score,
+                    'swing_highs': len(highs),
+                    'swing_lows': len(lows)
+                }
+                
+                alignment_score += score * self.weights[tf]
+            
+            # Normalize alignment score based on available weights
+            if available_weights_sum > 0:
+                alignment_score = alignment_score / available_weights_sum
+            
+            return {
+                'timeframes': structures,
+                'alignment_score': alignment_score,
+                'aligned': abs(alignment_score) > 0.5,
+                'available_timeframes': list(structures.keys())
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing structure alignment: {str(e)}")
+            return {
+                'timeframes': {},
+                'alignment_score': 0,
+                'aligned': False,
+                'available_timeframes': []
+            }
+    
+    def _analyze_momentum_alignment(self, dataframes: Dict[str, pd.DataFrame], weights: Dict[str, float]) -> Dict:
+        """Analyze momentum alignment across timeframes."""
+        try:
+            momentum = {}
+            alignment_score = 0
+            available_weights_sum = 0
+            
+            # Only analyze available timeframes
+            for tf in dataframes.keys():
+                if tf not in self.weights:
+                    logger.warning(f"Skipping unknown timeframe: {tf}")
+                    continue
+                    
+                df = dataframes[tf]
+                available_weights_sum += self.weights[tf]
+                
+                # Calculate RSI
+                delta = df['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                df['rsi'] = 100 - (100 / (1 + rs))
+                
+                # Calculate MACD
+                exp1 = df['close'].ewm(span=12).mean()
+                exp2 = df['close'].ewm(span=26).mean()
+                df['macd'] = exp1 - exp2
+                df['signal'] = df['macd'].ewm(span=9).mean()
+                
+                # Determine momentum
+                rsi = df['rsi'].iloc[-1]
+                macd_hist = df['macd'].iloc[-1] - df['signal'].iloc[-1]
+                
+                if rsi > 50 and macd_hist > 0:
+                    mom = 'bullish'
+                    score = 1
+                elif rsi < 50 and macd_hist < 0:
+                    mom = 'bearish'
+                    score = -1
+                else:
+                    mom = 'neutral'
+                    score = 0
+                
+                momentum[tf] = {
+                    'momentum': mom,
+                    'score': score,
+                    'rsi': rsi,
+                    'macd_hist': macd_hist
+                }
+                
+                alignment_score += score * self.weights[tf]
+            
+            # Normalize alignment score based on available weights
+            if available_weights_sum > 0:
+                alignment_score = alignment_score / available_weights_sum
+            
+            return {
+                'timeframes': momentum,
+                'alignment_score': alignment_score,
+                'aligned': abs(alignment_score) > 0.5,
+                'available_timeframes': list(momentum.keys())
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing momentum alignment: {str(e)}")
+            return {
+                'timeframes': {},
+                'alignment_score': 0,
+                'aligned': False,
+                'available_timeframes': []
+            }
+    
+    def _calculate_mtf_bias(self, trend: Dict, structure: Dict, momentum: Dict, confidence_factor: float) -> Dict:
+        """Calculate overall bias based on all MTF components with confidence adjustment."""
+        try:
+            # Component weights
+            weights = {
+                'trend': 0.4,
+                'structure': 0.4,
+                'momentum': 0.2
+            }
+            
+            # Calculate weighted score
+            total_score = (
+                trend['alignment_score'] * weights['trend'] +
+                structure['alignment_score'] * weights['structure'] +
+                momentum['alignment_score'] * weights['momentum']
+            )
+            
+            # Adjust score based on available timeframe confidence
+            adjusted_score = total_score * confidence_factor
+            
+            # Determine bias strength with adjusted thresholds
+            if abs(adjusted_score) >= 0.7 * confidence_factor:
+                strength = 'strong'
+            elif abs(adjusted_score) >= 0.4 * confidence_factor:
+                strength = 'moderate'
+            else:
+                strength = 'weak'
+            
+            return {
+                'bias': 'bullish' if adjusted_score > 0 else 'bearish' if adjusted_score < 0 else 'neutral',
+                'strength': strength,
+                'raw_score': total_score,
+                'adjusted_score': adjusted_score,
+                'confidence_factor': confidence_factor,
+                'components': {
+                    'trend': trend['alignment_score'],
+                    'structure': structure['alignment_score'],
+                    'momentum': momentum['alignment_score']
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating MTF bias: {str(e)}")
+            return {
+                'bias': 'neutral',
+                'strength': 'weak',
+                'raw_score': 0,
+                'adjusted_score': 0,
+                'confidence_factor': 0,
+                'components': {
+                    'trend': 0,
+                    'structure': 0,
+                    'momentum': 0
+                }
+            }
+    
+    def _get_default_analysis(self) -> Dict:
+        """Return default analysis when data is insufficient."""
+        return {
+            'trend_alignment': {'aligned': False, 'score': 0},
+            'structure_alignment': {'aligned': False, 'score': 0},
+            'momentum_alignment': {'aligned': False, 'score': 0},
+            'overall_bias': {
+                'bias': 'neutral',
+                'strength': 'weak',
+                'raw_score': 0,
+                'adjusted_score': 0,
+                'confidence_factor': 0
+            },
+            'available_timeframes': [],
+            'confidence_factor': 0
+        } 
