@@ -72,8 +72,8 @@ class TelegramBot:
             
             for attempt in range(max_retries):
                 try:
-                    await self.application.initialize()
-                    await self.application.start()
+            await self.application.initialize()
+            await self.application.start()
                     await self.application.updater.start_polling()
                     break
                 except ConnectError as e:
@@ -450,8 +450,8 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
             try:
                 if self.application.updater:
                     await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
+            await self.application.stop()
+            await self.application.shutdown()
                 logger.info("Telegram bot stopped successfully")
             except asyncio.CancelledError:
                 logger.warning("Polling task cancelled. This is expected during bot shutdown.")
