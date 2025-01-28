@@ -1,7 +1,7 @@
 from typing import Dict, Optional, List, Tuple
 from loguru import logger
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 import json
 
 from config.config import TRADING_CONFIG
@@ -11,20 +11,19 @@ class RiskManager:
     def __init__(self):
         self.risk_per_trade = TRADING_CONFIG["risk_per_trade"]
         self.max_daily_risk = TRADING_CONFIG["max_daily_risk"]
+        self.max_concurrent_trades = TRADING_CONFIG.get("max_concurrent_trades", 3)
         self.open_trades: List[Dict] = []
     
     def calculate_position_size(
         self,
         account_balance: float,
+        risk_amount: float,
         entry_price: float,
         stop_loss: float,
         symbol: str
     ) -> float:
         """Calculate position size based on risk parameters."""
         try:
-            # Calculate risk amount in account currency
-            risk_amount = account_balance * self.risk_per_trade
-            
             # Calculate price difference for stop loss
             price_difference = abs(entry_price - stop_loss)
             
@@ -38,11 +37,89 @@ class RiskManager:
             # Round to 2 decimal places and ensure minimum size
             position_size = round(max(0.01, position_size), 2)
             
+            # Ensure position size doesn't exceed max allowed
+            max_position_size = TRADING_CONFIG.get('max_position_size', 1.0)
+            position_size = min(position_size, max_position_size)
+            
             return position_size
             
         except Exception as e:
             logger.error(f"Error calculating position size: {str(e)}")
             return 0.01
+    
+    def calculate_risk_amount(
+        self,
+        account_balance: float,
+        risk_percentage: float
+    ) -> float:
+        """Calculate risk amount based on account balance and risk percentage."""
+        try:
+            risk_amount = account_balance * risk_percentage
+            max_risk_amount = account_balance * TRADING_CONFIG.get('max_risk_per_trade', 0.03)
+            return min(risk_amount, max_risk_amount)
+        except Exception as e:
+            logger.error(f"Error calculating risk amount: {str(e)}")
+            return 0.0
+    
+    def calculate_daily_risk(
+        self,
+        account_balance: float,
+        open_trades: List[Trade],
+        pending_trades: List[Trade]
+    ) -> float:
+        """Calculate total daily risk including open and pending trades."""
+        try:
+            # Calculate risk for open trades
+            current_date = datetime.now(UTC).date()
+            open_trades_risk = sum(
+                abs(t.entry_price - t.stop_loss) * t.position_size * 100000
+                for t in open_trades
+                if t.timestamp.date() == current_date
+            )
+            
+            # Calculate risk for pending trades
+            pending_trades_risk = sum(
+                abs(t.entry_price - t.stop_loss) * t.position_size * 100000
+                for t in pending_trades
+                if t.timestamp.date() == current_date
+            )
+            
+            return open_trades_risk + pending_trades_risk
+        except Exception as e:
+            logger.error(f"Error calculating daily risk: {str(e)}")
+            return 0.0
+    
+    def can_open_new_trade(self, current_trades: List[Trade]) -> bool:
+        """Check if a new trade can be opened based on maximum concurrent trades limit."""
+        try:
+            return len(current_trades) < self.max_concurrent_trades
+        except Exception as e:
+            logger.error(f"Error checking if can open new trade: {str(e)}")
+            return False
+    
+    def calculate_trailing_stop(
+        self,
+        trade: Trade,
+        current_price: float
+    ) -> float:
+        """Calculate new stop loss for trailing stop."""
+        try:
+            # Calculate original stop loss distance
+            original_distance = abs(trade.entry_price - trade.stop_loss)
+            
+            if trade.direction == 'BUY':
+                # For long positions, move stop loss up while maintaining distance
+                if current_price - original_distance > trade.stop_loss:
+                    return round(current_price - original_distance, 5)
+            else:  # SELL
+                # For short positions, move stop loss down while maintaining distance
+                if current_price + original_distance < trade.stop_loss:
+                    return round(current_price + original_distance, 5)
+            
+            return trade.stop_loss
+        except Exception as e:
+            logger.error(f"Error calculating trailing stop: {str(e)}")
+            return trade.stop_loss
     
     def calculate_stop_loss(
         self,
@@ -99,10 +176,11 @@ class RiskManager:
         """Check if daily risk limit has been reached."""
         try:
             # Calculate total risk for open positions
+            current_date = datetime.now(UTC).date()
             total_risk = sum(
                 trade.get("risk_amount", 0.0)
                 for trade in self.open_trades
-                if trade.get("entry_time", datetime.now()).date() == datetime.now().date()
+                if trade.get("entry_time", datetime.now(UTC)).date() == current_date
             )
             
             # Calculate maximum allowed risk

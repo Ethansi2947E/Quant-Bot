@@ -8,7 +8,7 @@ class DivergenceAnalysis:
         self.lookback_period = 20  # Bars to look back for divergence
         self.divergence_threshold = 0.0010  # 10 pips minimum price movement
         
-    def analyze_divergences(self, df: pd.DataFrame) -> Dict:
+    def analyze(self, df: pd.DataFrame) -> Dict:
         """Analyze multiple types of divergences."""
         try:
             # Calculate indicators

@@ -65,45 +65,112 @@ SESSION_CONFIG = {
     "asian_session": {
         "start": "00:00",  # UTC
         "end": "08:00",    # UTC
-        "volatility_factor": 0.7,  # Lower expected volatility
+        "volatility_factor": 0.7,
         "pairs": ["USDJPY", "AUDJPY", "EURJPY"],
-        "min_range_pips": 10,
-        "max_range_pips": 100
+        "min_range_pips": 4,    # Decreased from 6
+        "max_range_pips": 130   # Increased from 115
     },
     "london_session": {
         "start": "08:00",  # UTC
         "end": "16:00",    # UTC
-        "volatility_factor": 1.0,  # Normal volatility
+        "volatility_factor": 1.0,
         "pairs": ["EURUSD", "GBPUSD", "EURGBP", "USDJPY"],
-        "min_range_pips": 10,
-        "max_range_pips": 150
+        "min_range_pips": 5,    # Decreased from 6
+        "max_range_pips": 200   # Increased from 173
     },
     "new_york_session": {
         "start": "13:00",  # UTC
         "end": "21:00",    # UTC
-        "volatility_factor": 1.0,  # Normal volatility
+        "volatility_factor": 1.0,
         "pairs": ["EURUSD", "GBPUSD", "USDCAD", "USDJPY"],
-        "min_range_pips": 10,
-        "max_range_pips": 150
+        "min_range_pips": 5,    # Decreased from 6
+        "max_range_pips": 200   # Increased from 173
     }
 }
 
 # Market Structure Configuration
 MARKET_STRUCTURE_CONFIG = {
     "swing_detection": {
-        "lookback_periods": 10,
-        "threshold_pips": 5,
-        "min_swing_pips": 15
+        "H4": {
+            "lookback_periods": 10,
+            "threshold_pips": 3,
+            "min_swing_pips": 10
+        },
+        "H1": {
+            "lookback_periods": 8,
+            "threshold_pips": 2.5,
+            "min_swing_pips": 8
+        },
+        "M15": {
+            "lookback_periods": 6,
+            "threshold_pips": 1.5,
+            "min_swing_pips": 5
+        },
+        "M5": {
+            "lookback_periods": 5,
+            "threshold_pips": 1.0,
+            "min_swing_pips": 3
+        }
     },
     "structure_levels": {
-        "ob_size": 10,      # Order block size in pips
-        "fvg_threshold": 5,  # Fair value gap threshold in pips
-        "bos_threshold": 5   # Break of structure threshold in pips
+        "H4": {
+            "ob_size": 5.0,
+            "fvg_threshold": 2.5,
+            "bos_threshold": 2.5
+        },
+        "H1": {
+            "ob_size": 4.0,
+            "fvg_threshold": 2.0,
+            "bos_threshold": 2.0
+        },
+        "M15": {
+            "ob_size": 2.5,
+            "fvg_threshold": 1.5,
+            "bos_threshold": 1.5
+        },
+        "M5": {
+            "ob_size": 1.5,
+            "fvg_threshold": 1.0,
+            "bos_threshold": 1.0
+        }
     },
     "timeframe_weights": {
-        "TIMEFRAME_H4": 1.0,
-        "TIMEFRAME_H1": 0.8,
-        "TIMEFRAME_M15": 0.6,
-        "TIMEFRAME_M5": 0.4
+        "H4": 1.0,
+        "H1": 0.8,
+        "M15": 0.7,
+        "M5": 0.5
     }
+}
+
+# Signal Classification Thresholds
+SIGNAL_THRESHOLDS = {
+    "strong": 0.6,    # Decreased from 0.7
+    "moderate": 0.4,  # Decreased from 0.5
+    "weak": 0.25      # Decreased from 0.3
+}
+
+# Confirmation Requirements
+CONFIRMATION_CONFIG = {
+    "min_required": 2,  # Reduced from 3
+    "weights": {
+        "smt_divergence": 0.3,
+        "liquidity_sweep": 0.3,
+        "momentum": 0.2,
+        "pattern": 0.2
+    }
+}
+
+# Backtesting Configuration
+BACKTEST_CONFIG = {
+    "start_date": "2024-01-01",  # Start date for backtesting
+    "end_date": "2024-03-14",    # End date for backtesting
+    "initial_balance": 10000,     # Initial account balance for backtesting
+    "commission": 0.0001,         # Commission per trade (0.01%)
+    "spread": 2,                  # Spread in points
+    "symbols": ["EURUSD", "GBPUSD", "USDJPY"],  # Symbols to backtest
+    "timeframes": ["M15", "H1", "H4"],          # Timeframes to analyze
+    "risk_per_trade": 0.01,      # Risk per trade (1% of balance)
+    "enable_visualization": True, # Enable trade visualization
+    "save_results": True,        # Save backtest results to file
+    "results_dir": "backtest_results"  # Directory to save results
 } 

@@ -99,29 +99,190 @@ Flexible configuration system:
 - Session rules
 - Integration settings
 
+## Market Analysis Components
+
+### 1. Market Structure Analysis
+The market structure analysis has been enhanced with the following components:
+
+#### Order Block Detection
+- Dynamic threshold calculation based on volatility
+- Strength scoring system for order blocks
+- Filtering mechanism for high-probability setups
+- Integration with price action confirmation
+
+#### Structure Break Analysis
+- Enhanced break detection algorithm
+- Strength measurement for structure breaks
+- Trend continuation validation
+- Integration with multi-timeframe confirmation
+
+#### Fair Value Gap Analysis
+- Dynamic gap threshold calculation
+- Quality scoring system
+- Time-based decay factor
+- Volume confirmation integration
+
+### 2. Multi-Timeframe Analysis
+
+#### Timeframe Hierarchy
+- Primary: Trading timeframe (M5, M15, H1, H4)
+- Secondary: Next higher timeframe
+- Tertiary: Two timeframes higher
+- Reference: Daily timeframe
+
+#### Alignment Scoring
+- Dynamic weight distribution
+- Confidence factor calculation
+- Bias strength measurement
+- Trend continuation probability
+
+### 3. Signal Generation
+
+#### Component Integration
+```
+Market Structure (45%)
+  ├── Order Blocks
+  ├── Structure Breaks
+  └── Fair Value Gaps
+
+Volume Analysis (25%)
+  ├── Volume Profile
+  ├── Delta Volume
+  └── Volume Imbalance
+
+Smart Money Concepts (20%)
+  ├── Liquidity Voids
+  ├── Inefficient Price Movement
+  └── Institutional Interest
+
+Multi-Timeframe (10%)
+  ├── Trend Alignment
+  ├── Structure Alignment
+  └── Momentum Alignment
+```
+
+#### Signal Validation
+- Minimum 2 confirmations required
+- Dynamic threshold adjustment
+- Timeframe-specific validation rules
+- Currency pair specific requirements
+
+### 4. Risk Management
+
+#### Position Sizing
+- Volatility-adjusted sizing
+- Account balance consideration
+- Maximum position limits
+- Currency pair risk factors
+
+#### Stop Loss Calculation
+- Dynamic ATR multipliers
+- Market structure integration
+- Volatility-based adjustment
+- Minimum distance requirements
+
+## System Flow
+
+```mermaid
+graph TD
+    A[Market Data] --> B[Market Structure Analysis]
+    A --> C[Multi-Timeframe Analysis]
+    A --> D[Volume Analysis]
+    B --> E[Signal Generation]
+    C --> E
+    D --> E
+    E --> F[Risk Management]
+    F --> G[Order Execution]
+    G --> H[Position Management]
+```
+
 ## Data Flow
 
-1. Market Data Collection
-   - MT5Handler fetches data
-   - Multiple timeframes processed
-   - Technical indicators calculated
+### 1. Data Collection
+- Real-time price data from MT5
+- Historical data caching
+- Volume profile aggregation
+- Market structure mapping
 
-2. Analysis Pipeline
-   - Each analyzer processes data
-   - Results combined in SignalGenerator
-   - Final signals generated
+### 2. Analysis Pipeline
+- Market structure detection
+- Multi-timeframe alignment
+- Volume analysis integration
+- Signal score calculation
 
-3. Trade Execution
-   - Risk checks performed
-   - Orders placed through MT5
-   - Positions monitored
-   - Alerts sent via Telegram
+### 3. Execution Flow
+- Signal validation
+- Risk calculation
+- Order placement
+- Position monitoring
 
-4. Monitoring & Feedback
-   - Dashboard updated
-   - Logs generated
-   - Performance tracked
-   - Alerts handled
+## Configuration Management
+
+### 1. Timeframe Settings
+```python
+TIMEFRAME_SETTINGS = {
+    'M5': {
+        'base_score': 0.75,
+        'ranging_market': 0.4,
+        'trending_market': 0.8,
+        'volatility_filter': 1.2,
+        'min_trend_strength': 0.65
+    },
+    'M15': {
+        'base_score': 0.65,
+        'ranging_market': 0.35,
+        'trending_market': 0.75,
+        'volatility_filter': 1.3,
+        'min_trend_strength': 0.6
+    },
+    # ... other timeframes
+}
+```
+
+### 2. Component Weights
+```python
+COMPONENT_WEIGHTS = {
+    'M5': {
+        'structure': 0.45,
+        'volume': 0.25,
+        'smc': 0.20,
+        'mtf': 0.10
+    },
+    # ... other timeframes
+}
+```
+
+### 3. Currency Pair Settings
+```python
+PAIR_SETTINGS = {
+    'EURUSD': {
+        'multiplier': 1.00,
+        'volatility_threshold': 1.5,
+        'min_range': 0.0010
+    },
+    # ... other pairs
+}
+```
+
+## Performance Optimization
+
+### 1. Data Management
+- Efficient data caching
+- Optimized calculations
+- Memory usage optimization
+- Thread management
+
+### 2. Analysis Optimization
+- Parallel processing
+- Calculation reuse
+- Selective update
+- Resource management
+
+### 3. Execution Optimization
+- Queue management
+- Priority handling
+- Error recovery
+- State management
 
 ## Error Handling
 

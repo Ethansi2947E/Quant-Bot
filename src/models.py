@@ -1,9 +1,10 @@
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base, DeclarativeBase
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
 class MarketData(Base):
     __tablename__ = 'market_data'
@@ -43,23 +44,26 @@ class Trade(Base):
     
     id = Column(Integer, primary_key=True)
     signal_id = Column(Integer, ForeignKey('signals.id'))
-    symbol = Column(String, nullable=False)
-    entry_time = Column(DateTime, nullable=False)
+    symbol = Column(String(20), nullable=False)
+    direction = Column(String(10), nullable=False)  # 'buy' or 'sell'
     entry_price = Column(Float, nullable=False)
-    position_size = Column(Float, nullable=False)
-    direction = Column(String, nullable=False)  # LONG, SHORT
     stop_loss = Column(Float, nullable=False)
     take_profit = Column(Float, nullable=False)
-    exit_time = Column(DateTime)
-    exit_price = Column(Float)
-    pnl = Column(Float)
-    status = Column(String, default='OPEN')  # OPEN, CLOSED, CANCELLED
+    position_size = Column(Float, nullable=False)
+    entry_time = Column(DateTime, nullable=False)
+    exit_time = Column(DateTime, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    profit_loss = Column(Float, nullable=True)
+    status = Column(String(20), nullable=False)  # 'open', 'closed', 'cancelled'
+    is_successful = Column(Boolean, nullable=True)
     notes = Column(String)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    timeframe = Column(String, nullable=False)
     
     signal = relationship("Signal", backref="trades")
     
     def __repr__(self):
-        return f"<Trade(symbol='{self.symbol}', direction='{self.direction}', status='{self.status}')>"
+        return f"<Trade(symbol='{self.symbol}', direction='{self.direction}', entry_price={self.entry_price})>"
 
 class NewsEvent(Base):
     __tablename__ = 'news_events'

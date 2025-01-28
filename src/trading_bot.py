@@ -9,7 +9,7 @@ import MetaTrader5 as mt5
 import numpy as np
 import threading
 
-from config.config import TRADING_CONFIG, SESSION_CONFIG, MT5_CONFIG, MARKET_STRUCTURE_CONFIG
+from config.config import TRADING_CONFIG, SESSION_CONFIG, MT5_CONFIG, MARKET_STRUCTURE_CONFIG, SIGNAL_THRESHOLDS, CONFIRMATION_CONFIG
 from src.mt5_handler import MT5Handler
 from src.signal_generator import SignalGenerator
 from src.risk_manager import RiskManager
@@ -584,60 +584,96 @@ class TradingBot:
         """Generate trading signals based on market analysis."""
         logger.info(f"Generating signals for {symbol} on {timeframe}")
         
-        # Apply primary filters
+        # Apply primary filters with relaxed conditions
         tf_alignment = await self.check_timeframe_alignment(analysis)
         session_check = self.check_session_conditions(analysis)
         
         logger.debug(f"Primary Filters: TF_Alignment={tf_alignment}, Session_Check={session_check}")
         
-        if not (tf_alignment and session_check):
+        # Allow signals even if timeframe alignment is not perfect
+        if not session_check:  # Only require session check
             logger.debug(f"Primary filters not passed for {symbol}")
             return None
             
-        # Calculate confirmation score
+        # Calculate confirmation score using weights from config
         confirmation_score = 0
+        confirmations_met = 0
         
         # Check SMT divergence
         smt_divergence = self.check_smt_divergence(analysis)
         if smt_divergence:
-            confirmation_score += 0.6  # 60% weight for SMT divergence
+            confirmation_score += CONFIRMATION_CONFIG["weights"]["smt_divergence"] * 1.2  # Increased weight
+            confirmations_met += 1
         
         # Check liquidity
         liquidity = self.check_liquidity(analysis)
         if liquidity:
-            confirmation_score += 0.4  # 40% weight for liquidity
+            confirmation_score += CONFIRMATION_CONFIG["weights"]["liquidity_sweep"] * 1.1  # Increased weight
+            confirmations_met += 1
+            
+        # Check momentum
+        momentum = self.check_momentum(analysis)
+        if momentum:
+            confirmation_score += CONFIRMATION_CONFIG["weights"]["momentum"] * 1.2  # Increased weight
+            confirmations_met += 1
+            
+        # Check pattern
+        pattern = self.check_pattern(analysis)
+        if pattern:
+            confirmation_score += CONFIRMATION_CONFIG["weights"]["pattern"] * 1.1  # Increased weight
+            confirmations_met += 1
         
-        logger.debug(f"Confirmation Score: {confirmation_score:.2f} (SMT={smt_divergence}, Liquidity={liquidity})")
+        logger.debug(f"Confirmation Score: {confirmation_score:.2f} (SMT={smt_divergence}, Liquidity={liquidity}, Momentum={momentum}, Pattern={pattern})")
         
-        # Generate signal based on trend and confirmation score
-        if analysis['trend'] == "Bullish":
-            if confirmation_score >= 0.6:  # Require at least SMT divergence or liquidity + partial other signal
-                signal = "BUY"
-                confidence = int(70 + (confirmation_score * 30))  # Scale 70-100 based on confirmation
-            else:
-                signal = "HOLD"
-                confidence = 50
-        elif analysis['trend'] == "Bearish":
-            if confirmation_score >= 0.6:
-                signal = "SELL"
-                confidence = int(70 + (confirmation_score * 30))
-            else:
-                signal = "HOLD"
-                confidence = 50
-        else:
+        # Reduced minimum required confirmations
+        min_required = max(1, CONFIRMATION_CONFIG["min_required"] - 1)  # At least 1 confirmation required
+        
+        # Check if minimum required confirmations are met
+        if confirmations_met < min_required:
+            logger.debug(f"Insufficient confirmations: {confirmations_met}/{min_required}")
             signal = "HOLD"
             confidence = 50
-            
+        else:
+            # Generate signal based on trend and confirmation score with relaxed thresholds
+            if analysis['trend'] == "Bullish":
+                if confirmation_score >= SIGNAL_THRESHOLDS["weak"]:  # Changed from moderate to weak
+                    signal = "BUY"
+                    confidence = int(60 + (confirmation_score * 40))  # Scale 60-100 based on confirmation
+                else:
+                    signal = "HOLD"
+                    confidence = 50
+            elif analysis['trend'] == "Bearish":
+                if confirmation_score >= SIGNAL_THRESHOLDS["weak"]:  # Changed from moderate to weak
+                    signal = "SELL"
+                    confidence = int(60 + (confirmation_score * 40))
+                else:
+                    signal = "HOLD"
+                    confidence = 50
+            else:
+                signal = "HOLD"
+                confidence = 50
+                
         logger.info(f"Generated {signal} signal for {symbol} with {confidence}% confidence")
         
-        # Add signal to dashboard
+        # Add signal to dashboard with adjusted risk parameters
         add_signal({
             'symbol': symbol,
             'type': signal,
             'price': analysis['pois']['current_price'],
             'confidence': confidence,
             'trend': analysis['trend'],
-            'session': analysis['session']
+            'session': analysis['session'],
+            'confirmations': {
+                'total': confirmations_met,
+                'required': min_required,
+                'score': confirmation_score,
+                'details': {
+                    'smt': smt_divergence,
+                    'liquidity': liquidity,
+                    'momentum': momentum,
+                    'pattern': pattern
+                }
+            }
         })
         
         return [{
@@ -651,36 +687,40 @@ class TradingBot:
         }]
 
     async def check_timeframe_alignment(self, analysis):
-        """Check if the trend aligns across timeframes."""
+        """Check if trend aligns across multiple timeframes."""
         try:
-            if not analysis or "timeframe" not in analysis or "symbol" not in analysis:
-                logger.error("Invalid analysis data for timeframe alignment check")
-                return False
+            current_tf = analysis['timeframe']
+            current_trend = analysis['trend']
             
-            # Get data for higher timeframes
-            higher_tf_data = {}
+            # Get list of configured timeframes
             timeframes = self.trading_config["timeframes"]
-            current_tf_idx = timeframes.index(analysis["timeframe"])
             
-            # Check if we have higher timeframes to check
-            if current_tf_idx >= len(timeframes) - 1:
-                logger.debug(f"No higher timeframes available for {analysis['timeframe']}")
-                return True  # Already at highest timeframe
+            # Find index of current timeframe
+            current_tf_index = timeframes.index(current_tf)
             
-            # Check alignment with higher timeframes
-            for tf in timeframes[current_tf_idx + 1:]:
-                tf_analysis = await self.analyze_market(analysis["symbol"], tf)
-                if tf_analysis and tf_analysis.get("trend") == analysis.get("trend"):
-                    higher_tf_data[tf] = tf_analysis
-                    logger.debug(f"Timeframe {tf} aligned with trend")
-            
-            # Require at least one higher timeframe alignment
-            is_aligned = len(higher_tf_data) > 0
-            logger.debug(f"Timeframe alignment result: {is_aligned}")
-            return is_aligned
+            # Check if there is a higher timeframe
+            if current_tf_index < len(timeframes) - 1:
+                higher_tf = timeframes[current_tf_index + 1]
+                
+                # Get trend on higher timeframe
+                higher_analysis = await self.analyze_market(analysis['symbol'], higher_tf)
+                higher_trend = higher_analysis['trend']
+                
+                logger.debug(f"Timeframe {higher_tf} trend: {higher_trend}")
+                
+                # Allow if higher timeframe is neutral or matches current trend
+                if higher_trend == current_trend or higher_trend == 'neutral':
+                    logger.debug(f"Timeframe {higher_tf} aligned with trend")
+                    return True
+                else:
+                    logger.debug(f"Timeframe {higher_tf} does not align with trend")
+                    return False
+            else:
+                logger.debug(f"No higher timeframe available for {current_tf}")
+                return True
             
         except Exception as e:
-            logger.error(f"Error in timeframe alignment check: {str(e)}")
+            logger.error(f"Error checking timeframe alignment: {str(e)}")
             return False
 
     def check_session_conditions(self, analysis):
@@ -690,7 +730,7 @@ class TradingBot:
                 logger.error("Invalid analysis data for session conditions check")
                 return False
             
-            session = analysis["session"]  # Get session name
+            session = analysis["session"]
             symbol = analysis["symbol"]
             
             # Add '_session' suffix if not present and not 'no_session'
@@ -716,9 +756,9 @@ class TradingBot:
                 volatility = self.calculate_volatility(symbol)
                 spread = self.get_spread(symbol)
                 
-                # Check volatility and spread conditions
-                volatility_ok = volatility >= session_rules["min_range_pips"]
-                spread_ok = spread <= session_rules.get("max_spread", float('inf'))
+                # Relaxed volatility and spread conditions
+                volatility_ok = volatility >= session_rules["min_range_pips"] * 0.8  # Reduced requirement by 20%
+                spread_ok = spread <= session_rules.get("max_spread", float('inf')) * 1.2  # Increased allowance by 20%
                 
                 logger.debug(f"Session conditions for {symbol}: Volatility={volatility_ok}, Spread={spread_ok}")
                 return volatility_ok and spread_ok
@@ -1152,6 +1192,51 @@ class TradingBot:
             return symbol in self.session_config[session_key]["pairs"]
         except Exception as e:
             logger.error(f"Error checking symbol session allowance: {str(e)}")
+            return False
+
+    def check_momentum(self, analysis: dict) -> bool:
+        """Check momentum confirmation using RSI and MACD."""
+        try:
+            # Get RSI and MACD values
+            rsi = analysis.get('indicators', {}).get('rsi', 50)
+            macd = analysis.get('indicators', {}).get('macd', {})
+            macd_line = macd.get('macd_line', 0)
+            signal_line = macd.get('signal_line', 0)
+            
+            # Relaxed momentum conditions
+            if analysis['trend'] == "Bullish":
+                return rsi > 45 and macd_line > signal_line  # Reduced from 50
+            elif analysis['trend'] == "Bearish":
+                return rsi < 55 and macd_line < signal_line  # Increased from 50
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking momentum: {str(e)}")
+            return False
+            
+    def check_pattern(self, analysis: dict) -> bool:
+        """Check for confirming price patterns."""
+        try:
+            patterns = analysis.get('patterns', [])
+            if not patterns:
+                return False
+                
+            # Get the most recent patterns (check last 2 patterns)
+            recent_patterns = patterns[-2:]
+            
+            # Check if any recent pattern confirms the trend
+            if analysis['trend'] == "Bullish":
+                bullish_patterns = ['bullish_engulfing', 'morning_star', 'hammer', 'piercing_line', 'three_white_soldiers']
+                return any(p['type'] in bullish_patterns for p in recent_patterns)
+            elif analysis['trend'] == "Bearish":
+                bearish_patterns = ['bearish_engulfing', 'evening_star', 'shooting_star', 'dark_cloud_cover', 'three_black_crows']
+                return any(p['type'] in bearish_patterns for p in recent_patterns)
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking pattern: {str(e)}")
             return False
 
 if __name__ == "__main__":

@@ -3,6 +3,125 @@
 ## Overview
 The trading bot uses a sophisticated multi-component analysis system to generate trading signals. Each component contributes to the final signal through a weighted scoring system.
 
+## Recent Updates and Optimizations
+
+### Timeframe-Specific Thresholds
+The system now implements optimized thresholds for different timeframes:
+
+#### M5 Timeframe
+- Base score threshold: 0.75 (increased from default)
+- Ranging market threshold: 0.4 (stricter detection)
+- Trending market threshold: 0.8 (higher requirement)
+- Volatility filter: 1.2 (stricter filter)
+- Minimum trend strength: 0.65
+- Risk:Reward ratio: 2.0
+
+#### M15 Timeframe
+- Base score threshold: 0.65
+- Ranging market threshold: 0.35
+- Trending market threshold: 0.75
+- Volatility filter: 1.3
+- Minimum trend strength: 0.6
+- Risk:Reward ratio: 2.0
+
+#### H1 Timeframe
+- Base score threshold: 0.6
+- Ranging market threshold: 0.3
+- Trending market threshold: 0.7
+- Volatility filter: 1.4
+- Minimum trend strength: 0.55
+- Risk:Reward ratio: 2.2
+
+#### H4 Timeframe
+- Base score threshold: 0.55
+- Ranging market threshold: 0.25
+- Trending market threshold: 0.65
+- Volatility filter: 1.5
+- Minimum trend strength: 0.5
+- Risk:Reward ratio: 2.5
+
+### Component Weights by Timeframe
+
+#### M5
+- Structure: 45% (increased focus)
+- Volume: 25%
+- SMC: 20%
+- MTF: 10%
+
+#### M15
+- Structure: 40%
+- Volume: 30%
+- SMC: 20%
+- MTF: 10%
+
+#### H1
+- Structure: 35%
+- Volume: 30%
+- SMC: 20%
+- MTF: 15%
+
+#### H4
+- Structure: 30%
+- Volume: 25%
+- SMC: 25%
+- MTF: 20%
+
+### Enhanced Market Analysis
+
+#### Order Block Detection
+- Improved order block identification with dynamic thresholds
+- Added strength scoring based on subsequent price action
+- Enhanced filtering for more reliable order blocks
+
+#### Structure Break Analysis
+- Refined break of structure detection
+- Added strength measurement for breaks
+- Implemented trend continuation validation
+
+#### Multi-Timeframe Analysis
+- Enhanced alignment scoring across timeframes
+- Added confidence factor based on available timeframes
+- Improved bias calculation with weighted components
+
+### Currency Pair Specific Optimizations
+
+#### EURUSD
+- Standard multiplier: 1.00
+- Enhanced trend validation
+- Strict volume confirmation requirements
+
+#### GBPUSD
+- Multiplier: 0.90
+- Additional volatility checks
+- Enhanced confluence requirements
+
+#### USDJPY
+- Multiplier: 0.85
+- Conservative approach
+- Stricter trend requirements
+
+#### AUDUSD
+- Multiplier: 1.15
+- Modified volatility thresholds
+- Adjusted score requirements
+
+### Risk Management Updates
+
+#### Dynamic Position Sizing
+- Adjusted based on volatility
+- Timeframe-specific risk multipliers
+- Enhanced drawdown protection
+
+#### Stop Loss Calculation
+- Dynamic ATR multipliers
+- Volatility-based adjustments
+- Trend strength considerations
+
+### Signal Validation
+- Minimum required confirmations reduced to 2
+- Enhanced confirmation weighting
+- Added timeframe-specific validation rules
+
 ## Analysis Components
 
 ### 1. Smart Money Concepts (SMC) Analysis (20% weight)

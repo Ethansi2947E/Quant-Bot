@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import pandas as pd
 import numpy as np
 from loguru import logger
@@ -13,6 +13,70 @@ class MTFAnalysis:
             "M15": 0.15,
             "M5": 0.10
         }
+    
+    def analyze(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame]], timeframe: Optional[str] = None) -> Union[float, Dict]:
+        """
+        Analyze price action for single or multiple timeframes.
+        
+        Args:
+            data: Either a single DataFrame with OHLCV data or a dictionary of DataFrames for multiple timeframes
+            timeframe: Optional timeframe identifier when passing a single DataFrame
+            
+        Returns:
+            Union[float, Dict]: Single timeframe score or multi-timeframe analysis results
+        """
+        try:
+            # Handle single timeframe analysis
+            if isinstance(data, pd.DataFrame):
+                return self._analyze_single_timeframe(data)
+            
+            # Handle multi-timeframe analysis
+            elif isinstance(data, dict):
+                return self.analyze_mtf(data)
+            
+            else:
+                raise ValueError("Data must be either a DataFrame or a dictionary of DataFrames")
+                
+        except Exception as e:
+            logger.error(f"Error in analysis: {str(e)}")
+            return 0.0 if isinstance(data, pd.DataFrame) else self._get_default_analysis()
+            
+    def _analyze_single_timeframe(self, df: pd.DataFrame) -> float:
+        """
+        Analyze a single timeframe's price action.
+        
+        Args:
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            float: Analysis score between -1 and 1
+        """
+        try:
+            # Calculate EMAs for different timeframes
+            ema_20 = df['close'].ewm(span=20).mean()
+            ema_50 = df['close'].ewm(span=50).mean()
+            ema_200 = df['close'].ewm(span=200).mean()
+            
+            # Calculate trend alignment score
+            trend_score = 0
+            
+            # Check EMA alignment
+            if ema_20.iloc[-1] > ema_50.iloc[-1] > ema_200.iloc[-1]:
+                trend_score = 1  # Strong uptrend
+            elif ema_20.iloc[-1] < ema_50.iloc[-1] < ema_200.iloc[-1]:
+                trend_score = -1  # Strong downtrend
+            else:
+                # Calculate partial trend score based on 20 and 50 EMAs
+                if ema_20.iloc[-1] > ema_50.iloc[-1]:
+                    trend_score = 0.5
+                elif ema_20.iloc[-1] < ema_50.iloc[-1]:
+                    trend_score = -0.5
+                    
+            return trend_score
+            
+        except Exception as e:
+            logger.error(f"Error in single timeframe analysis: {str(e)}")
+            return 0.0
     
     def analyze_mtf(self, dataframes: Dict[str, pd.DataFrame]) -> Dict:
         """Analyze price action across multiple timeframes."""
@@ -330,16 +394,24 @@ class MTFAnalysis:
     def _get_default_analysis(self) -> Dict:
         """Return default analysis when data is insufficient."""
         return {
-            'trend_alignment': {'aligned': False, 'score': 0},
-            'structure_alignment': {'aligned': False, 'score': 0},
-            'momentum_alignment': {'aligned': False, 'score': 0},
-            'overall_bias': {
+            'trend_alignment': {
                 'bias': 'neutral',
-                'strength': 'weak',
-                'raw_score': 0,
-                'adjusted_score': 0,
-                'confidence_factor': 0
+                'strength': 0,
+                'timeframes': {}
             },
-            'available_timeframes': [],
-            'confidence_factor': 0
+            'structure_alignment': {
+                'bias': 'neutral',
+                'strength': 0,
+                'timeframes': {}
+            },
+            'momentum_alignment': {
+                'bias': 'neutral',
+                'strength': 0,
+                'timeframes': {}
+            },
+            'overall_bias': {
+                'direction': 'neutral',
+                'strength': 0,
+                'confidence': 0
+            }
         } 

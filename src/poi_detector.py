@@ -88,7 +88,7 @@ class POIDetector:
                         zone_high, zone_low,
                         df['volume_ratio'].iloc[i]
                     )
-                    
+                        
                     # Create demand POI
                     poi = POI(
                         type='demand',

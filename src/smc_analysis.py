@@ -10,7 +10,7 @@ class SMCAnalysis:
         self.manipulation_threshold = 0.0015  # 15 pips for manipulation moves
         self.ob_threshold = 0.0015           # 15 pips for order block size
         
-    def analyze_smc(self, df: pd.DataFrame) -> Dict:
+    def analyze(self, df: pd.DataFrame) -> Dict:
         """Analyze Smart Money Concepts patterns and structures."""
         try:
             # Detect liquidity sweeps
@@ -53,7 +53,7 @@ class SMCAnalysis:
                 'mitigation_blocks': {'bullish': [], 'bearish': []},
                 'premium_discount_zones': {'premium': [], 'discount': []},
                 'inefficient_moves': [],
-                'order_flow': {'bullish': 0, 'bearish': 0}
+                'order_flow': {'bias': 'neutral', 'strength': 0}
             }
     
     def _detect_liquidity_sweeps(self, df: pd.DataFrame) -> List[Dict]:

@@ -213,6 +213,55 @@ class MT5Handler:
         
         return True
     
+    def get_historical_data(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Optional[pd.DataFrame]:
+        """Get historical data from MT5."""
+        if not self.connected:
+            logger.error("MT5 not connected")
+            return None
+        
+        timeframe_map = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1
+        }
+        
+        tf = timeframe_map.get(timeframe)
+        if tf is None:
+            logger.error(f"Invalid timeframe: {timeframe}")
+            return None
+        
+        rates = mt5.copy_rates_range(symbol, tf, start_date, end_date)
+        if rates is None:
+            logger.error(f"Failed to get historical data. Error: {mt5.last_error()}")
+            return None
+        
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
+        
+        # Add tick volume as volume
+        if 'tick_volume' in df.columns:
+            df['volume'] = df['tick_volume']
+        
+        return df
+
+    def shutdown(self):
+        """Shutdown MT5 connection."""
+        if self.connected:
+            mt5.shutdown()
+            self.connected = False
+            logger.info("MT5 connection closed")
+    
     def __del__(self):
         """Cleanup MT5 connection."""
         if self.connected:

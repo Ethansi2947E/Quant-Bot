@@ -9,7 +9,7 @@ class VolumeAnalysis:
         self.delta_threshold = 0.6  # 60% of average volume for significance
         self.profile_levels = 50    # Number of levels for volume profile
         
-    def analyze_volume(self, df: pd.DataFrame) -> Dict:
+    def analyze(self, df: pd.DataFrame) -> Dict:
         """Analyze volume patterns and indicators with data quality assessment."""
         try:
             # Check volume data quality
@@ -53,7 +53,7 @@ class VolumeAnalysis:
                 'momentum': 0,
                 'patterns': [],
                 'data_quality': 0,
-                'reason': f'Error in analysis: {str(e)}'
+                'reason': f'Analysis error: {str(e)}'
             }
             
     def _assess_volume_data_quality(self, df: pd.DataFrame) -> float:
@@ -267,6 +267,12 @@ class VolumeAnalysis:
         try:
             patterns = []
             
+            # Check if required columns exist
+            required_columns = ['volume', 'volume_sma', 'close', 'open']
+            if not all(col in df.columns for col in required_columns):
+                logger.warning("Missing required columns for volume pattern detection")
+                return []
+            
             for i in range(3, len(df)):
                 window = df.iloc[i-3:i+1]
                 
@@ -314,25 +320,29 @@ class VolumeAnalysis:
                 
                 # Smart Money Accumulation/Distribution
                 if df['volume'].iloc[i] > df['volume_sma'].iloc[i] * 1.5:
-                    price_change = abs(df['close'].iloc[i] - df['open'].iloc[i])
-                    avg_price_change = abs(df['close'] - df['open']).rolling(20).mean().iloc[i]
-                    
-                    # Accumulation (high volume, small price movement)
-                    if price_change < avg_price_change * 0.5:
-                        patterns.append({
-                            'type': 'accumulation',
-                            'index': i,
-                            'volume': df['volume'].iloc[i],
-                            'price': df['close'].iloc[i]
-                        })
-                    # Distribution (high volume, large price movement)
-                    elif price_change > avg_price_change * 2:
-                        patterns.append({
-                            'type': 'distribution',
-                            'index': i,
-                            'volume': df['volume'].iloc[i],
-                            'price': df['close'].iloc[i]
-                        })
+                    try:
+                        price_change = abs(df['close'].iloc[i] - df['open'].iloc[i])
+                        avg_price_change = abs(df['close'] - df['open']).rolling(20).mean().iloc[i]
+                        
+                        # Accumulation (high volume, small price movement)
+                        if price_change < avg_price_change * 0.5:
+                            patterns.append({
+                                'type': 'accumulation',
+                                'index': i,
+                                'volume': df['volume'].iloc[i],
+                                'price': df['close'].iloc[i]
+                            })
+                        # Distribution (high volume, large price movement)
+                        elif price_change > avg_price_change * 2:
+                            patterns.append({
+                                'type': 'distribution',
+                                'index': i,
+                                'volume': df['volume'].iloc[i],
+                                'price': df['close'].iloc[i]
+                            })
+                    except Exception as e:
+                        logger.debug(f"Error calculating price changes: {str(e)}")
+                        continue
             
             return patterns
             

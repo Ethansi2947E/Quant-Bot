@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime, time, UTC
 from typing import Dict, List, Tuple, Optional
 from loguru import logger
 from config.config import SESSION_CONFIG, MARKET_STRUCTURE_CONFIG
@@ -20,7 +20,7 @@ class MarketAnalysis:
         
     def get_current_session(self) -> Tuple[str, Dict]:
         """Determine the current trading session based on UTC time."""
-        current_time = datetime.utcnow().time()
+        current_time = datetime.now(UTC).time()
         
         for session_name, session_data in self.session_config.items():
             session_start = datetime.strptime(session_data['start'], '%H:%M').time()
@@ -267,12 +267,7 @@ class MarketAnalysis:
             'reason': 'Conditions suitable for trading'
         }
         
-    def analyze_market_structure(
-        self,
-        df: pd.DataFrame,
-        symbol: str,
-        timeframe: str
-    ) -> Dict:
+    def analyze_market_structure(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict:
         """Analyze market structure including swings, breaks, and order blocks."""
         try:
             # Get session conditions first
@@ -291,22 +286,20 @@ class MarketAnalysis:
                 'order_blocks': {'bullish': [], 'bearish': []},
                 'fair_value_gaps': {'bullish': [], 'bearish': []},
                 'liquidity_voids': [],
-                'session_analysis': session_analysis  # Include session analysis
+                'session_analysis': session_analysis
             }
 
             # Identify swing points
-            swing_highs = self._find_swing_points(df, 'high', window=5)
-            swing_lows = self._find_swing_points(df, 'low', window=5)
-            
-            result['swing_points']['highs'] = swing_highs
-            result['swing_points']['lows'] = swing_lows
+            swing_points = self._detect_swing_points(df['high'], 5)
+            result['swing_points']['highs'] = swing_points['highs']
+            result['swing_points']['lows'] = swing_points['lows']
 
             # Detect structure breaks
-            breaks = self._detect_structure_breaks(df, swing_highs, swing_lows)
+            breaks = self._detect_structure_breaks(df, result['swing_points']['highs'], result['swing_points']['lows'])
             result['structure_breaks'] = breaks
 
             # Identify order blocks
-            obs = self._identify_order_blocks(df, breaks)
+            obs = self._identify_order_blocks(df)
             result['order_blocks'] = obs
 
             # Find fair value gaps
@@ -318,7 +311,7 @@ class MarketAnalysis:
             result['liquidity_voids'] = voids
 
             # Determine market bias
-            result['market_bias'] = self._determine_market_bias(df, swing_highs, swing_lows, breaks)
+            result['market_bias'] = self._determine_market_bias(df, result['swing_points']['highs'], result['swing_points']['lows'], breaks)
 
             return result
 
@@ -326,87 +319,94 @@ class MarketAnalysis:
             logger.error(f"Error in market structure analysis: {str(e)}")
             return self._empty_analysis()
 
-    def _find_swing_points(self, df: pd.DataFrame, price_type: str, window: int = 5) -> List[Dict]:
-        """Identify swing highs or lows using window comparison."""
-        swings = []
-        price = df[price_type]
-        
-        for i in range(window, len(df) - window):
-            if price_type == 'high':
-                if price[i] == max(price[i-window:i+window+1]):
-                    swings.append({
+    def _detect_swing_points(self, price: pd.Series, window: int = 5) -> Dict[str, List[Dict]]:
+        """Detect swing highs and lows."""
+        try:
+            highs = []
+            lows = []
+            
+            for i in range(window, len(price) - window):
+                # Check for swing high
+                if price.iloc[i] == max(price.iloc[i-window:i+window+1]):
+                    highs.append({
                         'index': i,
-                        'price': price[i],
-                        'timestamp': df.index[i]
+                        'price': price.iloc[i],
+                        'time': price.index[i]
                     })
-            else:  # low
-                if price[i] == min(price[i-window:i+window+1]):
-                    swings.append({
+                
+                # Check for swing low
+                if price.iloc[i] == min(price.iloc[i-window:i+window+1]):
+                    lows.append({
                         'index': i,
-                        'price': price[i],
-                        'timestamp': df.index[i]
+                        'price': price.iloc[i],
+                        'time': price.index[i]
                     })
-        
-        return swings
+            
+            return {
+                'highs': highs,
+                'lows': lows
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting swing points: {str(e)}")
+            return {'highs': [], 'lows': []}
 
     def _detect_structure_breaks(self, df: pd.DataFrame, swing_highs: List[Dict], swing_lows: List[Dict]) -> List[Dict]:
         """Detect structure breaks based on swing point violations."""
-        breaks = []
-        
-        for i in range(1, len(swing_highs)):
-            # Bullish break
-            if swing_highs[i]['price'] > swing_highs[i-1]['price']:
-                breaks.append({
-                    'type': 'bullish',
-                    'price': swing_highs[i]['price'],
-                    'timestamp': swing_highs[i]['timestamp'],
-                    'strength': (swing_highs[i]['price'] - swing_highs[i-1]['price']) / swing_highs[i-1]['price']
-                })
-        
-        for i in range(1, len(swing_lows)):
-            # Bearish break
-            if swing_lows[i]['price'] < swing_lows[i-1]['price']:
-                breaks.append({
-                    'type': 'bearish',
-                    'price': swing_lows[i]['price'],
-                    'timestamp': swing_lows[i]['timestamp'],
-                    'strength': (swing_lows[i-1]['price'] - swing_lows[i]['price']) / swing_lows[i-1]['price']
-                })
-        
-        return breaks
+        try:
+            breaks = []
+            
+            for i in range(1, len(swing_highs)):
+                # Bullish break
+                if swing_highs[i]['price'] > swing_highs[i-1]['price']:
+                    breaks.append({
+                        'type': 'bullish',
+                        'price': swing_highs[i]['price'],
+                        'timestamp': swing_highs[i]['timestamp'],
+                        'strength': (swing_highs[i]['price'] - swing_highs[i-1]['price']) / swing_highs[i-1]['price']
+                    })
+            
+            for i in range(1, len(swing_lows)):
+                # Bearish break
+                if swing_lows[i]['price'] < swing_lows[i-1]['price']:
+                    breaks.append({
+                        'type': 'bearish',
+                        'price': swing_lows[i]['price'],
+                        'timestamp': swing_lows[i]['timestamp'],
+                        'strength': (swing_lows[i-1]['price'] - swing_lows[i]['price']) / swing_lows[i-1]['price']
+                    })
+            
+            return breaks
+            
+        except Exception as e:
+            logger.error(f"Error detecting structure breaks: {str(e)}")
+            return []
 
-    def _identify_order_blocks(self, df: pd.DataFrame, breaks: List[Dict]) -> Dict:
-        """Identify bullish and bearish order blocks."""
-        obs = {'bullish': [], 'bearish': []}
-        
-        for break_point in breaks:
-            idx = df.index.get_loc(break_point['timestamp'])
-            
-            if break_point['type'] == 'bullish':
-                # Look for bearish candle before bullish break
-                for i in range(max(0, idx-5), idx):
-                    if df['close'].iloc[i] < df['open'].iloc[i]:  # Bearish candle
-                        obs['bullish'].append({
-                            'high': df['high'].iloc[i],
-                            'low': df['low'].iloc[i],
-                            'timestamp': df.index[i],
-                            'strength': break_point['strength']
-                        })
-                        break
-            
-            else:  # bearish break
-                # Look for bullish candle before bearish break
-                for i in range(max(0, idx-5), idx):
-                    if df['close'].iloc[i] > df['open'].iloc[i]:  # Bullish candle
-                        obs['bearish'].append({
-                            'high': df['high'].iloc[i],
-                            'low': df['low'].iloc[i],
-                            'timestamp': df.index[i],
-                            'strength': break_point['strength']
-                        })
-                        break
-        
-        return obs
+    def _identify_order_blocks(self, df: pd.DataFrame) -> List[Dict]:
+        """Identify order blocks in the price action."""
+        try:
+            order_blocks = []
+            for i in range(1, len(df) - 1):
+                # Check for bullish order block
+                if (df['low'].iloc[i] < df['low'].iloc[i-1] and 
+                    df['high'].iloc[i+1] > df['high'].iloc[i]):
+                    order_blocks.append({
+                        'type': 'bullish',
+                        'price': df['low'].iloc[i],
+                        'index': i
+                    })
+                # Check for bearish order block
+                elif (df['high'].iloc[i] > df['high'].iloc[i-1] and 
+                      df['low'].iloc[i+1] < df['low'].iloc[i]):
+                    order_blocks.append({
+                        'type': 'bearish',
+                        'price': df['high'].iloc[i],
+                        'index': i
+                    })
+            return order_blocks
+        except Exception as e:
+            logger.error(f"Error identifying order blocks: {str(e)}")
+            return []
 
     def _find_fair_value_gaps(self, df: pd.DataFrame) -> Dict:
         """Identify fair value gaps in price action."""
@@ -509,17 +509,49 @@ class MarketAnalysis:
             return 'neutral'
 
     def _empty_analysis(self) -> Dict:
-        """Return empty analysis structure."""
+        """Return an empty analysis result structure."""
         return {
-            'market_bias': 'neutral',
-            'swing_points': {'highs': [], 'lows': []},
-            'structure_breaks': [],
-            'order_blocks': {'bullish': [], 'bearish': []},
-            'fair_value_gaps': {'bullish': [], 'bearish': []},
-            'liquidity_voids': [],
-            'session_analysis': {
-                'session': 'no_session',
-                'suitable_for_trading': False,
-                'reason': 'Analysis error'
+            "market_structure": {},
+            "session_conditions": {},
+            "swing_points": ([], []),
+            "order_blocks": {"bullish": [], "bearish": []},
+            "fair_value_gaps": {"bullish": [], "bearish": []},
+            "structure_breaks": []
+        }
+
+    def analyze(self, df: pd.DataFrame, symbol: str = "UNKNOWN", timeframe: str = "UNKNOWN") -> Dict:
+        """Perform comprehensive market analysis."""
+        if df.empty:
+            return self._empty_analysis()
+            
+        try:
+            # Get swing points
+            swing_points = self._detect_swing_points(df['high'], 5)
+            
+            # Detect order blocks
+            order_blocks = self._identify_order_blocks(df)
+            
+            # Detect fair value gaps
+            fair_value_gaps = self.detect_fair_value_gaps(df)
+            
+            # Detect structure breaks
+            structure_breaks = self.detect_structure_breaks(df, swing_points)
+            
+            # Analyze market structure
+            market_structure = self.analyze_market_structure(df, symbol, timeframe)
+            
+            # Analyze session conditions
+            session_conditions = self.analyze_session_conditions(df, symbol)
+            
+            return {
+                "market_structure": market_structure,
+                "session_conditions": session_conditions,
+                "swing_points": swing_points,
+                "order_blocks": order_blocks,
+                "fair_value_gaps": fair_value_gaps,
+                "structure_breaks": structure_breaks
             }
-        } 
+            
+        except Exception as e:
+            logger.error(f"Error in market analysis: {str(e)}")
+            return self._empty_analysis() 

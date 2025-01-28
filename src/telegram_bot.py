@@ -3,7 +3,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from typing import Dict, List, Optional
 from loguru import logger
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 import pandas as pd
 import asyncio
 from httpx import ConnectError
@@ -24,6 +24,7 @@ class TelegramBot:
             'max_drawdown': 0.0,
             'win_rate': 0.0
         }
+        self.allowed_user_ids = TELEGRAM_CONFIG.get("allowed_user_ids", [])
     
     async def initialize(self, config):
         """Initialize the Telegram bot."""
@@ -72,8 +73,8 @@ class TelegramBot:
             
             for attempt in range(max_retries):
                 try:
-            await self.application.initialize()
-            await self.application.start()
+                    await self.application.initialize()
+                    await self.application.start()
                     await self.application.updater.start_polling()
                     break
                 except ConnectError as e:
@@ -263,7 +264,7 @@ Use /enable to resume trading"""
 
 Trading Status: {'🟢 Enabled' if self.trading_enabled else '🔴 Disabled'}
 Total Trades: {self.performance_metrics['total_trades']}
-Active Since: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Active Since: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}
 
 Use /metrics for detailed performance stats
 Use /{'disable' if self.trading_enabled else 'enable'} to {'stop' if self.trading_enabled else 'start'} trading"""
@@ -311,7 +312,7 @@ Win Rate: {win_rate:.2f}%
 Total Profit: {self.performance_metrics['total_profit']:.2f}
 Max Drawdown: {self.performance_metrics['max_drawdown']:.2f}%
 
-Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+Last Updated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
             
             await update.message.reply_text(metrics_text, parse_mode='HTML')
         else:
@@ -365,7 +366,7 @@ Timeframe: {timeframe}
 Setup: {setup_type}
 Confidence: {confidence:.1f}%
 
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
             
             await self.send_message(alert_msg)
 
@@ -381,7 +382,7 @@ Old Value: {old_value:.5f}
 New Value: {new_value:.5f}
 Reason: {reason}
 
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
             
             await self.send_message(alert_msg)
 
@@ -403,32 +404,131 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
             'entry': trade_result['entry'],
             'exit': trade_result['exit'],
             'pnl': trade_result['pnl'],
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'time': datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
         })
         
         # Keep only last 100 trades in history
         if len(self.trade_history) > 100:
             self.trade_history = self.trade_history[-100:]
     
-    async def send_trade_alert(self, symbol, signal_type, entry, sl, tp, confidence, reason):
-        """Send trade alert to Telegram."""
-        if self.bot:
-            message = (
-                f"🚨 TRADE ALERT 🚨\n\n"
-                f"Symbol: {symbol}\n"
-                f"Signal: {signal_type}\n"
-                f"Entry: {entry:.5f}\n"
-                f"Stop Loss: {sl:.5f}\n"
-                f"Take Profit: {tp:.5f}\n"
-                f"Confidence: {confidence}%\n"
-                f"Reason: {reason}"
-            )
+    async def send_performance_update(
+        self,
+        chat_id: int,
+        total_trades: int,
+        winning_trades: int,
+        total_profit: float
+    ):
+        """Send a performance update."""
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        message = f"""📊 <b>Performance Update</b>
+
+Total Trades: {total_trades}
+Winning Trades: {winning_trades}
+Win Rate: {int(win_rate)}%
+Total Profit: {total_profit:.2f}
+
+Keep up the good work! 📈"""
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML'
+        )
+
+    async def send_trade_alert(
+        self,
+        chat_id: int,
+        symbol: str,
+        direction: str,
+        entry: float,
+        sl: float,
+        tp: float,
+        confidence: float,
+        reason: str
+    ):
+        """Send a trade alert to a specific chat."""
+        message = self.format_alert(symbol, direction, entry, sl, tp, confidence, reason)
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML'
+        )
+
+    def format_alert(
+        self,
+        symbol: str,
+        direction: str,
+        entry: float,
+        sl: float,
+        tp: float,
+        confidence: float,
+        reason: str
+    ) -> str:
+        """Format a trade alert message."""
+        return f"""🔔 <b>Trade Alert</b>
+
+Symbol: {symbol}
+Direction: {direction}
+Entry: {entry:.5f}
+Stop Loss: {sl:.5f}
+Take Profit: {tp:.5f}
+Confidence: {confidence*100:.0f}%
+Reason: {reason}
+
+⚠️ Trade at your own risk."""
+
+    async def notify_error(self, chat_id: int, error: str):
+        """Send an error notification."""
+        error_message = f"""⚠️ <b>Error Alert</b>
+
+{error}
+
+Please check the logs for more details."""
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text=error_message,
+            parse_mode='HTML'
+        )
+
+    async def notify_performance(self, chat_id: str, data: Dict):
+        """Send performance update to specified chat."""
+        try:
+            win_rate = (data['winning_trades'] / data['total_trades'] * 100) if data['total_trades'] > 0 else 0
             
-            for user_id in TELEGRAM_CONFIG["allowed_user_ids"]:
-                try:
-                    await self.bot.send_message(chat_id=user_id, text=message)
-                except Exception as e:
-                    logger.error(f"Failed to send trade alert to {user_id}: {str(e)}")
+            message = f"""📊 <b>Performance Update</b> 📊
+
+Total Trades: {data['total_trades']}
+Winning Trades: {data['winning_trades']}
+Win Rate: {win_rate:.1f}%
+Total Profit: {data['profit']:.2f}
+
+Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
+
+            if self.bot:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+        except Exception as e:
+            logger.error(f"Error sending performance update: {str(e)}")
+
+    async def process_command(self, message):
+        """Process a command message."""
+        if message.text == "/start":
+            welcome_message = """👋 <b>Welcome to Trading Bot!</b>
+
+Thank you for using our service. Use /help to see available commands.
+
+Stay profitable! 📈"""
+            await self.bot.send_message(
+                chat_id=message.chat.id,
+                text=welcome_message,
+                parse_mode='HTML'
+            )
+
+    async def check_auth(self, chat_id: int) -> bool:
+        """Check if a user is authorized."""
+        return str(chat_id) in self.allowed_user_ids
     
     async def send_error_alert(self, error_message):
         """Send error alert to Telegram."""
@@ -450,8 +550,8 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
             try:
                 if self.application.updater:
                     await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
+                await self.application.stop()
+                await self.application.shutdown()
                 logger.info("Telegram bot stopped successfully")
             except asyncio.CancelledError:
                 logger.warning("Polling task cancelled. This is expected during bot shutdown.")
@@ -493,7 +593,7 @@ Price: {price:.5f}"""
         if pnl is not None:
             update_msg += f"\nPnL: {pnl:.2f}"
         
-        update_msg += f"\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        update_msg += f"\nTime: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
         
         await self.send_message(update_msg)
     
@@ -506,9 +606,10 @@ Price: {price:.5f}"""
         source: str
     ):
         """Send news alert to users."""
-        sentiment_emoji = "🟢" if sentiment > 0 else "🔴" if sentiment < 0 else "⚪"
-        
-        alert_msg = f"""📰 <b>News Alert</b> 📰
+        try:
+            sentiment_emoji = "🟢" if sentiment > 0 else "🔴" if sentiment < 0 else "⚪"
+            
+            alert_msg = f"""📰 <b>News Alert</b> 📰
 
 Symbol: {symbol}
 Impact: {impact}
@@ -517,6 +618,9 @@ Title: {title}
 Source: {source}
 Sentiment: {sentiment_emoji} {sentiment:.2f}
 
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        
-        await self.send_message(alert_msg) 
+Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
+            
+            await self.send_message(alert_msg)
+        except Exception as e:
+            logger.error(f"Error sending news alert: {str(e)}")
+            pass 
