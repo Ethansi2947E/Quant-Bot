@@ -1,5 +1,7 @@
 # Advanced MT5 Trading Bot
 
+[GitHub Repository](https://github.com/Ethansi2947E/Trading-bot2)
+
 A sophisticated algorithmic trading bot that integrates with MetaTrader 5, featuring advanced technical analysis, risk management, and real-time notifications via Telegram.
 
 ## Features
