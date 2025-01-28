@@ -37,8 +37,8 @@ A sophisticated algorithmic trading bot that integrates with MetaTrader 5, featu
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/trading-bot.git
-cd trading-bot
+git clone https://github.com/Ethansi2947E/Trading-bot2
+cd Trading-bot2
 ```
 
 2. Create and activate virtual environment:
