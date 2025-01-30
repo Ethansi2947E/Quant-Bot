@@ -7,6 +7,11 @@ def print_detailed_analysis(results, config):
     """Print detailed analysis of backtest results."""
     trades = results['trades']
     
+    # Print configuration header
+    logger.info("\n=== DETAILED BACKTEST ANALYSIS ===")
+    logger.info(f"\nAnalysis for {', '.join(config['symbols'])} on {', '.join(config['timeframes'])} timeframe(s)")
+    logger.info(f"Period: {config['start_date']} to {config['end_date']}")
+    
     # Calculate additional metrics
     winning_trades = [t for t in trades if t.pnl > 0]
     losing_trades = [t for t in trades if t.pnl < 0]
@@ -34,12 +39,12 @@ def print_detailed_analysis(results, config):
     logger.info("\nProfitability Analysis:")
     logger.info(f"| {'Metric':<30} | {'Value':<20} |")
     logger.info(f"| {'-'*30} | {'-'*20} |")
-    logger.info(f"| {'Total Winning Trades':<30} | {len(winning_trades):<20} |")
-    logger.info(f"| {'Total Losing Trades':<30} | {len(losing_trades):<20} |")
-    logger.info(f"| {'Average Profit per Winning Trade':<30} | ${avg_profit:.2f:<20} |")
-    logger.info(f"| {'Average Loss per Losing Trade':<30} | ${avg_loss:.2f:<20} |")
-    logger.info(f"| {'Largest Win':<30} | ${largest_win:.2f:<20} |")
-    logger.info(f"| {'Largest Loss':<30} | ${largest_loss:.2f:<20} |")
+    logger.info(f"| {'Total Winning Trades':<30} | {len(winning_trades):>20} |")
+    logger.info(f"| {'Total Losing Trades':<30} | {len(losing_trades):>20} |")
+    logger.info(f"| {'Average Profit per Winning Trade':<30} | ${avg_profit:>19.2f} |")
+    logger.info(f"| {'Average Loss per Losing Trade':<30} | ${avg_loss:>19.2f} |")
+    logger.info(f"| {'Largest Win':<30} | ${largest_win:>19.2f} |")
+    logger.info(f"| {'Largest Loss':<30} | ${largest_loss:>19.2f} |")
     
     logger.info("\nTime Analysis:")
     logger.info("Trades by Hour:")
@@ -108,8 +113,8 @@ def main():
     logger.info(f"| {'End Date':<20} | {config['end_date']:<20} |")
     logger.info(f"| {'Symbols':<20} | {', '.join(config['symbols']):<20} |")
     logger.info(f"| {'Timeframes':<20} | {', '.join(config['timeframes']):<20} |")
-    logger.info(f"| {'Initial Balance':<20} | ${config['initial_balance']:.2f:<20} |")
-    logger.info(f"| {'Risk per Trade':<20} | {config['risk_per_trade'] * 100:.2f}%:<20 |")
+    logger.info(f"| {'Initial Balance':<20} | ${config['initial_balance']:.2f} |")
+    logger.info(f"| {'Risk per Trade':<20} | {config['risk_per_trade']*100:.1f}% |")
     logger.info("=" * 50 + "\n")
     
     try:
@@ -124,10 +129,10 @@ def main():
         logger.info("==================================================")
         logger.info(f"| {'Metric':<20} | {'Value':<20} |")
         logger.info("--------------------------------------------------")
-        logger.info(f"| {'Total Trades':<20} | {total_trades:<20} |")
-        logger.info(f"| {'Total PnL':<20} | ${total_pnl:.2f:<20} |")
-        logger.info(f"| {'Win Rate':<20} | {(winning_trades/total_trades*100):.2f}%:<20" if total_trades > 0 else "Win Rate: N/A")
-        logger.info(f"| {'Final Balance':<20} | ${config['initial_balance'] + total_pnl:.2f:<20} |")
+        logger.info(f"| {'Total Trades':<20} | {total_trades:>20} |")
+        logger.info(f"| {'Total PnL':<20} | ${total_pnl:>19.2f} |")
+        logger.info(f"| {'Win Rate':<20} | {(winning_trades/total_trades*100):>19.2f}% |" if total_trades > 0 else "| Win Rate              | N/A                  |")
+        logger.info(f"| {'Final Balance':<20} | ${(config['initial_balance'] + total_pnl):>19.2f} |")
         logger.info("==================================================\n")
         
         # Print detailed analysis

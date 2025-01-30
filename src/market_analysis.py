@@ -11,12 +11,12 @@ class MarketAnalysis:
         self.structure_config = MARKET_STRUCTURE_CONFIG
         self.ob_threshold = ob_threshold
         self.fvg_threshold = 0.0005  # 5 pips
-        self.swing_detection_lookback = 10
-        self.swing_detection_threshold = 0.0005  # 5 pips
-        self.min_swing_size = 0.0015  # 15 pips
-        self.bos_threshold = 0.0005  # 5 pips
-        self.min_swing_points = 3
-        self.structure_break_threshold = 0.0015  # 15 pips
+        self.swing_detection_lookback = 15  # Increased from 10 for more reliable swings
+        self.swing_detection_threshold = 0.0008  # Increased from 0.0005
+        self.min_swing_size = 0.0020  # Increased from 0.0015
+        self.bos_threshold = 0.0008  # Increased from 0.0005
+        self.min_swing_points = 4  # Increased from 3
+        self.structure_break_threshold = 0.0020  # Increased from 0.0015
         
     def get_current_session(self) -> Tuple[str, Dict]:
         """Determine the current trading session based on UTC time."""
@@ -75,6 +75,9 @@ class MarketAnalysis:
             bearish_obs = []
             
             for i in range(3, len(df)):
+                # Initialize ob_size to None at the start of each iteration
+                ob_size = None
+                
                 # Bullish order blocks
                 if df['close'].iloc[i-2] < df['open'].iloc[i-2] and \
                    df['high'].iloc[i] > df['high'].iloc[i-2]:
@@ -85,7 +88,7 @@ class MarketAnalysis:
                     ob_size = ob_high - ob_low
                     
                     # Check if OB is significant
-                    if ob_size >= self.ob_threshold:
+                    if ob_size and ob_size >= self.ob_threshold:
                         bullish_obs.append({
                             'index': i-2,
                             'high': ob_high,
@@ -104,7 +107,7 @@ class MarketAnalysis:
                     ob_size = ob_high - ob_low
                     
                     # Check if OB is significant
-                    if ob_size >= self.ob_threshold:
+                    if ob_size and ob_size >= self.ob_threshold:
                         bearish_obs.append({
                             'index': i-2,
                             'high': ob_high,
@@ -172,7 +175,7 @@ class MarketAnalysis:
         df: pd.DataFrame,
         swing_points: Tuple[List[Dict], List[Dict]]
     ) -> List[Dict]:
-        """Detect breaks of market structure."""
+        """Detect breaks of market structure with enhanced filtering."""
         try:
             breaks = []
             swing_highs, swing_lows = swing_points
@@ -182,29 +185,44 @@ class MarketAnalysis:
                 logger.debug("Not enough swing points to detect structure breaks")
                 return []
             
-            # Ensure swing_lows and swing_highs have matching lengths for comparison
-            min_len = min(len(swing_highs), len(swing_lows))
+            # Convert lists to numpy arrays for easier comparison
+            high_prices = np.array([h['price'] for h in swing_highs if isinstance(h, dict) and 'price' in h])
+            high_times = [h['timestamp'] for h in swing_highs if isinstance(h, dict) and 'timestamp' in h]
+            low_prices = np.array([l['price'] for l in swing_lows if isinstance(l, dict) and 'price' in l])
+            low_times = [l['timestamp'] for l in swing_lows if isinstance(l, dict) and 'timestamp' in l]
             
-            for i in range(1, min_len):
-                # Bullish break of structure
-                if swing_highs[i]['price'] > swing_highs[i-1]['price'] and \
-                   swing_lows[i]['price'] > swing_lows[i-1]['price']:
-                    breaks.append({
-                        'type': 'bullish',
-                        'index': swing_highs[i]['index'],
-                        'price': swing_highs[i]['price'],
-                        'timestamp': swing_highs[i]['timestamp']
-                    })
-                
-                # Bearish break of structure
-                elif swing_highs[i]['price'] < swing_highs[i-1]['price'] and \
-                     swing_lows[i]['price'] < swing_lows[i-1]['price']:
-                    breaks.append({
-                        'type': 'bearish',
-                        'index': swing_lows[i]['index'],
-                        'price': swing_lows[i]['price'],
-                        'timestamp': swing_lows[i]['timestamp']
-                    })
+            # Ensure we still have enough valid points after filtering
+            if len(high_prices) < 2 or len(low_prices) < 2:
+                logger.debug("Not enough valid swing points after filtering")
+                return []
+            
+            # Calculate average swing size for dynamic thresholds
+            avg_swing_size = np.mean(np.abs(np.diff(high_prices)))
+            min_break_size = avg_swing_size * 0.5  # Dynamic threshold
+            
+            for i in range(1, len(high_prices)):
+                # Bullish break with size confirmation
+                if high_prices[i] > high_prices[i-1]:
+                    break_size = high_prices[i] - high_prices[i-1]
+                    if break_size >= min_break_size:
+                        breaks.append({
+                            'type': 'bullish',
+                            'price': float(high_prices[i]),
+                            'time': high_times[i] if i < len(high_times) else None,
+                            'strength': float(break_size / avg_swing_size)  # Normalized strength
+                        })
+            
+            for i in range(1, len(low_prices)):
+                # Bearish break with size confirmation
+                if low_prices[i] < low_prices[i-1]:
+                    break_size = low_prices[i-1] - low_prices[i]
+                    if break_size >= min_break_size:
+                        breaks.append({
+                            'type': 'bearish',
+                            'price': float(low_prices[i]),
+                            'time': low_times[i] if i < len(low_times) else None,
+                            'strength': float(break_size / avg_swing_size)  # Normalized strength
+                        })
             
             return breaks
             
@@ -295,7 +313,7 @@ class MarketAnalysis:
             result['swing_points']['lows'] = swing_points['lows']
 
             # Detect structure breaks
-            breaks = self._detect_structure_breaks(df, result['swing_points']['highs'], result['swing_points']['lows'])
+            breaks = self.detect_structure_breaks(df, (result['swing_points']['highs'], result['swing_points']['lows']))
             result['structure_breaks'] = breaks
 
             # Identify order blocks
@@ -350,37 +368,6 @@ class MarketAnalysis:
         except Exception as e:
             logger.error(f"Error detecting swing points: {str(e)}")
             return {'highs': [], 'lows': []}
-
-    def _detect_structure_breaks(self, df: pd.DataFrame, swing_highs: List[Dict], swing_lows: List[Dict]) -> List[Dict]:
-        """Detect structure breaks based on swing point violations."""
-        try:
-            breaks = []
-            
-            for i in range(1, len(swing_highs)):
-                # Bullish break
-                if swing_highs[i]['price'] > swing_highs[i-1]['price']:
-                    breaks.append({
-                        'type': 'bullish',
-                        'price': swing_highs[i]['price'],
-                        'timestamp': swing_highs[i]['timestamp'],
-                        'strength': (swing_highs[i]['price'] - swing_highs[i-1]['price']) / swing_highs[i-1]['price']
-                    })
-            
-            for i in range(1, len(swing_lows)):
-                # Bearish break
-                if swing_lows[i]['price'] < swing_lows[i-1]['price']:
-                    breaks.append({
-                        'type': 'bearish',
-                        'price': swing_lows[i]['price'],
-                        'timestamp': swing_lows[i]['timestamp'],
-                        'strength': (swing_lows[i-1]['price'] - swing_lows[i]['price']) / swing_lows[i-1]['price']
-                    })
-            
-            return breaks
-            
-        except Exception as e:
-            logger.error(f"Error detecting structure breaks: {str(e)}")
-            return []
 
     def _identify_order_blocks(self, df: pd.DataFrame) -> List[Dict]:
         """Identify order blocks in the price action."""
@@ -460,46 +447,51 @@ class MarketAnalysis:
             recent_breaks = [b for b in breaks[-3:]]
             bullish_breaks = sum(1 for b in recent_breaks if b['type'] == 'bullish')
             bearish_breaks = sum(1 for b in recent_breaks if b['type'] == 'bearish')
-            score += (bullish_breaks - bearish_breaks)  # Range: -3 to 3
-
-            # Check swing point progression (last 2 points)
-            if len(swing_highs) >= 2:
-                if swing_highs[-1]['price'] > swing_highs[-2]['price']:
-                    score += 1
-                elif swing_highs[-1]['price'] < swing_highs[-2]['price']:
-                    score -= 1
+            score += (bullish_breaks - bearish_breaks) * 2  # Doubled the weight
+            
+            # Check swing point progression (last 3 points instead of 2)
+            if len(swing_highs) >= 3:
+                if all(swing_highs[i]['price'] > swing_highs[i-1]['price'] for i in range(-1, -3, -1)):
+                    score += 2
+                elif all(swing_highs[i]['price'] < swing_highs[i-1]['price'] for i in range(-1, -3, -1)):
+                    score -= 2
                     
-            if len(swing_lows) >= 2:
-                if swing_lows[-1]['price'] > swing_lows[-2]['price']:
-                    score += 1
-                elif swing_lows[-1]['price'] < swing_lows[-2]['price']:
-                    score -= 1
+            if len(swing_lows) >= 3:
+                if all(swing_lows[i]['price'] > swing_lows[i-1]['price'] for i in range(-1, -3, -1)):
+                    score += 2
+                elif all(swing_lows[i]['price'] < swing_lows[i-1]['price'] for i in range(-1, -3, -1)):
+                    score -= 2
 
-            # Check moving averages
+            # Check moving averages with more weight
             ema20 = df['close'].ewm(span=20).mean()
             ema50 = df['close'].ewm(span=50).mean()
+            ema200 = df['close'].ewm(span=200).mean()  # Added longer-term trend
             
-            # Price vs EMAs
-            if df['close'].iloc[-1] > ema20.iloc[-1]:
+            # Price vs EMAs with trend alignment
+            if df['close'].iloc[-1] > ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1]:
+                score += 3  # Strong bullish alignment
+            elif df['close'].iloc[-1] < ema20.iloc[-1] < ema50.iloc[-1] < ema200.iloc[-1]:
+                score -= 3  # Strong bearish alignment
+            
+            # Check for momentum using RSI
+            rsi = self._calculate_rsi(df['close'], 14)
+            if rsi[-1] > 70:
                 score += 1
-            else:
+            elif rsi[-1] < 30:
                 score -= 1
                 
-            if df['close'].iloc[-1] > ema50.iloc[-1]:
-                score += 1
-            else:
-                score -= 1
-                
-            # EMA alignment
-            if ema20.iloc[-1] > ema50.iloc[-1]:
-                score += 1
-            else:
-                score -= 1
+            # Volume confirmation
+            volume_sma = df['volume'].rolling(20).mean()
+            if df['volume'].iloc[-1] > volume_sma.iloc[-1] * 1.5:
+                if df['close'].iloc[-1] > df['open'].iloc[-1]:
+                    score += 1
+                else:
+                    score -= 1
 
-            # Determine bias based on total score
-            if score >= 2:
+            # Determine bias with stricter thresholds
+            if score >= 4:  # Increased from 2
                 return 'bullish'
-            elif score <= -2:
+            elif score <= -4:  # Increased from -2
                 return 'bearish'
             else:
                 return 'neutral'
@@ -507,6 +499,16 @@ class MarketAnalysis:
         except Exception as e:
             logger.error(f"Error determining market bias: {str(e)}")
             return 'neutral'
+
+    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> np.ndarray:
+        """Calculate Relative Strength Index."""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.values
 
     def _empty_analysis(self) -> Dict:
         """Return an empty analysis result structure."""

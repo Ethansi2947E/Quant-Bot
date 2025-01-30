@@ -65,7 +65,6 @@ class Backtester:
             
             logger.info("MT5 initialized successfully")
             return True
-            
         except Exception as e:
             logger.error(f"Error initializing MT5: {str(e)}")
             return False
@@ -99,12 +98,14 @@ class Backtester:
         """Get historical data with caching."""
         # Try to load from cache first
         cached_data = self._load_cached_data(symbol, timeframe, start_date, end_date)
-        if cached_data is not None:
+        if cached_data is not None and not cached_data.empty and len(cached_data) > 10:  # Added validation
             return cached_data
             
-        # If not in cache, download and save to cache
+        # If not in cache or invalid cache, download and save to cache
+        logger.info(f"Downloading fresh data for {symbol} {timeframe}")
         data = self._download_historical_data(symbol, timeframe, start_date, end_date)
-        self._save_to_cache(data, symbol, timeframe, start_date, end_date)
+        if not data.empty:
+            self._save_to_cache(data, symbol, timeframe, start_date, end_date)
         return data
     
     def run_backtest(self) -> Dict:
@@ -410,18 +411,204 @@ class Backtester:
         fig.write_html(f"{self.config['results_dir']}/equity_curve.html")
     
     def save_results(self, results: Dict):
-        """Save backtest results to file."""
+        """Save backtest results to file with detailed information."""
+        # Create a more descriptive timestamp with symbol and date range
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = f"{self.config['results_dir']}/backtest_results_{timestamp}.json"
+        symbol_str = '_'.join(self.config["symbols"])
+        date_range = f"{self.config['start_date'].replace('-', '')}_{self.config['end_date'].replace('-', '')}"
+        timeframe_str = '_'.join(self.config["timeframes"])
+        file_prefix = f"backtest_{symbol_str}_{timeframe_str}_{date_range}"
         
-        with open(filepath, 'w') as f:
-            json.dump(results, f, indent=4, default=str)
+        # Save JSON results
+        json_filepath = f"{self.config['results_dir']}/{file_prefix}.json"
+        detailed_results = {
+            "symbols": self.config["symbols"],
+            "timeframes": self.config["timeframes"],
+            "results": results
+        }
+        with open(json_filepath, 'w') as f:
+            json.dump(detailed_results, f, indent=4, default=str)
+        
+        # Save Excel results
+        try:
+            import pandas as pd
+            excel_filepath = f"{self.config['results_dir']}/{file_prefix}.xlsx"
             
-        logger.info(f"Backtest results saved to {filepath}")
+            # Format the DataFrames before writing to Excel
+            def format_numeric_columns(df):
+                for col in df.columns:
+                    col_lower = col.lower()
+                    if any(term in col_lower for term in ['rate', 'ratio']):
+                        df[col] = df[col].apply(lambda x: float(x) if isinstance(x, (int, float)) else x)
+                    elif any(term in col_lower for term in ['pnl', 'profit', 'loss', 'balance', 'risk', 'reward', '$']):
+                        df[col] = df[col].apply(lambda x: float(x) if isinstance(x, (int, float)) else x)
+                return df
+
+            # Prepare data structures
+            summary_data = {
+                'Metric': ['Symbols', 'Timeframes', 'Period', 'Initial Balance', 'Final Balance', 'Total Trades', 'Winning Trades', 
+                          'Losing Trades', 'Win Rate', 'Total PnL', 'Average Win', 'Average Loss', 'Largest Win', 'Largest Loss', 
+                          'Profit Factor', 'Sharpe Ratio', 'Max Drawdown', 'Average RR Ratio', 'SL Hit Rate', 'TP Hit Rate'],
+                'Value': [
+                    ', '.join(self.config['symbols']),
+                    ', '.join(self.config['timeframes']),
+                    f"{self.config['start_date']} to {self.config['end_date']}",
+                    self.config['initial_balance'],
+                    self.equity_curve[-1][1] if self.equity_curve else self.config['initial_balance'],  # Final balance from equity curve
+                    len(results['trades']),
+                    sum(1 for t in results['trades'] if t.pnl > 0),
+                    sum(1 for t in results['trades'] if t.pnl <= 0),
+                    len([t for t in results['trades'] if t.pnl > 0]) / len(results['trades']) if results['trades'] else 0,
+                    sum(t.pnl for t in results['trades']),
+                    np.mean([t.pnl for t in results['trades'] if t.pnl > 0]) if any(t.pnl > 0 for t in results['trades']) else 0,
+                    np.mean([t.pnl for t in results['trades'] if t.pnl <= 0]) if any(t.pnl <= 0 for t in results['trades']) else 0,
+                    max((t.pnl for t in results['trades']), default=0),
+                    min((t.pnl for t in results['trades']), default=0),
+                    abs(sum(t.pnl for t in results['trades'] if t.pnl > 0) / sum(t.pnl for t in results['trades'] if t.pnl <= 0)) if sum(t.pnl for t in results['trades'] if t.pnl <= 0) != 0 else float('inf'),
+                    results.get('sharpe_ratio', 0),
+                    results.get('max_drawdown', 0),
+                    results.get('avg_rr', 0),
+                    sum(1 for t in results['trades'] if t.exit_price == t.stop_loss) / len(results['trades']) if results['trades'] else 0,
+                    sum(1 for t in results['trades'] if t.exit_price == t.take_profit) / len(results['trades']) if results['trades'] else 0
+                ]
+            }
+
+            trades_data = [{
+                'Trade #': i+1,
+                'Symbol': t.symbol,
+                'Direction': t.direction,
+                'Entry Time': t.entry_time,
+                'Exit Time': t.exit_time,
+                'Entry Price': t.entry_price,
+                'Exit Price': t.exit_price,
+                'Stop Loss': t.stop_loss,
+                'Take Profit': t.take_profit,
+                'Position Size': t.position_size,
+                'Risk Amount': abs(t.entry_price - t.stop_loss) * t.position_size * 10000,
+                'PnL': t.pnl,
+                'Outcome': 'SL Hit' if t.exit_price == t.stop_loss else 'TP Hit' if t.exit_price == t.take_profit else 'Closed'
+            } for i, t in enumerate(results['trades'])]
+
+            time_analysis_data = results.get('time_analysis', {'Hour': [], 'Trades': [], 'Win Rate': [], 'Total PnL': []})
+            daily_analysis_data = results.get('daily_analysis', {'Day': [], 'Trades': [], 'Win Rate': [], 'Total PnL': []})
+            consecutive_data = results.get('consecutive_analysis', {'Metric': [], 'Value': []})
+            risk_data = results.get('risk_analysis', {'Metric': [], 'Value': []})
+
+            # Format each DataFrame
+            summary_df = format_numeric_columns(pd.DataFrame(summary_data))
+            trades_df = format_numeric_columns(pd.DataFrame(trades_data))
+            time_df = format_numeric_columns(pd.DataFrame(time_analysis_data))
+            daily_df = format_numeric_columns(pd.DataFrame(daily_analysis_data))
+            consecutive_df = format_numeric_columns(pd.DataFrame(consecutive_data))
+            risk_df = format_numeric_columns(pd.DataFrame(risk_data))
+
+            # Write to Excel with float_format for proper number formatting
+            with pd.ExcelWriter(excel_filepath, engine='xlsxwriter') as writer:
+                workbook = writer.book
+                
+                # Add formats
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#D9D9D9',
+                    'border': 1,
+                    'text_wrap': True,
+                    'align': 'center',
+                    'valign': 'vcenter'
+                })
+                
+                num_format = workbook.add_format({'num_format': '#,##0.00'})
+                percent_format = workbook.add_format({'num_format': '0.00%'})
+                price_format = workbook.add_format({'num_format': '0.00000'})
+                
+                # Write each sheet
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Only write trade-related sheets if there are trades
+                if len(results['trades']) > 0:
+                    trades_df.to_excel(writer, sheet_name='Detailed Trades', index=False)
+                    time_df.to_excel(writer, sheet_name='Time Analysis', index=False)
+                    daily_df.to_excel(writer, sheet_name='Daily Analysis', index=False)
+                    consecutive_df.to_excel(writer, sheet_name='Consecutive Analysis', index=False)
+                    risk_df.to_excel(writer, sheet_name='Risk Analysis', index=False)
+                else:
+                    # Create empty sheets with headers for consistency
+                    pd.DataFrame(columns=['No trades executed']).to_excel(writer, sheet_name='Detailed Trades', index=False)
+                    pd.DataFrame(columns=['No trades executed']).to_excel(writer, sheet_name='Time Analysis', index=False)
+                    pd.DataFrame(columns=['No trades executed']).to_excel(writer, sheet_name='Daily Analysis', index=False)
+                    pd.DataFrame(columns=['No trades executed']).to_excel(writer, sheet_name='Consecutive Analysis', index=False)
+                    pd.DataFrame(columns=['No trades executed']).to_excel(writer, sheet_name='Risk Analysis', index=False)
+                
+                # Format each sheet
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column('A:Z', 15)
+                    
+                    # Get the dataframe corresponding to the current sheet
+                    if sheet_name == 'Summary':
+                        df = summary_df
+                    elif len(results['trades']) > 0:  # Only use detailed dataframes if there are trades
+                        if sheet_name == 'Detailed Trades':
+                            df = trades_df
+                        elif sheet_name == 'Time Analysis':
+                            df = time_df
+                        elif sheet_name == 'Daily Analysis':
+                            df = daily_df
+                        elif sheet_name == 'Consecutive Analysis':
+                            df = consecutive_df
+                        else:  # Risk Analysis
+                            df = risk_df
+                    else:
+                        # For empty sheets, use the simple "No trades" DataFrame
+                        df = pd.DataFrame(columns=['No trades executed'])
+                    
+                    # Apply header format
+                    for col_num, value in enumerate(df.columns):
+                        worksheet.write(0, col_num, str(value), header_format)
+                    
+                    # Only process data rows if there are any
+                    if len(df) > 0:
+                        for row in range(len(df)):
+                            for col in range(len(df.columns)):
+                                value = df.iloc[row, col]
+                                if pd.isna(value):  # Handle NaN values
+                                    worksheet.write(row + 1, col, '')
+                                    continue
+                                    
+                                col_name = df.columns[col].lower()
+                                try:
+                                    if isinstance(value, (int, float)):
+                                        if any(term in col_name for term in ['rate', 'ratio']):
+                                            worksheet.write_number(row + 1, col, float(value), percent_format)
+                                        elif any(term in col_name for term in ['pnl', 'profit', 'loss', 'balance', 'risk', 'reward', '$']):
+                                            worksheet.write_number(row + 1, col, float(value), num_format)
+                                        elif 'price' in col_name:
+                                            worksheet.write_number(row + 1, col, float(value), price_format)
+                                        else:
+                                            worksheet.write_number(row + 1, col, float(value))
+                                    else:
+                                        worksheet.write(row + 1, col, str(value))
+                                except (ValueError, TypeError):
+                                    worksheet.write(row + 1, col, str(value))
+                    
+                    # Apply autofilter only if there are columns
+                    if len(df.columns) > 0:
+                        worksheet.autofilter(0, 0, max(len(df), 0), len(df.columns) - 1)
+                
+                logger.info(f"Backtest results saved to Excel file: {excel_filepath}")
+                logger.info(f"Backtest results saved to JSON file: {json_filepath}")
+                
+        except Exception as e:
+            logger.error(f"Error saving Excel results: {str(e)}")
     
     def _print_backtest_summary(self, results: Dict) -> None:
         """Print a summary of backtest results."""
         logger.info("\n=== BACKTEST SUMMARY ===")
+        
+        # Display timeframe and symbol information prominently
+        logger.info("\nBacktest Configuration:")
+        logger.info(f"Timeframe: {', '.join(self.config['timeframes'])}")
+        logger.info(f"Symbol(s): {', '.join(self.config['symbols'])}")
+        logger.info(f"Period: {self.config['start_date']} to {self.config['end_date']}")
         
         # Overall Statistics
         trades = results.get('trades', [])
@@ -460,6 +647,28 @@ class Backtester:
         logger.info(f"Max Drawdown: {max_drawdown*100:.2f}%")
         logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f}")
         
+        # Detailed Trade Analysis
+        logger.info("\n=== DETAILED TRADE ANALYSIS ===")
+        logger.info("\nTrade-by-Trade Breakdown:")
+        logger.info(f"| {'#':<4} | {'Entry Time':<19} | {'Exit Time':<19} | {'Dir':<4} | {'Entry':<10} | {'Exit':<10} | {'SL':<10} | {'TP':<10} | {'Risk($)':<8} | {'Outcome':<8} | {'PnL($)':<10} |")
+        logger.info("-" * 140)
+        
+        for i, trade in enumerate(trades, 1):
+            sl_hit = trade.exit_price == trade.stop_loss
+            tp_hit = trade.exit_price == trade.take_profit
+            outcome = "SL Hit" if sl_hit else "TP Hit" if tp_hit else "Closed"
+            risk_amount = abs(trade.entry_price - trade.stop_loss) * trade.position_size * 10000
+            
+            # Format timestamps
+            entry_time = trade.entry_time.strftime("%Y-%m-%d %H:%M")
+            exit_time = trade.exit_time.strftime("%Y-%m-%d %H:%M")
+            
+            logger.info(
+                f"| {i:<4} | {entry_time:<19} | {exit_time:<19} | {trade.direction[0]:<4} | "
+                f"{trade.entry_price:.5f} | {trade.exit_price:.5f} | {trade.stop_loss:.5f} | "
+                f"{trade.take_profit:.5f} | {risk_amount:.2f} | {outcome:<8} | {trade.pnl:.2f} |"
+            )
+        
         # Print trade distribution by symbol
         logger.info("\nTrade Distribution by Symbol:")
         symbol_trades = {}
@@ -479,6 +688,16 @@ class Backtester:
                     logger.info(f"    Win Rate: {metrics.get('win_rate', 0)*100:.2f}%")
                     logger.info(f"    Total Profit: {metrics.get('total_profit', 0):.2f}")
                     logger.info(f"    Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.2f}")
+        
+        # Additional Statistics
+        sl_hits = sum(1 for t in trades if t.exit_price == t.stop_loss)
+        tp_hits = sum(1 for t in trades if t.exit_price == t.take_profit)
+        other_closes = total_trades - sl_hits - tp_hits
+        
+        logger.info("\nTrade Exit Analysis:")
+        logger.info(f"Stop Loss Hits: {sl_hits} ({(sl_hits/total_trades)*100:.1f}%)")
+        logger.info(f"Take Profit Hits: {tp_hits} ({(tp_hits/total_trades)*100:.1f}%)")
+        logger.info(f"Other Closes: {other_closes} ({(other_closes/total_trades)*100:.1f}%)")
         
         logger.info("\n=== END OF SUMMARY ===\n")
 

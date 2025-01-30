@@ -12,6 +12,9 @@ class VolumeAnalysis:
     def analyze(self, df: pd.DataFrame) -> Dict:
         """Analyze volume patterns and indicators with data quality assessment."""
         try:
+            # Create a copy of the dataframe to avoid warnings
+            df = df.copy()
+            
             # Check volume data quality
             data_quality = self._assess_volume_data_quality(df)
             if data_quality == 0:
@@ -24,8 +27,12 @@ class VolumeAnalysis:
                     'reason': 'Missing or invalid volume data'
                 }
             
-            # Calculate volume indicators if data is available
-            df = self._calculate_volume_indicators(df)
+            # Calculate volume indicators
+            df.loc[:, 'volume_sma'] = df['volume'].rolling(window=self.volume_ma_period).mean()
+            df.loc[:, 'vwap'] = (df['volume'] * ((df['high'] + df['low'] + df['close']) / 3)).cumsum() / df['volume'].cumsum()
+            df.loc[:, 'relative_volume'] = df['volume'] / df['volume_sma']
+            df.loc[:, 'up_volume'] = df['volume'].where(df['close'] > df['open'], 0)
+            df.loc[:, 'down_volume'] = df['volume'].where(df['close'] < df['open'], 0)
             
             # Analyze volume patterns
             patterns = self._detect_volume_patterns(df)

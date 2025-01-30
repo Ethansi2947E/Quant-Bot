@@ -24,8 +24,8 @@ MT5_CONFIG = {
 
 # Trading Configuration
 TRADING_CONFIG = {
-    "symbols": ["EURUSD", "GBPUSD", "USDJPY"],  # Trading pairs
-    "timeframes": ["M5", "M15", "H1"],  # Timeframes to analyze
+    "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDCAD"],  # Trading pairs
+    "timeframes": ["M5", "M15", "H1", "H4"],  # Timeframes to analyze
     "risk_per_trade": 0.02,  # 2% risk per trade
     "max_daily_risk": 0.06,  # 6% max daily risk
 }
@@ -167,7 +167,7 @@ BACKTEST_CONFIG = {
     "initial_balance": 10000,     # Initial account balance for backtesting
     "commission": 0.0001,         # Commission per trade (0.01%)
     "spread": 2,                  # Spread in points
-    "symbols": ["EURUSD", "GBPUSD", "USDJPY"],  # Symbols to backtest
+    "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDCAD"],  # Symbols to backtest
     "timeframes": ["M15", "H1", "H4"],          # Timeframes to analyze
     "risk_per_trade": 0.01,      # Risk per trade (1% of balance)
     "enable_visualization": True, # Enable trade visualization

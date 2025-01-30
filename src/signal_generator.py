@@ -14,114 +14,177 @@ from src.volume_analysis import VolumeAnalysis
 # Timeframe-specific thresholds
 TIMEFRAME_THRESHOLDS = {
     'M5': {
-        'base_score': 0.75,  # Increased from default
-        'ranging_market': 0.4,  # More strict ranging market detection
-        'trending_market': 0.8,  # Higher trend requirement
-        'volatility_filter': 1.2,  # Stricter volatility filter
-        'min_trend_strength': 0.65,  # Higher minimum trend strength
-        'rr_ratio': 2.0  # Maintained good RR ratio
+        'base_score': 0.65,  # Decreased from 0.80
+        'ranging_market': 0.40,  # Decreased from 0.45
+        'trending_market': 0.75,  # Decreased from 0.85
+        'volatility_filter': 1.3,  # Increased from 1.1
+        'min_trend_strength': 0.60,  # Decreased from 0.70
+        'rr_ratio': 2.0  # Decreased from 2.2
     },
     'M15': {
-        'base_score': 0.65,
-        'ranging_market': 0.35,
-        'trending_market': 0.75,
-        'volatility_filter': 1.3,
-        'min_trend_strength': 0.6,
-        'rr_ratio': 2.0
+        'base_score': 0.75,  # Increased from 0.70 for stronger signals
+        'ranging_market': 0.45,  # Increased from 0.40 for better ranging market detection
+        'trending_market': 0.85,  # Increased from 0.80 for stronger trend confirmation
+        'volatility_filter': 1.15,  # Reduced from 1.2 for tighter volatility control
+        'min_trend_strength': 0.70,  # Increased from 0.65 for stronger trends
+        'rr_ratio': 2.0  # Reduced from 2.2 for more realistic targets in M15
     },
     'H1': {
-        'base_score': 0.6,
-        'ranging_market': 0.3,
-        'trending_market': 0.7,
-        'volatility_filter': 1.4,
-        'min_trend_strength': 0.55,
-        'rr_ratio': 2.2
+        'base_score': 0.65,  # Increased from 0.6
+        'ranging_market': 0.35,  # Increased from 0.3
+        'trending_market': 0.75,  # Increased from 0.7
+        'volatility_filter': 1.3,  # Reduced from 1.4
+        'min_trend_strength': 0.60,  # Increased from 0.55
+        'rr_ratio': 2.4  # Increased from 2.2
     },
     'H4': {
-        'base_score': 0.55,
-        'ranging_market': 0.25,
-        'trending_market': 0.65,
-        'volatility_filter': 1.5,
-        'min_trend_strength': 0.5,
-        'rr_ratio': 2.5
+        'base_score': 0.60,  # Increased from 0.54
+        'ranging_market': 0.35,  # Increased from 0.32
+        'trending_market': 0.65,  # Increased from 0.58
+        'volatility_filter': 1.2,  # Slightly reduced from 1.25
+        'min_trend_strength': 0.52,  # Increased from 0.48
+        'rr_ratio': 2.8  # Increased from 2.5
     }
 }
 
 # Timeframe-specific component weights
 TIMEFRAME_WEIGHTS = {
     'M5': {
-        'structure': 0.45,  # Increased weight on structure
-        'volume': 0.25,     # Reduced volume weight
-        'smc': 0.20,       # Increased SMC importance
-        'mtf': 0.10        # Reduced MTF for faster timeframe
+        'structure': 0.40,  # Reduced from 0.45
+        'volume': 0.30,    # Increased from 0.25
+        'smc': 0.20,      # Unchanged
+        'mtf': 0.10       # Unchanged
     },
     'M15': {
-        'structure': 0.40,
-        'volume': 0.30,
-        'smc': 0.20,
-        'mtf': 0.10
+        'structure': 0.40,  # Increased from 0.35 for better price action focus
+        'volume': 0.30,    # Reduced from 0.35 to balance
+        'smc': 0.20,      # Unchanged
+        'mtf': 0.10       # Unchanged
     },
     'H1': {
-        'structure': 0.35,
-        'volume': 0.30,
-        'smc': 0.20,
-        'mtf': 0.15
+        'structure': 0.30,  # Reduced from 0.35
+        'volume': 0.35,    # Increased from 0.30
+        'smc': 0.20,      # Unchanged
+        'mtf': 0.15       # Unchanged
     },
     'H4': {
-        'structure': 0.30,
-        'volume': 0.25,
-        'smc': 0.25,
-        'mtf': 0.20
+        'structure': 0.35,  # Reduced from 0.40
+        'volume': 0.30,    # Increased from 0.25
+        'smc': 0.20,      # Unchanged
+        'mtf': 0.15       # Unchanged
     }
 }
 
-# Relaxed signal thresholds
+# Signal thresholds
 SIGNAL_THRESHOLDS = {
-    'strong': 0.70,  # Reduced from 0.75
-    'moderate': 0.60,  # Reduced from 0.65
-    'weak': 0.50,  # Reduced from 0.55
+    'strong': 0.75,    # Increased from 0.70
+    'moderate': 0.65,  # Increased from 0.60
+    'weak': 0.55,      # Increased from 0.50
 }
 
 # Currency pair specific multipliers
 SYMBOL_MULTIPLIERS = {
-    'EURUSD': 1.00,  # Keep as is - performing well
-    'GBPUSD': 0.90,  # Increased from 0.85 to allow more signals
-    'USDJPY': 0.85,  # Reduced from 0.95 to be more conservative
-    'AUDUSD': 1.15,  # Added - historically good performer, slightly more aggressive
+    'EURUSD': 1.00,
+    'GBPUSD': 0.90,
+    'USDJPY': 0.85,
+    'AUDUSD': 1.15,  # Reduced from 1.20 to be more conservative
 }
 
 # Modified timeframe multipliers
 TIMEFRAME_MULTIPLIERS = {
-    'H4': 1.15,  # Reduced from 1.20
-    'H1': 0.85,  # Increased from 0.80
+    'H4': 1.15,  # Reduced from 1.20 for more conservative approach
+    'H1': 0.85,
 }
 
 # Base thresholds
-BASE_SCORE_THRESHOLD = 0.28  # Reduced from 0.32
-RANGING_MARKET_THRESHOLD = 0.40  # Reduced from 0.45
-TRENDING_MARKET_THRESHOLD = 0.22  # Reduced from 0.25
+BASE_SCORE_THRESHOLD = 0.32    # Increased from 0.28
+RANGING_MARKET_THRESHOLD = 0.42  # Increased from 0.38
+TRENDING_MARKET_THRESHOLD = 0.25  # Increased from 0.22
 
 # Adjusted component weights
 COMPONENT_WEIGHTS = TIMEFRAME_WEIGHTS['H4']  # Default to H4 weights
 
-# Volatility thresholds - adjusted for each pair
+# Volatility thresholds
 VOLATILITY_THRESHOLDS = {
-    'EURUSD': 1.5,    # Keep as is
-    'GBPUSD': 1.8,    # Increased from 1.7
-    'USDJPY': 1.4,    # Reduced from 1.6
-    'AUDUSD': 1.6,    # Added - moderate volatility threshold
+    'EURUSD': {
+        'H4': 1.5,
+        'H1': 1.4,
+        'M15': 1.25,  # Added specific M15 threshold
+        'M5': 1.2
+    },
+    'GBPUSD': 1.8,
+    'USDJPY': 1.4,
+    'AUDUSD': 1.35,  # Reduced from 1.45 for tighter volatility control
 }
 
-# RSI thresholds - pair specific
+# RSI thresholds
 RSI_THRESHOLDS = {
     'EURUSD': {'overbought': 70, 'oversold': 30},
-    'GBPUSD': {'overbought': 78, 'oversold': 22},  # More lenient
-    'USDJPY': {'overbought': 75, 'oversold': 25},  # More lenient
-    'AUDUSD': {'overbought': 72, 'oversold': 28},  # Added - slightly more sensitive
+    'GBPUSD': {'overbought': 78, 'oversold': 22},
+    'USDJPY': {'overbought': 75, 'oversold': 25},
+    'AUDUSD': {'overbought': 78, 'oversold': 22},  # More extreme levels for stronger confirmation
+}
+
+# Additional risk management parameters
+RISK_MANAGEMENT = {
+    'max_daily_trades': 2,          # Reduced from 3
+    'max_concurrent_trades': 1,      # Reduced from 2
+    'min_trades_spacing': 6,         # Increased from 4
+    'max_daily_loss': 0.015,        # Reduced from 0.02
+    'max_drawdown_pause': 0.10,     # Reduced from 0.15
+    'max_weekly_trades': 8,         # New parameter
+    'min_win_rate_continue': 0.40,  # New parameter
+    'max_risk_per_trade': 0.015,    # New parameter
+    'consecutive_loss_limit': 3,     # New parameter
+    'volatility_scaling': True,      # New parameter
+    'M15': {
+        'max_daily_trades': 4,          # More trades allowed for M15
+        'max_concurrent_trades': 1,      # Keep single trade limit
+        'min_trades_spacing': 2,         # Reduced spacing for M15 (in hours)
+        'max_daily_loss': 0.015,        # Same as default
+        'max_drawdown_pause': 0.10,     # Same as default
+        'max_weekly_trades': 16,        # Increased for M15
+        'consecutive_loss_limit': 2      # More conservative for M15
+    }
+}
+
+# Additional volatility-based position sizing
+VOLATILITY_POSITION_SCALING = {
+    'high_volatility': 0.5,    # Reduce position size by 50% in high volatility
+    'normal_volatility': 1.0,  # Normal position size
+    'low_volatility': 0.75     # Reduce position size by 25% in low volatility
+}
+
+# Market condition filters
+MARKET_CONDITION_FILTERS = {
+    'min_daily_range': 0.0020,  # Minimum daily range in pips
+    'max_daily_range': 0.0150,  # Maximum daily range in pips
+    'min_volume_threshold': 1000,  # Minimum volume requirement
+    'max_spread_threshold': 0.0003,  # Maximum allowed spread
+    'M15': {
+        'min_daily_range': 0.0015,  # Adjusted for M15
+        'max_daily_range': 0.0120,  # Adjusted for M15
+        'min_volume_threshold': 800,  # Lower threshold for M15
+        'max_spread_threshold': 0.0002  # Tighter spread for M15
+    }
 }
 
 class SignalGenerator:
     def __init__(self):
+        """Initialize the signal generator with its analysis components."""
+        try:
+            self.market_analysis = MarketAnalysis()
+            self.smc_analysis = SMCAnalysis()
+            self.mtf_analysis = MTFAnalysis()
+            self.divergence_analysis = DivergenceAnalysis()
+            self.volume_analysis = VolumeAnalysis()
+            self.config = TRADING_CONFIG
+            self.thresholds = SIGNAL_THRESHOLDS
+            self.confirmation = CONFIRMATION_CONFIG
+        except Exception as e:
+            logger.error(f"Error initializing SignalGenerator: {str(e)}")
+            raise
+        
         self.required_periods = {
             "rsi": 14,
             "macd": 34,  # Longest period needed for MACD (26 + 8 buffer)
@@ -263,16 +326,25 @@ class SignalGenerator:
                 return self._empty_signal(df)
             
             # Get scores from different components
-            structure_score = self.market_analysis.analyze(df)
-            volume_score = self.volume_analysis.analyze(df)
-            smc_score = self.smc_analysis.analyze(df)
-            mtf_score = self.mtf_analysis.analyze(df, timeframe)
+            structure_analysis = self.market_analysis.analyze(df)
+            volume_analysis = self.volume_analysis.analyze(df)
+            smc_analysis = self.smc_analysis.analyze(df)
+            mtf_analysis = self.mtf_analysis.analyze(df, timeframe)
             
-            logger.info(f"Analysis scores for {symbol} {timeframe}:")
-            logger.info(f"Structure Score: {structure_score:.2f}")
-            logger.info(f"Volume Score: {volume_score:.2f}")
-            logger.info(f"SMC Score: {smc_score:.2f}")
-            logger.info(f"MTF Score: {mtf_score:.2f}")
+            # Extract numeric scores from analysis results
+            structure_score = -1.0 if structure_analysis.get('market_structure', {}).get('market_bias') == 'bearish' else 1.0 if structure_analysis.get('market_structure', {}).get('market_bias') == 'bullish' else 0.0
+            volume_score = -1.0 if isinstance(volume_analysis, dict) and volume_analysis.get('trend') == 'bearish' else 1.0 if isinstance(volume_analysis, dict) and volume_analysis.get('trend') == 'bullish' else 0.0
+            smc_score = -1.0 if isinstance(smc_analysis, dict) and smc_analysis.get('order_flow', {}).get('bias') == 'bearish' else 1.0 if isinstance(smc_analysis, dict) and smc_analysis.get('order_flow', {}).get('bias') == 'bullish' else 0.0
+            mtf_score = float(mtf_analysis) if isinstance(mtf_analysis, (int, float)) else 0.0
+            
+            # Log analysis scores without format strings
+            logger.info("Analysis scores:")
+            logger.info(f"Symbol: {symbol}")
+            logger.info(f"Timeframe: {timeframe}")
+            logger.info(f"Structure Score: {structure_score}")
+            logger.info(f"Volume Score: {volume_score}")
+            logger.info(f"SMC Score: {smc_score}")
+            logger.info(f"MTF Score: {mtf_score}")
             
             # Additional M5-specific filters
             if timeframe == 'M5':
@@ -281,18 +353,18 @@ class SignalGenerator:
                 atr_ma = df['atr'].rolling(window=14).mean().iloc[-1]
                 volatility_ratio = atr / atr_ma
                 
-                # Reject trades during high volatility
-                if volatility_ratio > 1.4:
+                # Reject trades during high volatility (increased threshold)
+                if volatility_ratio > 1.8:  # Increased from 1.4
                     logger.info("M5 trade rejected: High volatility period")
                     return self._empty_signal(df)
                 
-                # Check for strong trend alignment
+                # Check for trend alignment (relaxed conditions)
                 ema_20 = df['close'].ewm(span=20).mean().iloc[-1]
                 ema_50 = df['close'].ewm(span=50).mean().iloc[-1]
                 ema_200 = df['close'].ewm(span=200).mean().iloc[-1]
                 
-                # Ensure trend alignment on M5
-                if not ((ema_20 > ema_50 > ema_200) or (ema_20 < ema_50 < ema_200)):
+                # More lenient trend alignment check
+                if not ((ema_20 > ema_50) or (ema_20 < ema_50)):  # Only check 20 and 50 EMAs
                     logger.info("M5 trade rejected: EMA misalignment")
                     return self._empty_signal(df)
                     
@@ -306,7 +378,7 @@ class SignalGenerator:
             # Get timeframe-specific weights
             weights = TIMEFRAME_WEIGHTS.get(timeframe, TIMEFRAME_WEIGHTS['H4'])
             
-            # Calculate final score with timeframe-specific weights
+            # Calculate final score with weights
             final_score = (
                 structure_score * weights['structure'] +
                 volume_score * weights['volume'] +
@@ -319,15 +391,15 @@ class SignalGenerator:
             
             # Adjusted timeframe-specific multipliers
             timeframe_multiplier = TIMEFRAME_MULTIPLIERS.get(timeframe, 1.0)
-            logger.info(f"{timeframe} timeframe: Applying {timeframe_multiplier:.2f}x multiplier")
+            logger.info(f"Timeframe multiplier: {timeframe_multiplier}")
             
             # Symbol-specific adjustments
             symbol_multiplier = SYMBOL_MULTIPLIERS.get(symbol, 1.0)
-            logger.info(f"{symbol}: Applying {symbol_multiplier:.2f}x symbol multiplier")
+            logger.info(f"Symbol multiplier: {symbol_multiplier}")
             
             # Calculate MTF confidence with adjusted multiplier
             mtf_confidence = mtf_data.get('confidence_factor', 1.0) * timeframe_multiplier
-            logger.info(f"MTF Confidence: {mtf_confidence:.2f}")
+            logger.info(f"MTF Confidence: {mtf_confidence}")
             
             # Calculate final score
             final_score = (
@@ -337,7 +409,7 @@ class SignalGenerator:
                 mtf_score * COMPONENT_WEIGHTS['mtf']
             ) * timeframe_multiplier * symbol_multiplier
             
-            logger.info(f"Final Score: {final_score:.2f}")
+            logger.info(f"Final Score: {final_score}")
             
             # Timeframe-specific filters
             if timeframe == 'H1':
@@ -407,7 +479,7 @@ class SignalGenerator:
             
             # Adjusted confluence requirements for GBPUSD
             if symbol == 'GBPUSD':
-                if structure_score > 0.5 and volume_score > 0.4:  # Reduced from 0.6 and 0.5
+                if structure_score > 0.5 and abs(volume_score) > 0.4:  # Reduced from 0.6 and 0.5
                     final_score *= 1.15  # Increased reward
             
             # Enhanced USDJPY signal generation
@@ -452,36 +524,7 @@ class SignalGenerator:
                     signal['entry_price'] = df['close'].iloc[-1]
                     
                     # Dynamic ATR multiplier based on volatility and trend strength
-                    trend_strength = abs(structure_score)
-                    
-                    # Base ATR multiplier
-                    atr_multiplier = thresholds['rr_ratio']
-                    
-                    # Adjust for volatility
-                    if volatility_ratio > 1.5:
-                        atr_multiplier *= 0.8  # Tighter stops in high volatility
-                    elif volatility_ratio < 0.7:
-                        atr_multiplier *= 1.2  # Wider stops in low volatility
-                    
-                    # Adjust for trend strength
-                    if trend_strength > 0.7:
-                        atr_multiplier *= 0.9  # Tighter stops in strong trends
-                    
-                    # Calculate stop loss and take profit
-                    stop_distance = atr * atr_multiplier
-                    signal['stop_loss'] = signal['entry_price'] - stop_distance
-                    
-                    # Dynamic risk:reward based on confidence
-                    signal['confidence'] = min(final_score * 100, 100)
-                    rr_ratio = 2 + (signal['confidence'] / 100)  # 2:1 to 3:1 based on confidence
-                    signal['take_profit'] = signal['entry_price'] + (stop_distance * rr_ratio)
-                    
-                elif final_score < -score_threshold:
-                    signal['direction'] = 'SELL'
-                    signal['entry_price'] = df['close'].iloc[-1]
-                    
-                    # Dynamic ATR multiplier based on volatility and trend strength
-                    trend_strength = abs(structure_score)
+                    trend_strength = 1.0 if structure_score > 0 else -1.0 if structure_score < 0 else 0.0
                     
                     # Base ATR multiplier
                     atr_multiplier = thresholds['rr_ratio']
@@ -501,23 +544,54 @@ class SignalGenerator:
                     signal['stop_loss'] = signal['entry_price'] + stop_distance
                     
                     # Dynamic risk:reward based on confidence
-                    signal['confidence'] = min(abs(final_score) * 100, 100)
+                    final_score_value = float(final_score) if isinstance(final_score, (int, float)) else 0.0
+                    signal['confidence'] = min(abs(final_score_value) * 100, 100)
+                    rr_ratio = 2 + (signal['confidence'] / 100)  # 2:1 to 3:1 based on confidence
+                    signal['take_profit'] = signal['entry_price'] - (stop_distance * rr_ratio)
+                elif final_score < -score_threshold:
+                    signal['direction'] = 'SELL'
+                    signal['entry_price'] = df['close'].iloc[-1]
+                    
+                    # Dynamic ATR multiplier based on volatility and trend strength
+                    trend_strength = 1.0 if structure_score > 0 else -1.0 if structure_score < 0 else 0.0
+                    
+                    # Base ATR multiplier
+                    atr_multiplier = thresholds['rr_ratio']
+                    
+                    # Adjust for volatility
+                    if volatility_ratio > 1.5:
+                        atr_multiplier *= 0.8  # Tighter stops in high volatility
+                    elif volatility_ratio < 0.7:
+                        atr_multiplier *= 1.2  # Wider stops in low volatility
+                    
+                    # Adjust for trend strength
+                    if trend_strength > 0.7:
+                        atr_multiplier *= 0.9  # Tighter stops in strong trends
+                    
+                    # Calculate stop loss and take profit
+                    stop_distance = atr * atr_multiplier
+                    signal['stop_loss'] = signal['entry_price'] + stop_distance
+                    
+                    # Dynamic risk:reward based on confidence
+                    final_score_value = float(final_score) if isinstance(final_score, (int, float)) else 0.0
+                    signal['confidence'] = min(abs(final_score_value) * 100, 100)
                     rr_ratio = 2 + (signal['confidence'] / 100)  # 2:1 to 3:1 based on confidence
                     signal['take_profit'] = signal['entry_price'] - (stop_distance * rr_ratio)
                 else:
-                    signal['confidence'] = min(abs(final_score) * 50, 50)  # Lower confidence for HOLD signals
-                
-                logger.info(f"Generated {signal['direction']} signal with {signal['confidence']:.0f}% confidence")
-                logger.debug(f"Score components: structure={structure_score:.2f}, volume={volume_score:.2f}, smc={smc_score:.2f}, mtf={mtf_score:.2f}")
-                
-                return signal
-                
+                    final_score_value = float(final_score) if isinstance(final_score, (int, float)) else 0.0
+                    signal['confidence'] = min(abs(final_score_value) * 50, 50)  # Lower confidence for HOLD signals
+            
             except Exception as e:
-                logger.error(f"Error in signal generation: {str(e)}")
+                logger.error(f"Error generating signal: {str(e)}")
                 return self._empty_signal(df)
             
+            logger.info(f"Generated {signal['direction']} signal with {signal['confidence']:.0f}% confidence")
+            logger.debug(f"Score components: structure={structure_score:.2f}, volume={volume_score:.2f}, smc={smc_score:.2f}, mtf={mtf_score:.2f}")
+            
+            return signal
+            
         except Exception as e:
-            logger.error(f"Error generating signal: {str(e)}")
+            logger.error(f"Error in signal generation: {str(e)}")
             return self._empty_signal(df)
     
     def _calculate_trend_score(self, df: pd.DataFrame) -> float:
@@ -555,22 +629,25 @@ class SignalGenerator:
             score = 0
             
             # Market bias (40%)
-            if structure['market_bias'] == 'bullish':
+            market_bias = structure.get('market_bias', 'neutral')
+            if market_bias == 'bullish':
                 score += 0.4
-            elif structure['market_bias'] == 'bearish':
+            elif market_bias == 'bearish':
                 score -= 0.4
             
             # Order blocks (30%)
-            bull_obs = len(structure['order_blocks']['bullish'])
-            bear_obs = len(structure['order_blocks']['bearish'])
+            order_blocks = structure.get('order_blocks', {'bullish': [], 'bearish': []})
+            bull_obs = len(order_blocks.get('bullish', []))
+            bear_obs = len(order_blocks.get('bearish', []))
             if bull_obs > bear_obs:
                 score += 0.3
             elif bear_obs > bull_obs:
                 score -= 0.3
             
             # Fair value gaps (30%)
-            bull_fvgs = len(structure['fair_value_gaps']['bullish'])
-            bear_fvgs = len(structure['fair_value_gaps']['bearish'])
+            fvg = structure.get('fair_value_gaps', {'bullish': [], 'bearish': []})
+            bull_fvgs = len(fvg.get('bullish', []))
+            bear_fvgs = len(fvg.get('bearish', []))
             if bull_fvgs > bear_fvgs:
                 score += 0.3
             elif bear_fvgs > bull_fvgs:

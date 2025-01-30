@@ -42,8 +42,8 @@ class TradingBot:
         self.news_events: List[NewsEvent] = []
         self.trade_counter = 0
         
-        # Initialize analysis components
-        self.market_analysis = MarketAnalysis(ob_threshold=MARKET_STRUCTURE_CONFIG['structure_levels']['ob_size'])
+        # Initialize analysis components with H4 timeframe thresholds as default
+        self.market_analysis = MarketAnalysis(ob_threshold=MARKET_STRUCTURE_CONFIG['structure_levels']['H4']['ob_size'])
         self.smc_analysis = SMCAnalysis()
         self.mtf_analysis = MTFAnalysis()
         self.divergence_analysis = DivergenceAnalysis()
