@@ -9,62 +9,156 @@ The trading bot uses a sophisticated multi-component analysis system to generate
 The system now implements optimized thresholds for different timeframes:
 
 #### M5 Timeframe
-- Base score threshold: 0.75 (increased from default)
-- Ranging market threshold: 0.4 (stricter detection)
-- Trending market threshold: 0.8 (higher requirement)
-- Volatility filter: 1.2 (stricter filter)
-- Minimum trend strength: 0.65
-- Risk:Reward ratio: 2.0
+- Base score threshold: 0.65 (decreased from 0.75)
+- Ranging market threshold: 0.45 (decreased from 0.50)
+- Trending market threshold: 0.75 (decreased from 0.85)
+- Volatility filter: 1.2 (increased from 1.1)
+- Minimum trend strength: 0.60 (decreased from 0.70)
+- Risk:Reward ratio: 2.0 (decreased from 2.2)
+- Minimum confirmations: 2 (decreased from 3)
 
 #### M15 Timeframe
-- Base score threshold: 0.65
-- Ranging market threshold: 0.35
-- Trending market threshold: 0.75
-- Volatility filter: 1.3
-- Minimum trend strength: 0.6
-- Risk:Reward ratio: 2.0
+- Base score threshold: 0.70 (decreased from 0.85)
+- Ranging market threshold: 0.45 (decreased from 0.55)
+- Trending market threshold: 0.80 (decreased from 0.95)
+- Volatility filter: 1.2 (increased from 1.0)
+- Minimum trend strength: 0.65 (decreased from 0.80)
+- Risk:Reward ratio: 2.0 (decreased from 2.2)
+- Minimum confirmations: 3 (decreased from 4)
 
 #### H1 Timeframe
-- Base score threshold: 0.6
-- Ranging market threshold: 0.3
-- Trending market threshold: 0.7
-- Volatility filter: 1.4
-- Minimum trend strength: 0.55
-- Risk:Reward ratio: 2.2
+- Base score threshold: 0.65 (decreased from 0.75)
+- Ranging market threshold: 0.40 (decreased from 0.45)
+- Trending market threshold: 0.75 (decreased from 0.85)
+- Volatility filter: 1.2 (increased from 1.1)
+- Minimum trend strength: 0.60 (decreased from 0.70)
+- Risk:Reward ratio: 2.4 (decreased from 2.6)
+- Minimum confirmations: 2 (decreased from 3)
 
 #### H4 Timeframe
-- Base score threshold: 0.55
-- Ranging market threshold: 0.25
-- Trending market threshold: 0.65
-- Volatility filter: 1.5
-- Minimum trend strength: 0.5
-- Risk:Reward ratio: 2.5
+- Base score threshold: 0.65 (decreased from 0.70)
+- Ranging market threshold: 0.40 (decreased from 0.45)
+- Trending market threshold: 0.70 (decreased from 0.75)
+- Volatility filter: 1.1 (increased from 1.0)
+- Minimum trend strength: 0.60 (decreased from 0.65)
+- Risk:Reward ratio: 2.8 (decreased from 3.0)
+- Minimum confirmations: 2 (decreased from 3)
 
-### Component Weights by Timeframe
+### Market Condition Filters
+More lenient filters have been implemented:
+- Minimum daily range: 0.0012 (decreased from 0.0015)
+- Maximum daily range: 0.0140 (increased from 0.0120)
+- Minimum volume threshold: 600 (decreased from 800)
+- Maximum spread threshold: 0.0004 (increased from 0.0003)
+- Correlation threshold: 0.80 (increased from 0.75)
+- Trend strength minimum: 0.45 (decreased from 0.55)
+- Volatility percentile: 0.15 (decreased from 0.20)
+- Momentum threshold: 0.012 (decreased from 0.015)
+
+#### M15 Specific Filters
+- Minimum daily range: 0.0010 (decreased from 0.0012)
+- Maximum daily range: 0.0120 (increased from 0.0100)
+- Minimum volume threshold: 400 (decreased from 600)
+- Maximum spread threshold: 0.0004 (increased from 0.0003)
+- Minimum confirmations: 2 (decreased from 3)
+
+### Component Weights
+Updated timeframe-specific weights:
 
 #### M5
-- Structure: 45% (increased focus)
-- Volume: 25%
-- SMC: 20%
-- MTF: 10%
+- Structure: 0.35 (decreased from 0.45)
+- Volume: 0.25 (unchanged)
+- SMC: 0.25 (increased from 0.20)
+- MTF: 0.15 (increased from 0.10)
 
 #### M15
-- Structure: 40%
-- Volume: 30%
-- SMC: 20%
-- MTF: 10%
+- Structure: 0.35 (decreased from 0.40)
+- Volume: 0.25 (decreased from 0.30)
+- SMC: 0.25 (increased from 0.20)
+- MTF: 0.15 (increased from 0.10)
 
 #### H1
-- Structure: 35%
-- Volume: 30%
-- SMC: 20%
-- MTF: 15%
+- Structure: 0.30 (decreased from 0.35)
+- Volume: 0.30 (decreased from 0.35)
+- SMC: 0.25 (increased from 0.20)
+- MTF: 0.15 (unchanged)
 
 #### H4
-- Structure: 30%
-- Volume: 25%
-- SMC: 25%
-- MTF: 20%
+- Structure: 0.35 (increased from 0.30)
+- Volume: 0.25 (unchanged)
+- SMC: 0.25 (unchanged)
+- MTF: 0.15 (decreased from 0.20)
+
+### Signal Thresholds
+Updated signal classification thresholds:
+- Strong: 0.65 (decreased from 0.75)
+- Moderate: 0.55 (decreased from 0.65)
+- Weak: 0.45 (decreased from 0.55)
+- Minimum: 0.35 (decreased from 0.45)
+
+### Currency Pair Specific Settings
+
+#### EURUSD
+- Multiplier: 1.20 (increased from 1.10)
+- Volatility thresholds:
+  - H4: 1.5
+  - H1: 1.4
+  - M15: 1.25
+  - M5: 1.2
+- RSI thresholds:
+  - Overbought: 70
+  - Oversold: 30
+
+#### GBPUSD
+- Multiplier: 0.90
+- Volatility threshold: 1.8
+- RSI thresholds:
+  - Overbought: 78
+  - Oversold: 22
+
+#### USDJPY
+- Multiplier: 0.85
+- Volatility threshold: 1.4
+- RSI thresholds:
+  - Overbought: 75
+  - Oversold: 25
+
+#### AUDUSD
+- Multiplier: 1.35 (increased from 1.25)
+- Volatility threshold: 1.35 (reduced from 1.45)
+- RSI thresholds:
+  - Overbought: 78
+  - Oversold: 22
+
+### Risk Management Updates
+
+#### Position Sizing
+- Volatility-based scaling:
+  - High volatility: 50% size
+  - Normal volatility: 100% size
+  - Low volatility: 75% size
+- ATR multipliers:
+  - High: 1.5
+  - Low: 0.5
+
+#### Trade Management
+- Partial take profits:
+  - First target: 1R with 50% size
+  - Second target: 2R with remaining size
+- Trailing stop:
+  - Activation: 1R profit
+  - Trail points: 0.5R
+
+#### Risk Limits
+- Maximum daily trades: 4 (increased from 3)
+- Maximum concurrent trades: 2
+- Minimum trade spacing: 1 hour (decreased from 2)
+- Maximum daily loss: 1.5%
+- Maximum drawdown pause: 5%
+- Maximum weekly trades: 16 (increased from 12)
+- Minimum win rate to continue: 30% (decreased from 35%)
+- Maximum risk per trade: 1%
+- Consecutive loss limit: 4 (increased from 3)
 
 ### Enhanced Market Analysis
 
@@ -85,42 +179,31 @@ The system now implements optimized thresholds for different timeframes:
 
 ### Currency Pair Specific Optimizations
 
-#### EURUSD
-- Standard multiplier: 1.00
-- Enhanced trend validation
-- Strict volume confirmation requirements
+#### AUDUSD
+- More lenient requirements:
+  - Structure score threshold: 0.5 (reduced from 0.6)
+  - Volume score threshold: 0.4 (reduced from 0.5)
+  - Score multiplier: 1.2 (increased reward)
+  - Volatility tolerance: 1.6 (increased from 1.4)
+  - Volatility penalty: 0.9 (reduced from 0.8)
 
 #### GBPUSD
-- Multiplier: 0.90
-- Additional volatility checks
-- Enhanced confluence requirements
+- Adjusted confluence:
+  - Structure score threshold: 0.5 (reduced from 0.6)
+  - Volume score threshold: 0.4 (reduced from 0.5)
+  - Score multiplier: 1.15 (increased reward)
 
 #### USDJPY
-- Multiplier: 0.85
-- Conservative approach
-- Stricter trend requirements
+- Enhanced requirements:
+  - Structure score threshold: 0.6 (increased)
+  - Volume score threshold: 0.5 (increased)
+  - Score multiplier: 1.1 (reduced)
 
-#### AUDUSD
-- Multiplier: 1.15
-- Modified volatility thresholds
-- Adjusted score requirements
-
-### Risk Management Updates
-
-#### Dynamic Position Sizing
-- Adjusted based on volatility
-- Timeframe-specific risk multipliers
-- Enhanced drawdown protection
-
-#### Stop Loss Calculation
-- Dynamic ATR multipliers
-- Volatility-based adjustments
-- Trend strength considerations
-
-### Signal Validation
-- Minimum required confirmations reduced to 2
-- Enhanced confirmation weighting
-- Added timeframe-specific validation rules
+#### EURUSD
+- Standard requirements:
+  - Structure score threshold: 0.7
+  - Volume score threshold: 0.6
+  - Score multiplier: 1.2
 
 ## Analysis Components
 
@@ -388,11 +471,14 @@ Take Profit: 1.1300
 Confirmation: SMT divergence, bullish engulfing pattern, RSI above 50.  
 ```
 
-## Risk Management Integration
+### Performance Optimization
+- Efficient data processing
+- Cached calculations
+- Optimized loops
+- Memory management
 
-- Signals are passed to risk management module
-- Position sizing based on:
-  - Signal confidence
-  - Market volatility
-  - Current exposure
-  - Account risk parameters
+### Monitoring and Feedback
+- Signal quality tracking
+- Performance metrics
+- Error rate monitoring
+- Adaptation mechanisms

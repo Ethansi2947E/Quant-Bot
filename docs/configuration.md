@@ -12,36 +12,40 @@ The system now uses optimized settings for each timeframe:
 ```python
 TIMEFRAME_THRESHOLDS = {
     'M5': {
-        'base_score': 0.75,
-        'ranging_market': 0.4,
-        'trending_market': 0.8,
+        'base_score': 0.65,
+        'ranging_market': 0.45,
+        'trending_market': 0.75,
         'volatility_filter': 1.2,
-        'min_trend_strength': 0.65,
-        'rr_ratio': 2.0
+        'min_trend_strength': 0.60,
+        'rr_ratio': 2.0,
+        'min_confirmations': 2
     },
     'M15': {
-        'base_score': 0.65,
-        'ranging_market': 0.35,
-        'trending_market': 0.75,
-        'volatility_filter': 1.3,
-        'min_trend_strength': 0.6,
-        'rr_ratio': 2.0
+        'base_score': 0.70,
+        'ranging_market': 0.45,
+        'trending_market': 0.80,
+        'volatility_filter': 1.2,
+        'min_trend_strength': 0.65,
+        'rr_ratio': 2.0,
+        'min_confirmations': 3
     },
     'H1': {
-        'base_score': 0.6,
-        'ranging_market': 0.3,
-        'trending_market': 0.7,
-        'volatility_filter': 1.4,
-        'min_trend_strength': 0.55,
-        'rr_ratio': 2.2
+        'base_score': 0.65,
+        'ranging_market': 0.40,
+        'trending_market': 0.75,
+        'volatility_filter': 1.2,
+        'min_trend_strength': 0.60,
+        'rr_ratio': 2.4,
+        'min_confirmations': 2
     },
     'H4': {
-        'base_score': 0.55,
-        'ranging_market': 0.25,
-        'trending_market': 0.65,
-        'volatility_filter': 1.5,
-        'min_trend_strength': 0.5,
-        'rr_ratio': 2.5
+        'base_score': 0.65,
+        'ranging_market': 0.40,
+        'trending_market': 0.70,
+        'volatility_filter': 1.1,
+        'min_trend_strength': 0.60,
+        'rr_ratio': 2.8,
+        'min_confirmations': 2
     }
 }
 ```
@@ -53,28 +57,28 @@ Each timeframe has specific component weights:
 ```python
 TIMEFRAME_WEIGHTS = {
     'M5': {
-        'structure': 0.45,
+        'structure': 0.35,
         'volume': 0.25,
-        'smc': 0.20,
-        'mtf': 0.10
+        'smc': 0.25,
+        'mtf': 0.15
     },
     'M15': {
-        'structure': 0.40,
-        'volume': 0.30,
-        'smc': 0.20,
-        'mtf': 0.10
+        'structure': 0.35,
+        'volume': 0.25,
+        'smc': 0.25,
+        'mtf': 0.15
     },
     'H1': {
-        'structure': 0.35,
+        'structure': 0.30,
         'volume': 0.30,
-        'smc': 0.20,
+        'smc': 0.25,
         'mtf': 0.15
     },
     'H4': {
-        'structure': 0.30,
+        'structure': 0.35,
         'volume': 0.25,
         'smc': 0.25,
-        'mtf': 0.20
+        'mtf': 0.15
     }
 }
 ```
@@ -130,36 +134,79 @@ BACKTEST_CONFIG = {
 
 ```python
 RISK_CONFIG = {
-    "max_daily_trades": 5,
-    "max_concurrent_trades": 3,
-    "max_daily_drawdown": 0.02,
-    "max_position_size": 0.05,
-    "trailing_stop": {
-        "enable": True,
-        "activation": 0.01,
-        "step": 0.005
+    "max_daily_trades": 4,
+    "max_concurrent_trades": 2,
+    "min_trades_spacing": 1,
+    "max_daily_loss": 0.015,
+    "max_drawdown_pause": 0.05,
+    "max_weekly_trades": 16,
+    "min_win_rate_continue": 0.30,
+    "max_risk_per_trade": 0.01,
+    "consecutive_loss_limit": 4,
+    "volatility_scaling": True,
+    "partial_tp_enabled": True,
+    "recovery_mode": {
+        "enabled": True,
+        "drawdown_trigger": 0.05,
+        "position_size_reduction": 0.5,
+        "min_wins_to_exit": 2
     }
 }
 ```
 
-### Market Structure Settings
+### Market Structure Configuration
 
 ```python
 MARKET_STRUCTURE_CONFIG = {
     "swing_detection": {
-        "lookback_periods": 10,
-        "threshold": 0.0005,
-        "min_swing_size": 0.0015
+        "H4": {
+            "lookback_periods": 10,
+            "threshold_pips": 3,
+            "min_swing_pips": 10
+        },
+        "H1": {
+            "lookback_periods": 8,
+            "threshold_pips": 2.5,
+            "min_swing_pips": 8
+        },
+        "M15": {
+            "lookback_periods": 6,
+            "threshold_pips": 1.5,
+            "min_swing_pips": 5
+        },
+        "M5": {
+            "lookback_periods": 5,
+            "threshold_pips": 1.0,
+            "min_swing_pips": 3
+        }
     },
-    "order_blocks": {
-        "threshold": 0.0015,
-        "min_size": 0.0010,
-        "max_age": 50
+    "structure_levels": {
+        "H4": {
+            "ob_size": 5.0,
+            "fvg_threshold": 2.5,
+            "bos_threshold": 2.5
+        },
+        "H1": {
+            "ob_size": 4.0,
+            "fvg_threshold": 2.0,
+            "bos_threshold": 2.0
+        },
+        "M15": {
+            "ob_size": 2.5,
+            "fvg_threshold": 1.5,
+            "bos_threshold": 1.5
+        },
+        "M5": {
+            "ob_size": 1.5,
+            "fvg_threshold": 1.0,
+            "bos_threshold": 1.0
+        }
     },
-    "fair_value_gaps": {
-        "threshold": 0.0005,
-        "min_size": 0.0003,
-        "max_age": 30
+    "timeframe_weights": {
+        "H4": 1.0,
+        "H1": 0.8,
+        "M15": 0.7,
+        "M5": 0.5
     }
 }
 ```
@@ -199,9 +246,10 @@ SESSION_CONFIG = {
 
 ```python
 SIGNAL_THRESHOLDS = {
-    "strong": 0.70,
-    "moderate": 0.60,
-    "weak": 0.50
+    "strong": 0.65,
+    "moderate": 0.55,
+    "weak": 0.45,
+    "minimum": 0.35
 }
 ```
 
@@ -211,10 +259,49 @@ SIGNAL_THRESHOLDS = {
 CONFIRMATION_CONFIG = {
     "min_required": 2,
     "weights": {
-        "trend": 0.4,
-        "structure": 0.3,
-        "volume": 0.2,
-        "momentum": 0.1
+        "smt_divergence": 0.3,
+        "liquidity_sweep": 0.3,
+        "momentum": 0.2,
+        "pattern": 0.2
+    }
+}
+```
+
+### Market Condition Filters
+
+```python
+MARKET_CONDITION_FILTERS = {
+    "min_daily_range": 0.0012,
+    "max_daily_range": 0.0140,
+    "min_volume_threshold": 600,
+    "max_spread_threshold": 0.0004,
+    "correlation_threshold": 0.80,
+    "trend_strength_min": 0.45,
+    "volatility_percentile": 0.15,
+    "momentum_threshold": 0.012,
+    "M15": {
+        "min_daily_range": 0.0010,
+        "max_daily_range": 0.0120,
+        "min_volume_threshold": 400,
+        "max_spread_threshold": 0.0004,
+        "min_confirmations": 2
+    }
+}
+```
+
+### Trade Exit Configuration
+
+```python
+TRADE_EXITS = {
+    "partial_tp_ratio": 0.5,
+    "tp_levels": [
+        {"ratio": 1.0, "size": 0.5},
+        {"ratio": 2.0, "size": 0.5}
+    ],
+    "trailing_stop": {
+        "enabled": True,
+        "activation_ratio": 1.0,
+        "trail_points": 0.5
     }
 }
 ```

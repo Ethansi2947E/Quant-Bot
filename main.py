@@ -3,6 +3,9 @@ import sys
 from loguru import logger
 from config.config import *  # Import all config variables
 import MetaTrader5 as mt5
+import uvicorn
+from src.api import app
+from src.trading_bot import TradingBot
 
 # Configure colored logging format
 log_format = (
@@ -11,6 +14,17 @@ log_format = (
     "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
     "<level>{message}</level>"
 )
+
+async def start_fastapi():
+    """Start the FastAPI server."""
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 async def main():
     # Configure logging
@@ -45,9 +59,11 @@ async def main():
             'LOG_CONFIG': LOG_CONFIG
         })
         
-        # Initialize and start the bot
-        bot = TradingBot(config)
-        await bot.start()
+        # Start both the FastAPI server and the trading bot
+        await asyncio.gather(
+            start_fastapi(),
+            TradingBot(config).start()
+        )
         
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
@@ -60,15 +76,4 @@ async def main():
         logger.info("Bot shutdown complete")
 
 if __name__ == "__main__":
-    # Import here to avoid circular imports
-    from src.trading_bot import TradingBot
-    
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {str(e)}")
-        # Ensure MT5 is properly shut down
-        if mt5.initialize():
-            mt5.shutdown() 
+    asyncio.run(main()) 

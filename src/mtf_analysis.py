@@ -14,7 +14,7 @@ class MTFAnalysis:
             "M5": 0.10
         }
     
-    def analyze(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame]], timeframe: Optional[str] = None) -> Union[float, Dict]:
+    def analyze(self, data: Union[pd.DataFrame, Dict[str, pd.DataFrame]], timeframe: Optional[str] = None) -> Dict:
         """
         Analyze price action for single or multiple timeframes.
         
@@ -23,23 +23,32 @@ class MTFAnalysis:
             timeframe: Optional timeframe identifier when passing a single DataFrame
             
         Returns:
-            Union[float, Dict]: Single timeframe score or multi-timeframe analysis results
+            Dict: Analysis results with consistent structure
         """
         try:
             # Handle single timeframe analysis
             if isinstance(data, pd.DataFrame):
-                return self._analyze_single_timeframe(data)
+                score = self._analyze_single_timeframe(data)
+                trend = 'bullish' if score > 0 else 'bearish' if score < 0 else 'neutral'
+                return {
+                    'trend': trend,
+                    'score': score,
+                    'timeframe': timeframe or 'unknown',
+                    'key_levels': self._find_key_levels(data),
+                    'confidence': abs(score),
+                    'analysis_type': 'single_timeframe'
+                }
             
             # Handle multi-timeframe analysis
             elif isinstance(data, dict):
-                return self.analyze_mtf(data)
+                return self.analyze_mtf(data, timeframe)
             
             else:
                 raise ValueError("Data must be either a DataFrame or a dictionary of DataFrames")
                 
         except Exception as e:
             logger.error(f"Error in analysis: {str(e)}")
-            return 0.0 if isinstance(data, pd.DataFrame) else self._get_default_analysis()
+            return self._get_default_analysis()
             
     def _analyze_single_timeframe(self, df: pd.DataFrame) -> float:
         """
@@ -78,14 +87,52 @@ class MTFAnalysis:
             logger.error(f"Error in single timeframe analysis: {str(e)}")
             return 0.0
     
-    def analyze_mtf(self, dataframes: Dict[str, pd.DataFrame]) -> Dict:
-        """Analyze price action across multiple timeframes."""
+    def analyze_mtf(self, dataframes: Dict[str, Union[pd.DataFrame, pd.Series]], timeframe: Optional[str] = None) -> Dict:
+        """
+        Analyze price action across multiple timeframes.
+        
+        Args:
+            dataframes: Dictionary of DataFrames/Series for multiple timeframes
+            timeframe: Optional timeframe identifier for the current analysis
+            
+        Returns:
+            Dict: Analysis results
+        """
         try:
-            # Check which timeframes are available
-            available_timeframes = list(dataframes.keys())
+            # Validate input is a dictionary with proper timeframe keys
+            valid_timeframes = set(self.timeframes)
+            available_timeframes = [tf for tf in dataframes.keys() if tf in valid_timeframes]
+            
             if not available_timeframes:
-                logger.warning("No timeframe data available for MTF analysis")
+                logger.warning("No valid timeframe data available for MTF analysis")
                 return self._get_default_analysis()
+            
+            # Convert any Series to DataFrame and validate data structure
+            processed_data = {}
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            
+            for tf in available_timeframes:
+                data = dataframes[tf]
+                
+                # Convert Series to DataFrame if necessary
+                if isinstance(data, pd.Series):
+                    df = pd.DataFrame()
+                    df[data.name] = data
+                    # Fill other columns with the same data
+                    for col in required_columns:
+                        if col not in df.columns:
+                            df[col] = data
+                else:
+                    df = data.copy()
+                    # Check for required columns
+                    for col in required_columns:
+                        if col not in df.columns:
+                            if col == 'volume':
+                                df[col] = 1
+                            else:
+                                df[col] = df['close'] if 'close' in df.columns else df.iloc[:, 0]
+                
+                processed_data[tf] = df
             
             # Recalculate weights based on available timeframes
             total_weight = sum(self.weights[tf] for tf in available_timeframes)
@@ -97,10 +144,10 @@ class MTFAnalysis:
             logger.info(f"Analyzing {len(available_timeframes)} timeframes: {', '.join(available_timeframes)}")
             logger.debug(f"Adjusted weights: {adjusted_weights}")
             
-            # Analyze available timeframes
-            trend_analysis = self._analyze_trend_alignment(dataframes, adjusted_weights)
-            structure_analysis = self._analyze_structure_alignment(dataframes, adjusted_weights)
-            momentum_analysis = self._analyze_momentum_alignment(dataframes, adjusted_weights)
+            # Analyze available timeframes with processed data
+            trend_analysis = self._analyze_trend_alignment(processed_data, adjusted_weights)
+            structure_analysis = self._analyze_structure_alignment(processed_data, adjusted_weights)
+            momentum_analysis = self._analyze_momentum_alignment(processed_data, adjusted_weights)
             
             # Calculate overall bias with confidence adjustment
             confidence_factor = len(available_timeframes) / len(self.timeframes)
@@ -117,7 +164,8 @@ class MTFAnalysis:
                 'momentum_alignment': momentum_analysis,
                 'overall_bias': bias,
                 'available_timeframes': available_timeframes,
-                'confidence_factor': confidence_factor
+                'confidence_factor': confidence_factor,
+                'current_timeframe': timeframe
             }
             
         except Exception as e:
@@ -414,4 +462,29 @@ class MTFAnalysis:
                 'strength': 0,
                 'confidence': 0
             }
-        } 
+        }
+    
+    def _find_key_levels(self, df: pd.DataFrame) -> List[float]:
+        """Find key price levels in the data."""
+        try:
+            levels = []
+            
+            # Add recent swing highs and lows
+            window = 10
+            for i in range(window, len(df)-window):
+                # Swing high
+                if df['high'].iloc[i] == df['high'].iloc[i-window:i+window+1].max():
+                    levels.append(df['high'].iloc[i])
+                # Swing low
+                if df['low'].iloc[i] == df['low'].iloc[i-window:i+window+1].min():
+                    levels.append(df['low'].iloc[i])
+            
+            # Remove duplicates and sort
+            levels = sorted(list(set(levels)))
+            
+            # Keep only the most recent levels (last 5)
+            return levels[-5:] if levels else []
+            
+        except Exception as e:
+            logger.error(f"Error finding key levels: {str(e)}")
+            return [] 

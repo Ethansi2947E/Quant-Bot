@@ -120,8 +120,39 @@ class MT5Handler:
             logger.error(f"Failed to get symbol info for {symbol}")
             return None
         
-        point = symbol_info.point
-        price = symbol_info.ask if action == mt5.ORDER_TYPE_BUY else symbol_info.bid
+        # Get current price
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            logger.error(f"Failed to get tick data for {symbol}")
+            return None
+            
+        # Use proper price based on order type
+        price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
+        
+        # Validate stop loss and take profit levels
+        if action == mt5.ORDER_TYPE_BUY:
+            if stop_loss >= price:
+                logger.error(f"Invalid stop loss for BUY order: SL ({stop_loss}) must be below entry ({price})")
+                return None
+            if take_profit <= price:
+                logger.error(f"Invalid take profit for BUY order: TP ({take_profit}) must be above entry ({price})")
+                return None
+        else:  # SELL
+            if stop_loss <= price:
+                logger.error(f"Invalid stop loss for SELL order: SL ({stop_loss}) must be above entry ({price})")
+                return None
+            if take_profit >= price:
+                logger.error(f"Invalid take profit for SELL order: TP ({take_profit}) must be below entry ({price})")
+                return None
+        
+        # Get filling mode
+        filling_type = mt5.symbol_info(symbol).filling_mode
+        if filling_type & mt5.SYMBOL_FILLING_FOK:
+            filling = mt5.ORDER_FILLING_FOK
+        elif filling_type & mt5.SYMBOL_FILLING_IOC:
+            filling = mt5.ORDER_FILLING_IOC
+        else:
+            filling = mt5.ORDER_FILLING_RETURN
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -135,24 +166,39 @@ class MT5Handler:
             "magic": 234000,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": filling,
         }
         
-        result = mt5.order_send(request)
-        if result is None:
-            logger.error(f"Order failed. Error: {mt5.last_error()}")
-            return None
+        # Try to send order
+        max_retries = 3
+        for attempt in range(max_retries):
+            result = mt5.order_send(request)
+            if result is None:
+                logger.error(f"Order failed. Error: {mt5.last_error()}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
+                    continue
+                return None
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                error_msg = f"Order failed. Retcode: {result.retcode}"
+                if hasattr(result, 'comment'):
+                    error_msg += f", Comment: {result.comment}"
+                logger.error(error_msg)
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
+                    continue
+                return None
+            
+            # Order successful
+            return {
+                "ticket": result.order,
+                "volume": result.volume,
+                "price": result.price,
+                "comment": comment
+            }
         
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"Order failed. Retcode: {result.retcode}")
-            return None
-        
-        return {
-            "ticket": result.order,
-            "volume": result.volume,
-            "price": result.price,
-            "comment": comment
-        }
+        return None
     
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Get all open positions."""
@@ -208,9 +254,9 @@ class MT5Handler:
         
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"Failed to close position. Error: {mt5.last_error()}")
+            logger.error(f"Failed to close position {ticket}. Error: {mt5.last_error()}")
             return False
-        
+            
         return True
     
     def get_historical_data(
@@ -266,4 +312,13 @@ class MT5Handler:
         """Cleanup MT5 connection."""
         if self.connected:
             mt5.shutdown()
-            logger.info("MT5 connection closed") 
+            logger.info("MT5 connection closed")
+
+    async def get_rates(self, symbol: str, timeframe: str, num_candles: int = 1000) -> Optional[pd.DataFrame]:
+        """Async wrapper around get_market_data for compatibility."""
+        try:
+            logger.debug(f"Fetching {num_candles} candles of {timeframe} data for {symbol}")
+            return self.get_market_data(symbol, timeframe, num_candles)
+        except Exception as e:
+            logger.error(f"Error getting rates for {symbol} {timeframe}: {str(e)}")
+            return None 
