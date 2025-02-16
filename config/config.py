@@ -1,6 +1,8 @@
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import logging
+from typing import Dict, Any
 
 # Load environment variables
 load_dotenv()
@@ -24,10 +26,16 @@ MT5_CONFIG = {
 
 # Trading Configuration
 TRADING_CONFIG = {
-    "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDCAD"],  # Trading pairs
-    "timeframes": ["M5", "M15", "H1", "H4"],  # Timeframes to analyze
-    "risk_per_trade": 0.02,  # 2% risk per trade
-    "max_daily_risk": 0.06,  # 6% max daily risk
+    "symbols": ['AUDUSD', 'EURJPY', 'GBPJPY', 'AUDJPY', 'EURGBP', 'EURCHF', 'AUDNZD', 'AUDCAD', 'CADJPY'],
+    "timeframes": ['M15'],
+    "risk_per_trade": 0.008,
+    "max_daily_risk": 0.06,
+    "min_volatility": 5.0,
+    "max_spread": 3.5,
+    "min_atr": 4.0,
+    "max_atr": 100.0,
+    "volatility_factor": 1.2,
+    "spread_factor": 1.5,
 }
 
 # Telegram Configuration
@@ -61,30 +69,59 @@ LOG_CONFIG = {
 }
 
 # Session Configuration
-SESSION_CONFIG = {
-    "asian_session": {
-        "start": "00:00",  # UTC
-        "end": "08:00",    # UTC
-        "volatility_factor": 0.7,
-        "pairs": ["USDJPY", "AUDJPY", "EURJPY"],
-        "min_range_pips": 4,    # Decreased from 6
-        "max_range_pips": 130   # Increased from 115
+SESSION_CONFIG: Dict[str, Dict[str, Any]] = {
+    "asia_session": {
+        "enabled": True,
+        "start": "00:00",
+        "end": "08:00",
+        "pairs": [],
+        "min_range_pips": 4,
+        "max_range_pips": 115,
+        "volatility_factor": 1
     },
     "london_session": {
-        "start": "08:00",  # UTC
-        "end": "16:00",    # UTC
-        "volatility_factor": 1.0,
-        "pairs": ["EURUSD", "GBPUSD", "EURGBP", "USDJPY"],
-        "min_range_pips": 5,    # Decreased from 6
-        "max_range_pips": 200   # Increased from 173
+        "enabled": True,
+        "start": "08:00",
+        "end": "16:00",
+        "pairs": [],
+        "min_range_pips": 5,
+        "max_range_pips": 173,
+        "volatility_factor": 1.2
     },
     "new_york_session": {
-        "start": "13:00",  # UTC
-        "end": "21:00",    # UTC
-        "volatility_factor": 1.0,
-        "pairs": ["EURUSD", "GBPUSD", "USDCAD", "USDJPY"],
-        "min_range_pips": 5,    # Decreased from 6
-        "max_range_pips": 200   # Increased from 173
+        "enabled": True,
+        "start": "13:00",
+        "end": "21:00",
+        "pairs": [],
+        "min_range_pips": 5,
+        "max_range_pips": 173,
+        "volatility_factor": 1.2
+    }
+}
+
+# Market Schedule Configuration
+MARKET_SCHEDULE_CONFIG = {
+    "trading_hours": {
+        "forex": {
+            "sunday_open": "17:00",    # Sunday NY time
+            "friday_close": "17:00",   # Friday NY time
+            "daily_break": None        # Forex trades 24h except weekends
+        },
+    },
+    "holidays": {
+        "2024": {
+            "new_years": "2024-01-01",
+            "good_friday": "2024-03-29",
+            "easter_monday": "2024-04-01",
+            "christmas": "2024-12-25",
+            "boxing_day": "2024-12-26"
+        }
+    },
+    "partial_trading_days": {
+        "2024": {
+            "christmas_eve": {"date": "2024-12-24", "close_time": "13:00"},
+            "new_years_eve": {"date": "2024-12-31", "close_time": "13:00"}
+        }
     }
 }
 
@@ -144,10 +181,14 @@ MARKET_STRUCTURE_CONFIG = {
 
 # Signal Classification Thresholds
 SIGNAL_THRESHOLDS = {
-    "strong": 0.6,    # Decreased from 0.7
-    "moderate": 0.4,  # Decreased from 0.5
-    "weak": 0.25      # Decreased from 0.3
+    "strong": 0.8,
+    "moderate": 0.6,
+    "weak": 0.4,
+    "minimum": 0.2,
 }
+
+# Log the signal thresholds
+logging.info(f"Loaded SIGNAL_THRESHOLDS: {SIGNAL_THRESHOLDS}")
 
 # Confirmation Requirements
 CONFIRMATION_CONFIG = {
@@ -168,7 +209,7 @@ BACKTEST_CONFIG = {
     "commission": 0.0001,         # Commission per trade (0.01%)
     "spread": 2,                  # Spread in points
     "symbols": ["EURUSD", "GBPUSD", "USDJPY", "AUDCAD"],  # Symbols to backtest
-    "timeframes": ["M15", "H1", "H4"],          # Timeframes to analyze
+    "timeframes": ["M15"],        # Only using 15-minute timeframe
     "risk_per_trade": 0.01,      # Risk per trade (1% of balance)
     "enable_visualization": True, # Enable trade visualization
     "save_results": True,        # Save backtest results to file

@@ -16,6 +16,7 @@ class TelegramBot:
         self.application = None
         self.bot = None
         self.trade_history = []
+        self.is_running = False  # Add state tracking
         self.performance_metrics = {
             'total_trades': 0,
             'winning_trades': 0,
@@ -36,7 +37,10 @@ class TelegramBot:
             if not TELEGRAM_CONFIG.get("bot_token"):
                 logger.error("No bot token provided in TELEGRAM_CONFIG")
                 return False
-                
+            
+            # Stop any existing application
+            await self.stop()
+            
             logger.info("Building Telegram application...")
             self.application = Application.builder().token(TELEGRAM_CONFIG["bot_token"]).build()
             
@@ -67,26 +71,35 @@ class TelegramBot:
             
             logger.info("Starting Telegram application...")
             
-            # Start the bot with retries
+            # Start the bot with retries and exponential backoff
             max_retries = 3
-            retry_interval = 5  # seconds
+            retry_interval = 5
             
             for attempt in range(max_retries):
                 try:
                     await self.application.initialize()
                     await self.application.start()
                     await self.application.updater.start_polling()
+                    self.is_running = True  # Mark as running after successful start
                     break
                 except ConnectError as e:
                     logger.error(f"Failed to connect to Telegram API (attempt {attempt+1}/{max_retries}): {str(e)}")
                     if attempt < max_retries - 1:
-                        logger.info(f"Retrying in {retry_interval} seconds...")
+                        logger.warning(f"Retrying in {retry_interval} seconds...")
                         await asyncio.sleep(retry_interval)
                         retry_interval *= 2  # Exponential backoff
                     else:
                         logger.error("Failed to connect to Telegram API after multiple retries")
                         await self.send_error_alert("Failed to connect to Telegram API. Bot is shutting down.")
                         return False
+                except Exception as e:
+                    logger.error(f"Error starting Telegram bot (attempt {attempt+1}/{max_retries}): {str(e)}")
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Retrying in {retry_interval} seconds...")
+                        await asyncio.sleep(retry_interval)
+                        retry_interval *= 2
+                    else:
+                        raise
             
             self.bot = self.application.bot
             
@@ -124,11 +137,7 @@ Use /help to see available commands.
             
         except Exception as e:
             logger.error(f"Failed to initialize Telegram bot: {str(e)}")
-            if self.application:
-                try:
-                    await self.application.stop()
-                except Exception:
-                    pass
+            await self.stop()
             return False
     
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -212,6 +221,10 @@ Use /metrics for detailed performance stats."""
         if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
             if self.trading_enabled:
                 await update.message.reply_text("Trading is already enabled.")
+                return
+                
+            if not self.is_running:
+                await update.message.reply_text("Cannot enable trading - bot is not running.")
                 return
                 
             self.trading_enabled = True
@@ -545,18 +558,55 @@ Stay profitable! 📈"""
     
     async def stop(self):
         """Stop the Telegram bot."""
-        if self.application:
-            logger.info("Stopping Telegram bot...")
-            try:
-                if self.application.updater:
-                    await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-                logger.info("Telegram bot stopped successfully")
-            except asyncio.CancelledError:
-                logger.warning("Polling task cancelled. This is expected during bot shutdown.")
-            except Exception as e:
-                logger.error(f"Error stopping Telegram bot: {str(e)}")
+        try:
+            if self.is_running:
+                logger.info("Stopping Telegram bot...")
+                try:
+                    # First disable trading
+                    self.trading_enabled = False
+                    
+                    # Get the current event loop
+                    loop = asyncio.get_running_loop()
+                    
+                    # Stop the updater first if it exists and is running
+                    if hasattr(self, 'application') and self.application:
+                        if hasattr(self.application, 'updater') and self.application.updater:
+                            try:
+                                # Cancel polling task if it exists
+                                if hasattr(self.application.updater, '_polling_task'):
+                                    self.application.updater._polling_task.cancel()
+                                await self.application.updater.stop()
+                            except Exception as e:
+                                logger.warning(f"Error stopping updater: {str(e)}")
+                        
+                        # Then shutdown the application
+                        try:
+                            await self.application.shutdown()
+                        except Exception as e:
+                            logger.warning(f"Error during application shutdown: {str(e)}")
+                        
+                        # Clear application reference
+                        self.application = None
+                    
+                    # Clear bot reference
+                    self.bot = None
+                    
+                    # Update state
+                    self.is_running = False
+                    
+                    logger.info("Telegram bot stopped successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Error during Telegram bot shutdown: {str(e)}")
+                    # Ensure states are cleared even if there were errors
+                    self.is_running = False
+                    self.trading_enabled = False
+                    self.application = None
+                    self.bot = None
+                
+        except Exception as e:
+            logger.error(f"Error stopping Telegram bot: {str(e)}")
+            raise
     
     async def send_message(self, message: str):
         """Send message to all allowed users."""
@@ -583,7 +633,7 @@ Stay profitable! 📈"""
         pnl: Optional[float] = None
     ):
         """Send trade update to users."""
-        update_msg = f"""📊 <b>Trade Update</b> 📊
+        update_msg = f"""📊 <b>Trade Update</b> ��
 
 Trade ID: {trade_id}
 Symbol: {symbol}
