@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time, UTC
 from loguru import logger
 from collections import deque
 import MetaTrader5 as mt5
@@ -12,6 +12,10 @@ from asgiref.wsgi import WsgiToAsgi
 from hypercorn.config import Config as HyperConfig
 from hypercorn.asyncio import serve
 import sys  # add import at top if not present
+from pathlib import Path
+from fastapi import HTTPException
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 class CustomJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder to handle special types."""
@@ -30,7 +34,32 @@ class CustomJSONEncoder(json.JSONEncoder):
 
 app = Flask(__name__, static_folder='templates/build/static')
 app.json_encoder = CustomJSONEncoder
-CORS(app)  # Enable CORS for all routes
+
+# Configure CORS with more specific settings
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True
+    }
+})
+
+# Add error handlers
+@app.errorhandler(404)
+def not_found_error(error):
+    return jsonify({"error": "Resource not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # Convert WSGI app to ASGI
 asgi_app = WsgiToAsgi(app)
@@ -46,7 +75,7 @@ def init_app(bot):
     
     # Configure Hypercorn
     config = HyperConfig()
-    config.bind = ["localhost:5000"]
+    config.bind = ["0.0.0.0:5000"]  # Allow external connections
     config.use_reloader = False
     
     # Create a shutdown event and start the server with a shutdown trigger
@@ -103,17 +132,36 @@ def calculate_cumulative_profit():
 def get_profit_history(timeframe="24H"):
     """Get profit history for the specified timeframe."""
     try:
+        if not profit_history:
+            return []
+            
         now = datetime.now()
-        if timeframe == "24H":
-            cutoff = now - timedelta(hours=24)
-        elif timeframe == "7D":
-            cutoff = now - timedelta(days=7)
-        elif timeframe == "30D":
-            cutoff = now - timedelta(days=30)
-        else:  # ALL
-            return list(profit_history)
         
-        return [entry for entry in profit_history if entry['timestamp'] >= cutoff]
+        # Convert timeframe to timedelta
+        if timeframe == "24H":
+            delta = timedelta(hours=24)
+        elif timeframe == "7D":
+            delta = timedelta(days=7)
+        elif timeframe == "30D":
+            delta = timedelta(days=30)
+        else:  # ALL
+            delta = timedelta(days=365)  # Return all data up to a year
+            
+        cutoff_time = now - delta
+        
+        # Filter and format profit history
+        filtered_history = [
+            {
+                'timestamp': entry['timestamp'].isoformat(),
+                'profit': entry['profit'],
+                'trade_type': entry['trade_type'],
+                'cumulative': entry['cumulative']
+            }
+            for entry in profit_history
+            if entry['timestamp'] >= cutoff_time
+        ]
+        
+        return filtered_history
     except Exception as e:
         logger.error(f"Error getting profit history: {str(e)}")
         return []
@@ -295,45 +343,96 @@ def get_market_analysis():
 def get_trading_status():
     """Get current trading status."""
     try:
-        mt5_status = "Connected" if mt5.initialize() else "Disconnected"
-        trading_status = "Enabled" if trading_bot and trading_bot.running else "Disabled"
-        
-        active_symbols = trading_bot.trading_config["symbols"] if trading_bot else ["EURUSD", "GBPUSD", "USDJPY"]
-        win_rate = calculate_win_rate(trading_bot.trades if trading_bot else [])
-        total_profit = calculate_total_profit(trading_bot.trades if trading_bot else [])
-        total_trades = len(trading_bot.trades) if trading_bot and hasattr(trading_bot, 'trades') else 0
-        
+        # Initialize MT5 if not already initialized
+        if not mt5.initialize():
+            logger.error("Failed to initialize MT5")
+            return jsonify({'error': 'MT5 not initialized'}), 500
+
+        # Get account info
+        account_info = mt5.account_info()
+        if not account_info:
+            logger.error("Failed to get MT5 account info")
+            return jsonify({'error': 'Failed to get account info'}), 500
+
+        # Get all open positions
+        positions = mt5.positions_get()
         active_trades = []
-        if trading_bot and mt5.initialize():
-            for symbol in active_symbols:
-                positions = mt5.positions_get(symbol=symbol)
-                if positions:
-                    for pos in positions:
-                        active_trades.append({
-                            'symbol': pos.symbol,
-                            'type': 'BUY' if pos.type == 0 else 'SELL',
-                            'entry': pos.price_open,
-                            'sl': pos.sl,
-                            'tp': pos.tp,
-                            'profit': pos.profit
-                        })
+        
+        if positions:
+            for pos in positions:
+                # Calculate current profit in percentage
+                profit_percent = (pos.profit / account_info.balance) * 100 \
+                    if account_info.balance > 0 else 0
+                active_trades.append({
+                    'ticket': pos.ticket,
+                    'symbol': pos.symbol,
+                    'type': 'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL',
+                    'volume': pos.volume,
+                    'entry_price': pos.price_open,
+                    'current_price': pos.price_current,
+                    'sl': pos.sl,
+                    'tp': pos.tp,
+                    'profit': pos.profit,
+                    'profit_percent': profit_percent,
+                    'swap': pos.swap,
+                    'time': pos.time,
+                    'comment': pos.comment
+                })
+
+        # Calculate performance metrics
+        total_profit = account_info.profit
+        equity = account_info.equity
+        balance = account_info.balance
+        
+        # Calculate win rate from closed positions history
+        today = datetime.now().date()
+        start_of_day = int(datetime.combine(today, time.min).timestamp())
+        
+        # Get today's deals
+        deals = mt5.history_deals_get(start_of_day)
+        if deals:
+            winning_trades = len([deal for deal in deals if deal.profit > 0])
+            total_trades = len(deals)
+            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        else:
+            win_rate = 0
+            
+        # Calculate max drawdown
+        deals_with_equity = mt5.history_deals_get(start_of_day)
+        if deals_with_equity:
+            running_equity = [balance]
+            for deal in deals_with_equity:
+                running_equity.append(running_equity[-1] + deal.profit)
+            peak = max(running_equity)
+            max_drawdown = ((peak - min(running_equity)) / peak * 100) if peak > 0 else 0
+        else:
+            max_drawdown = 0
 
         return jsonify({
-            'mt5_status': mt5_status,
-            'trading_status': trading_status,
-            'win_rate': win_rate,
-            'total_profit': total_profit,
-            'total_trades': total_trades,
-            'active_symbols': active_symbols,
+            'mt5_status': "Connected",
+            'trading_status': "Enabled" if trading_bot and trading_bot.running else "Disabled",
+            'account_info': {
+                'balance': balance,
+                'equity': equity,
+                'profit': total_profit,
+                'margin': account_info.margin,
+                'margin_free': account_info.margin_free,
+                'margin_level': account_info.margin_level,
+                'currency': account_info.currency
+            },
+            'performance': {
+                'total_return': ((equity - balance) / balance * 100) if balance > 0 else 0,
+                'win_rate': round(win_rate, 2),
+                'max_drawdown': round(max_drawdown, 2),
+                'sharpe_ratio': 0.0  # This would need historical data to calculate properly
+            },
             'active_trades': active_trades,
-            'recent_signals': get_recent_signals(),
-            'active_pois': get_active_pois(),
             'last_update': datetime.now().isoformat()
         })
 
-    except (KeyError, AttributeError) as e:
+    except Exception as e:
         logger.error(f"Error getting trading status: {str(e)}")
-        return jsonify({'error': str(e)})
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard_data():
@@ -436,21 +535,30 @@ def get_trading_data():
                     'currency': account_info.currency
                 }
         
-        # Get data from trading bot
+        # Get active trades from MT5 terminal
+        positions = mt5.positions_get()
         active_trades = []
-        if hasattr(trading_bot, 'trades'):
-            active_trades = [
-                {
-                    'symbol': trade.symbol,
-                    'type': trade.type,
-                    'entry': trade.entry_price,
-                    'sl': trade.stop_loss,
-                    'tp': trade.take_profit,
-                    'profit': trade.current_profit,
-                    'volume': trade.volume if hasattr(trade, 'volume') else 0.01
-                }
-                for trade in trading_bot.trades if getattr(trade, 'is_open', True)
-            ]
+        
+        if positions:
+            for pos in positions:
+                # Calculate current profit in percentage
+                profit_percent = (pos.profit / account_info.balance) * 100 \
+                    if account_info.balance > 0 else 0
+                active_trades.append({
+                    'ticket': pos.ticket,
+                    'symbol': pos.symbol,
+                    'type': 'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL',
+                    'volume': pos.volume,
+                    'entry_price': pos.price_open,
+                    'current_price': pos.price_current,
+                    'sl': pos.sl,
+                    'tp': pos.tp,
+                    'profit': pos.profit,
+                    'profit_percent': profit_percent,
+                    'swap': pos.swap,
+                    'time': pos.time,
+                    'comment': pos.comment
+                })
         
         # Calculate total and daily profit
         total_profit = sum(getattr(trade, 'realized_profit', 0) for trade in getattr(trading_bot, 'trades', []))
@@ -495,90 +603,183 @@ def get_trading_data():
         logger.error(f"Error getting trading data: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/toggle-trading', methods=['POST'])
-async def toggle_trading():
-    """Toggle the trading bot's status."""
-    if not trading_bot:
-        return jsonify({'error': 'Trading bot not initialized'}), 500
-        
+@app.route('/api/enable-trading', methods=['POST'])
+async def enable_trading():
+    """Enable trading from dashboard."""
     try:
-        # Get current states
+        if not trading_bot:
+            return jsonify({"status": "error", "message": "Trading bot not initialized"}), 500
+            
+        success = await trading_bot.enable_trading()
+        if success:
+            return jsonify({"status": "success", "message": "Trading enabled"})
+        else:
+            return jsonify({"status": "error", "message": "Failed to enable trading"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/disable-trading', methods=['POST'])
+async def disable_trading():
+    """Disable trading from dashboard."""
+    try:
+        if not trading_bot:
+            return jsonify({"status": "error", "message": "Trading bot not initialized"}), 500
+            
+        success = await trading_bot.disable_trading()
+        if success:
+            return jsonify({"status": "success", "message": "Trading disabled"})
+        else:
+            return jsonify({"status": "error", "message": "Failed to disable trading"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/trading-data/toggle', methods=['POST'])
+async def toggle_trading_data():
+    """Toggle trading status and return updated trading data."""
+    try:
+        if not trading_bot:
+            return jsonify({"status": "error", "message": "Trading bot not initialized"}), 500
+            
+        # Get current combined status
         bot_enabled = getattr(trading_bot, 'running', False)
         telegram_enabled = (
             trading_bot.telegram_bot.trading_enabled 
             if hasattr(trading_bot, 'telegram_bot') 
             else False
         )
+        current_status = bot_enabled and telegram_enabled
         
-        logger.info(f"Current states - Bot: {bot_enabled}, Telegram: {telegram_enabled}")
-        
-        # Determine desired state (opposite of current state)
-        current_state = "Enabled" if telegram_enabled else "Disabled"
-        desired_state = "Disabled" if current_state == "Enabled" else "Enabled"
-        
-        logger.info(f"Toggling trading from {current_state} to {desired_state}")
-        
-        if desired_state == "Enabled":
+        success = False
+        if current_status:
+            # If currently enabled (both are true), disable both
+            success = await trading_bot.disable_trading()
+            if success and hasattr(trading_bot, 'telegram_bot'):
+                await trading_bot.telegram_bot.disable_trading_core()
+        else:
+            # If currently disabled (either is false), enable both
+            success = await trading_bot.enable_trading()
+            if success and hasattr(trading_bot, 'telegram_bot'):
+                await trading_bot.telegram_bot.enable_trading_core()
+            
+        if success:
+            # Get updated trading data
             try:
-                # Initialize MT5 first if not already initialized
-                if not mt5.initialize():
-                    logger.error("Failed to initialize MT5 connection")
-                    return jsonify({
-                        'error': 'MT5 connection failed',
-                        'message': 'Please ensure MetaTrader 5 is running and try again'
-                    }), 500
-
-                # Test connection by trying to get account info
-                account_info = mt5.account_info()
-                if account_info is None:
-                    mt5.shutdown()
-                    logger.error("Failed to get MT5 account info")
-                    return jsonify({
-                        'error': 'MT5 connection failed',
-                        'message': 'Could not get account information. Please check your MT5 connection'
-                    }), 500
-
-                # Start the bot if not running
-                if not bot_enabled:
-                    asyncio.create_task(trading_bot.start())
-                # Enable trading in Telegram bot
-                if hasattr(trading_bot, 'telegram_bot'):
-                    trading_bot.telegram_bot.trading_enabled = True
-                status = "Enabled"
+                # Get MT5 account info
+                mt5_info = {}
+                if mt5.initialize():
+                    account_info = mt5.account_info()
+                    if account_info is not None:
+                        mt5_info = {
+                            'balance': account_info.balance,
+                            'equity': account_info.equity,
+                            'profit': account_info.profit,
+                            'margin': account_info.margin,
+                            'margin_free': account_info.margin_free,
+                            'margin_level': account_info.margin_level,
+                            'currency': account_info.currency
+                        }
                 
-            except Exception as e:
-                logger.error(f"Error enabling trading: {str(e)}")
+                # Get active trades
+                positions = mt5.positions_get()
+                active_trades = []
+                if positions:
+                    for pos in positions:
+                        profit_percent = (pos.profit / account_info.balance) * 100 if account_info.balance > 0 else 0
+                        active_trades.append({
+                            'ticket': pos.ticket,
+                            'symbol': pos.symbol,
+                            'type': 'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL',
+                            'volume': pos.volume,
+                            'entry_price': pos.price_open,
+                            'current_price': pos.price_current,
+                            'sl': pos.sl,
+                            'tp': pos.tp,
+                            'profit': pos.profit,
+                            'profit_percent': profit_percent,
+                            'swap': pos.swap,
+                            'time': pos.time,
+                            'comment': pos.comment
+                        })
+                
+                # Calculate win rate
+                trades = getattr(trading_bot, 'trades', [])
+                closed_trades = [t for t in trades if not getattr(t, 'is_open', False)]
+                winning_trades = len([t for t in closed_trades if getattr(t, 'realized_profit', 0) > 0])
+                win_rate = (winning_trades / len(closed_trades) * 100) if closed_trades else 0
+                
+                # Get new combined status after toggle
+                new_bot_enabled = getattr(trading_bot, 'running', False)
+                new_telegram_enabled = (
+                    trading_bot.telegram_bot.trading_enabled 
+                    if hasattr(trading_bot, 'telegram_bot') 
+                    else False
+                )
+                new_status = "Enabled" if (new_bot_enabled and new_telegram_enabled) else "Disabled"
+                
+                trading_data = {
+                    'mt5_account': mt5_info,
+                    'total_profit': sum(getattr(t, 'realized_profit', 0) for t in trades),
+                    'daily_profit': sum(
+                        getattr(t, 'realized_profit', 0)
+                        for t in trades
+                        if getattr(t, 'close_time', None) 
+                        and t.close_time.date() == datetime.now().date()
+                    ),
+                    'win_rate': round(win_rate, 2),
+                    'total_trades': len(trades),
+                    'trading_status': new_status,
+                    'active_trades': active_trades,
+                    'last_update': datetime.now().isoformat()
+                }
+                
                 return jsonify({
-                    'error': 'Failed to enable trading',
-                    'message': str(e)
-                }), 500
-        else:  # Disable
-            try:
-                # Only disable trading, don't stop the bot
-                if hasattr(trading_bot, 'telegram_bot'):
-                    trading_bot.telegram_bot.trading_enabled = False
-                status = "Disabled"
-            except Exception as e:
-                logger.error(f"Error disabling trading: {str(e)}")
+                    "status": "success",
+                    "message": f"Trading {'disabled' if current_status else 'enabled'} successfully",
+                    "data": trading_data
+                })
+            except Exception as data_error:
+                logger.error(f"Error getting trading data after toggle: {str(data_error)}")
                 return jsonify({
-                    'error': 'Failed to disable trading',
-                    'message': str(e)
-                }), 500
-
-        logger.info(f"Trading status changed to: {status}")
-        
-        return jsonify({
-            'success': True,
-            'trading_status': status,
-            'message': f'Trading has been {status.lower()}'
-        })
-        
+                    "status": "success",
+                    "message": f"Trading {'disabled' if current_status else 'enabled'} successfully, but failed to fetch updated data",
+                    "data": None
+                })
+        else:
+            return jsonify({
+                "status": "error", 
+                "message": f"Failed to {'disable' if current_status else 'enable'} trading"
+            }), 500
+            
     except Exception as e:
-        logger.error(f"Error toggling trading status: {str(e)}")
+        logger.error(f"Error toggling trading: {str(e)}")
         return jsonify({
-            'error': str(e),
-            'message': 'Failed to toggle trading status'
+            "status": "error",
+            "message": str(e)
         }), 500
+
+@app.route('/api/profit-history')
+def get_profit_history_endpoint():
+    """Get profit history data endpoint."""
+    try:
+        timeframe = request.args.get('timeframe', '24H')
+        history = get_profit_history(timeframe)
+        
+        if not history:
+            # Return empty data structure instead of empty list
+            return jsonify({
+                'data': [],
+                'cumulative_profit': 0,
+                'timeframe': timeframe
+            })
+            
+        return jsonify({
+            'data': history,
+            'cumulative_profit': calculate_cumulative_profit(),
+            'timeframe': timeframe
+        })
+    except Exception as e:
+        logger.error(f"Error in profit history endpoint: {str(e)}")
+        return jsonify({'error': 'Failed to fetch profit history'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000, host='0.0.0.0')

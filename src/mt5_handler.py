@@ -4,6 +4,7 @@ import pandas as pd
 from loguru import logger
 from typing import Optional, List, Dict, Any, Tuple
 import json
+import time
 
 from config.config import MT5_CONFIG, TRADING_CONFIG
 
@@ -100,31 +101,40 @@ class MT5Handler:
         take_profit: float,
         comment: str = ""
     ) -> Optional[Dict[str, Any]]:
-        """Place a market order."""
+        """Place a market order with proper validations."""
         if not self.connected:
             logger.error("MT5 not connected")
             return None
         
+        # Validate order type
         action_map = {
             "BUY": mt5.ORDER_TYPE_BUY,
             "SELL": mt5.ORDER_TYPE_SELL
         }
-        
         action = action_map.get(order_type)
         if action is None:
             logger.error(f"Invalid order type: {order_type}")
             return None
         
+        # Get symbol info and validate
         symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
             logger.error(f"Failed to get symbol info for {symbol}")
             return None
         
+        # Ensure the symbol is selected for trading
+        if not mt5.symbol_select(symbol, True):
+            logger.warning(f"Failed to select symbol {symbol} for trading; continuing anyway.")
+
         # Get current price
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
-            logger.error(f"Failed to get tick data for {symbol}")
-            return None
+            logger.error(f"Failed to get tick data for {symbol}, retrying after a short delay")
+            time.sleep(0.5)
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                logger.error(f"Failed to get tick data for {symbol} after retry")
+                return None
             
         # Use proper price based on order type
         price = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
@@ -145,15 +155,6 @@ class MT5Handler:
                 logger.error(f"Invalid take profit for SELL order: TP ({take_profit}) must be below entry ({price})")
                 return None
         
-        # Get filling mode
-        filling_type = mt5.symbol_info(symbol).filling_mode
-        if filling_type & mt5.SYMBOL_FILLING_FOK:
-            filling = mt5.ORDER_FILLING_FOK
-        elif filling_type & mt5.SYMBOL_FILLING_IOC:
-            filling = mt5.ORDER_FILLING_IOC
-        else:
-            filling = mt5.ORDER_FILLING_RETURN
-        
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -166,13 +167,14 @@ class MT5Handler:
             "magic": 234000,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
+            "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
-        # Try to send order
+        # Try to send order with retries
         max_retries = 3
         for attempt in range(max_retries):
             result = mt5.order_send(request)
+            
             if result is None:
                 logger.error(f"Order failed. Error: {mt5.last_error()}")
                 if attempt < max_retries - 1:
@@ -181,10 +183,16 @@ class MT5Handler:
                 return None
             
             if result.retcode != mt5.TRADE_RETCODE_DONE:
+                if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
+                    logger.warning(f"Requote detected on attempt {attempt + 1}")
+                    request["deviation"] += 10
+                    continue
+                    
                 error_msg = f"Order failed. Retcode: {result.retcode}"
                 if hasattr(result, 'comment'):
                     error_msg += f", Comment: {result.comment}"
                 logger.error(error_msg)
+                
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
                     continue
@@ -214,13 +222,18 @@ class MT5Handler:
         return [{
             "ticket": pos.ticket,
             "symbol": pos.symbol,
+            "type": pos.type,
             "volume": pos.volume,
-            "open_price": pos.price_open,
-            "current_price": pos.price_current,
+            "lots": pos.volume,  # Alias for volume
+            "price_open": pos.price_open,
+            "open_price": pos.price_open,  # Alias for price_open
+            "price_current": pos.price_current,
             "sl": pos.sl,
+            "sl_initial": pos.sl,  # Initial stop loss is same as current
             "tp": pos.tp,
             "profit": pos.profit,
-            "comment": pos.comment
+            "comment": pos.comment,
+            "time": pos.time
         } for pos in positions]
     
     def close_position(self, ticket: int) -> bool:
@@ -253,8 +266,9 @@ class MT5Handler:
         }
         
         result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"Failed to close position {ticket}. Error: {mt5.last_error()}")
+        if not result or (result.retcode not in (mt5.TRADE_RETCODE_DONE,) and 
+                          not (result.retcode == 1 and result.comment == "Success")):
+            logger.error(f"Failed to close position {ticket}. Error: {result}")
             return False
             
         return True
@@ -321,4 +335,80 @@ class MT5Handler:
             return self.get_market_data(symbol, timeframe, num_candles)
         except Exception as e:
             logger.error(f"Error getting rates for {symbol} {timeframe}: {str(e)}")
-            return None 
+            return None
+
+    def modify_position(self, ticket: int, new_sl: float, new_tp: float) -> bool:
+        """Modify the stop loss and take profit of an open position using the MT5 API."""
+        if not self.connected:
+            logger.error("MT5 not connected")
+            return False
+
+        # Verify position exists
+        position = mt5.positions_get(ticket=ticket)
+        if not position:
+            logger.error(f"Position {ticket} not found")
+            return False
+        
+        position = position[0]
+        
+        # Validate new levels
+        symbol_info = mt5.symbol_info(position.symbol)
+        if not symbol_info:
+            logger.error(f"Failed to get symbol info for {position.symbol}")
+            return False
+            
+        min_stop_distance = symbol_info.point * symbol_info.trade_stops_level
+        current_price = position.price_current
+        
+        # Validate stop loss
+        if position.type == mt5.ORDER_TYPE_BUY:
+            if new_sl >= current_price - min_stop_distance:
+                logger.error(f"Invalid stop loss: too close to current price. Min distance: {min_stop_distance}")
+                return False
+        else:  # SELL
+            if new_sl <= current_price + min_stop_distance:
+                logger.error(f"Invalid stop loss: too close to current price. Min distance: {min_stop_distance}")
+                return False
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": position.symbol,
+            "sl": new_sl,
+            "tp": new_tp,
+            "deviation": 20,  # Increased deviation
+            "magic": 234000,
+            "comment": "Modify position SL/TP",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        # Try multiple times with increasing deviation
+        max_retries = 3
+        current_deviation = 20
+        
+        for attempt in range(max_retries):
+            request["deviation"] = current_deviation
+            result = mt5.order_send(request)
+            
+            if result is None:
+                logger.error(f"Modification failed. Error: {mt5.last_error()}")
+                current_deviation += 10
+                continue
+                
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Successfully modified position {ticket} SL/TP")
+                return True
+                
+            if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
+                logger.warning(f"Requote detected on attempt {attempt + 1}")
+                current_deviation += 10
+                continue
+                
+            logger.error(f"Modification failed. Retcode: {result.retcode}, Comment: {result.comment}")
+            
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
+                continue
+            
+        return False 

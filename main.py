@@ -4,7 +4,8 @@ from loguru import logger
 from config.config import *  # Import all config variables
 import MetaTrader5 as mt5
 import uvicorn
-from src.api import app
+from src.api import app as fastapi_app
+from src.dashboard import init_app as init_dashboard
 from src.trading_bot import TradingBot
 
 # Configure colored logging format
@@ -18,7 +19,7 @@ log_format = (
 async def start_fastapi():
     """Start the FastAPI server."""
     config = uvicorn.Config(
-        app,
+        fastapi_app,
         host="0.0.0.0",
         port=8000,
         log_level="info"
@@ -34,7 +35,7 @@ async def main():
     logger.add(
         sys.stdout,
         format=log_format,
-        level="DEBUG",
+        level="INFO",
         colorize=True
     )
     
@@ -42,7 +43,7 @@ async def main():
     logger.add(
         "logs/trading_bot.log",
         format=log_format,
-        level="DEBUG",
+        level="INFO",
         rotation="1 day",
         retention="1 month",
         compression="zip"
@@ -59,10 +60,17 @@ async def main():
             'LOG_CONFIG': LOG_CONFIG
         })
         
-        # Start both the FastAPI server and the trading bot
+        # Create trading bot instance
+        trading_bot = TradingBot(config)
+        
+        # Initialize dashboard with trading bot reference
+        dashboard_app = init_dashboard(trading_bot)
+        
+        # Start all services
         await asyncio.gather(
             start_fastapi(),
-            TradingBot(config).start()
+            trading_bot.start(),
+            dashboard_app.server_task
         )
         
     except KeyboardInterrupt:

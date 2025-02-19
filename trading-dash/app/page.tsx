@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import TradingOverview from "@/components/TradingOverview"
 import ActiveTrades from "@/components/ActiveTrades"
+import { API_ENDPOINTS } from "@/app/config"
 import {
   LayoutDashboard,
   BarChart2,
@@ -56,7 +57,7 @@ export default function Dashboard() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await fetch('/api/trading-data')
+        const response = await fetch(API_ENDPOINTS.TRADING_DATA)
         if (!response.ok) {
           throw new Error('Failed to fetch trading data')
         }
@@ -176,7 +177,7 @@ export default function Dashboard() {
             {/* Trading Overview & Active Trades */}
             <div className="grid grid-cols-1 gap-8">
               {/* Profit History Chart */}
-              <TradingOverview data={tradingStatus} />
+              <TradingOverview />
 
               {/* Active Trades */}
               <Card className="p-6 bg-white/5 backdrop-blur-xl border-white/10">
@@ -186,7 +187,7 @@ export default function Dashboard() {
                     {tradingStatus?.active_trades?.length || 0} Positions
                   </span>
                 </div>
-                <ActiveTrades data={tradingStatus.active_trades} />
+                <ActiveTrades data={tradingStatus?.active_trades || []} />
               </Card>
             </div>
           </div>
@@ -205,7 +206,7 @@ export default function Dashboard() {
             <ConfigurationSettings
               onSave={async (config) => {
                 try {
-                  const response = await fetch('/api/trading-data/config', {
+                  const response = await fetch(`${API_ENDPOINTS.TRADING_DATA}/config`, {
                     method: 'POST',
                     headers: {
                       'Content-Type': 'application/json',
@@ -218,7 +219,7 @@ export default function Dashboard() {
                   }
                   
                   // Refetch trading data to reflect changes
-                  const updatedData = await fetch('/api/trading-data').then(res => res.json())
+                  const updatedData = await fetch(API_ENDPOINTS.TRADING_DATA).then(res => res.json())
                   setTradingStatus(updatedData)
                 } catch (err) {
                   console.error("Error saving configuration:", err)
@@ -284,17 +285,80 @@ export default function Dashboard() {
                       if (isTogglingTrading) return; // Prevent double-clicks
                       setIsTogglingTrading(true);
                       try {
-                        const response = await fetch('/api/trading-data/toggle', {
-                          method: 'POST',
-                        });
-                        if (!response.ok) {
-                          throw new Error('Failed to toggle trading');
+                        // First try the new toggle endpoint
+                        try {
+                          const response = await fetch(API_ENDPOINTS.TOGGLE_TRADING, {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                          });
+                          
+                          const result = await response.json();
+                          
+                          if (result.status === 'success') {
+                            setError(null);
+                            if (result.data) {
+                              setTradingStatus(result.data);
+                            } else {
+                              // Fallback: fetch fresh data
+                              const newDataResponse = await fetch(API_ENDPOINTS.TRADING_DATA);
+                              if (!newDataResponse.ok) {
+                                throw new Error('Failed to fetch updated trading data');
+                              }
+                              const newData = await newDataResponse.json();
+                              setTradingStatus(newData);
+                            }
+                            return;
+                          } else {
+                            throw new Error(result.message || 'Failed to toggle trading');
+                          }
+                        } catch (toggleError) {
+                          console.warn('Toggle endpoint failed, trying fallback:', toggleError);
+                          
+                          // Fallback to individual enable/disable endpoints
+                          const currentState = tradingStatus?.trading_status === 'Enabled';
+                          const endpoint = currentState ? API_ENDPOINTS.DISABLE_TRADING : API_ENDPOINTS.ENABLE_TRADING;
+                          
+                          const response = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json'
+                            }
+                          });
+                          
+                          if (!response.ok) {
+                            throw new Error(`Failed to ${currentState ? 'disable' : 'enable'} trading`);
+                          }
+                          
+                          const result = await response.json();
+                          if (result.status === 'success') {
+                            setError(null);
+                            // Fetch fresh trading data
+                            const newDataResponse = await fetch(API_ENDPOINTS.TRADING_DATA);
+                            if (!newDataResponse.ok) {
+                              throw new Error('Failed to fetch updated trading data');
+                            }
+                            const newData = await newDataResponse.json();
+                            setTradingStatus(newData);
+                          } else {
+                            throw new Error(result.message || `Failed to ${currentState ? 'disable' : 'enable'} trading`);
+                          }
                         }
-                        // Refetch trading data
-                        const newData = await fetch('/api/trading-data').then(res => res.json());
-                        setTradingStatus(newData);
                       } catch (err) {
-                        setError("Failed to toggle trading status");
+                        console.error('Error toggling trading:', err);
+                        setError(err instanceof Error ? err.message : "Failed to toggle trading status. Please check if the server is running.");
+                        
+                        // Try to refresh trading status
+                        try {
+                          const statusResponse = await fetch(API_ENDPOINTS.TRADING_DATA);
+                          if (statusResponse.ok) {
+                            const currentStatus = await statusResponse.json();
+                            setTradingStatus(currentStatus);
+                          }
+                        } catch (refreshErr) {
+                          console.error('Error refreshing trading status:', refreshErr);
+                        }
                       } finally {
                         setIsTogglingTrading(false);
                       }
@@ -358,4 +422,3 @@ export default function Dashboard() {
     </div>
   )
 }
-

@@ -373,6 +373,7 @@ class VolumeAnalysis:
                             pattern_stats['accumulation'] += 1
                             patterns.append({
                                 'type': 'accumulation',
+                                'direction': 'bullish',  # Accumulation indicates bullish sentiment
                                 'index': i,
                                 'volume': current_volume,
                                 'price': df['close'].iloc[i]
@@ -383,6 +384,7 @@ class VolumeAnalysis:
                             pattern_stats['distribution'] += 1
                             patterns.append({
                                 'type': 'distribution',
+                                'direction': 'bearish',  # Distribution indicates bearish sentiment
                                 'index': i,
                                 'volume': current_volume,
                                 'price': df['close'].iloc[i]

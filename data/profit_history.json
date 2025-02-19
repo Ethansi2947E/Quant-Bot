@@ -1,0 +1,5643 @@
+[
+    {
+        "timestamp": "2023-02-15T10:30:00.000Z",
+        "profit": 150.75,
+        "trade_type": "BUY",
+        "symbol": "EURUSD",
+        "cumulative": 150.75
+    },
+    {
+        "timestamp": "2023-02-16T14:45:00.000Z",
+        "profit": -80.5,
+        "trade_type": "SELL",
+        "symbol": "GBPUSD",
+        "cumulative": 70.25
+    },
+    {
+        "timestamp": "2023-02-18T09:15:00.000Z",
+        "profit": 225.0,
+        "trade_type": "BUY",
+        "symbol": "USDJPY",
+        "cumulative": 295.25
+    },
+    {
+        "timestamp": "2025-02-17T13:08:13.626435",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0
+    },
+    {
+        "timestamp": "2025-02-17T13:08:26.494646",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURGBP",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T13:08:28.182903",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T13:08:32.610309",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T14:44:01.603241",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURGBP",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T14:44:04.083451",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T14:44:08.650011",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:08:15.511114",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:13:53.881097",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:13:56.952874",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:15:11.305424",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:15:19.121064",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:19:47.432773",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:19:55.780977",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:19:58.532255",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:31:49.857096",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:32:06.720947",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:33:47.410801",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:34:34.554577",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:34:42.902751",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:36:19.055771",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:36:28.077148",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:36:52.406791",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:37:23.383708",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:37:32.964980",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:39:09.267131",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:39:21.222167",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:39:24.687331",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:40:33.213330",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "GBPJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:40:44.659340",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T15:40:48.206327",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:34:26.560958",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:47:08.675675",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:48:14.730493",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:49:20.363475",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:50:25.003446",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:51:32.338938",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:52:41.446016",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:53:47.440823",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:54:52.208437",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:57:38.266058",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:57:42.813575",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:57:44.823937",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:58:56.276687",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:59:00.493376",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T16:59:04.036527",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:20:23.541774",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:20:28.864746",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:21:38.955867",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:23:53.299208",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:23:57.920093",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:25:05.060987",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:26:24.005567",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:27:57.835289",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:29:14.933090",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:31:07.290685",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:32:23.970878",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:33:40.939090",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:34:54.467480",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:36:17.490298",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:37:37.492794",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:38:49.952922",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:40:09.632713",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:41:40.402468",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:43:24.716564",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:44:36.540268",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:48:10.127690",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:49:23.307443",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:50:48.057633",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:52:17.946466",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:53:41.166452",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:56:26.896463",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:50:26.440131+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T18:51:44.933093+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:20:23.333755+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:21:37.542315+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:22:47.304695+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:22:50.052700+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:23:57.792880+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:25:10.880291+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:25:13.204317+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:26:19.643880+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:30:27.868625+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:30:30.833741+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:30:36.705358+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:31:39.262736+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:31:41.380999+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:31:47.073440+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:32:49.347000+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:32:51.458773+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T19:32:57.417992+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:28:11.671089+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:28:16.681838+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:28:23.331130+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:29:45.361584+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:29:52.052410+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:29:58.346535+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:31:13.643993+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:31:21.344182+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:31:30.523014+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:32:34.790320+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:32:38.373020+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:32:41.405751+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:33:46.828082+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:33:50.238556+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-17T23:33:56.264872+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:02:39.959783+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:02:43.992390+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:03:52.733077+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:04:00.258156+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:05:06.384371+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:05:10.417620+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:06:18.032399+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:07:23.170848+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:07:28.939011+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:08:32.886569+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:08:36.809869+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:09:41.234403+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:09:45.266767+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:10:49.437306+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:10:53.486660+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:11:56.562667+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:11:58.735717+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:12:02.627728+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:13:05.544650+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:13:07.498928+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:13:11.359965+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:14:15.837677+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:14:19.982071+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:15:22.952480+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:15:24.985376+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:15:28.752196+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:16:32.913983+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:16:37.088514+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:17:41.408725+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:17:45.503754+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:18:48.376799+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:18:50.413879+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:18:54.258824+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:19:58.368281+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:20:02.525522+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:21:05.432136+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:21:07.558641+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:21:11.434846+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:22:14.372651+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:22:16.451648+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:22:20.359763+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:23:24.644246+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:23:28.802973+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:24:32.924184+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:24:37.020666+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:25:41.699450+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:25:46.405537+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:26:50.751696+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:26:54.892490+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:27:59.358533+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:28:03.493232+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:29:07.811814+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:29:11.876859+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:30:18.557605+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:30:20.637083+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:30:22.324520+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:31:28.007902+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:31:30.055983+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:32:37.806502+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:33:42.335230+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:33:46.570601+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:34:50.723540+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:34:54.944698+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:35:59.268771+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:36:03.598023+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:37:07.848178+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:37:11.975197+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:38:19.888948+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:39:24.422344+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:39:28.610976+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:40:32.858805+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:40:37.246742+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:41:45.399722+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:42:48.644002+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:42:50.676584+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:42:54.709434+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:42:56.773146+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:44:00.010310+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:44:04.386816+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:45:08.716150+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:45:13.031073+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:46:17.431039+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:46:21.666702+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:47:25.977695+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:47:30.276081+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:48:38.241785+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:49:43.026898+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:49:47.361410+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:50:52.156253+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:50:56.871680+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:52:01.261839+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:52:06.049204+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:53:10.309983+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:53:14.717227+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:54:19.163420+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:54:23.571746+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:55:28.382969+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:55:32.697572+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:56:37.550064+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:56:42.037118+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:57:46.796135+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:57:51.163087+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:58:55.516255+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T03:58:59.784098+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:00:04.164649+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:00:08.650317+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:01:12.995528+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:01:17.433970+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:02:21.694639+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:02:26.101002+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:03:30.398757+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:03:34.696540+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:04:39.088832+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:04:43.496421+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:05:48.792899+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:05:53.741498+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:06:58.435871+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:07:02.735113+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:08:07.078961+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:08:11.330503+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:09:17.146622+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:09:21.695033+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:10:26.069337+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:10:30.602233+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:11:35.013188+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T04:11:39.249302+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:54:36.211959+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:54:46.699374+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:55:49.633398+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:56:00.671971+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:57:04.937490+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:57:16.644680+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:58:18.583825+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:58:26.494878+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T09:59:36.620166+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:00:38.656164+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:00:45.009428+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:00:51.103020+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:02:29.223385+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:02:38.163447+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:02:40.492167+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:03:42.850915+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:03:50.143985+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:04:34.684789+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:04:52.717890+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:08:46.944015+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:08:57.816499+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:10:10.685557+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:10:37.996121+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:11:40.010251+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:12:26.390018+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:12:50.251481+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:13:55.217791+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:14:15.058902+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:15:02.334416+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:15:19.840686+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:16:42.382288+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:17:46.681290+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:18:02.469010+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:19:13.002691+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:19:52.817000+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:20:58.426814+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:21:16.911804+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:22:25.473664+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:22:48.589874+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:23:52.873282+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:24:10.503191+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:25:15.449985+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:25:32.260940+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:26:37.276282+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:35:39.198743+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:35:45.162819+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:36:51.923576+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:37:10.573453+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:37:17.303999+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:38:24.493853+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:38:38.881863+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:38:45.104940+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:39:57.235381+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:40:14.826323+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:40:20.511222+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:46:24.945351+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:48:22.228370+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:57:55.886709+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T10:59:08.753595+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:27:55.218507+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:28:30.520172+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:28:42.306478+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:29:58.119313+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:30:18.981551+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:30:33.488412+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:33:25.300399+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:35:09.637478+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:37:55.530894+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:44:24.886578+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:46:16.241054+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:46:34.395736+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:48:39.540551+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:48:59.166764+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:49:17.245353+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:50:46.535951+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:51:14.858151+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:51:28.450339+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:53:09.192875+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:53:49.053622+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:55:21.731417+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:55:46.364131+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:57:14.283720+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:57:31.434664+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T12:59:31.137454+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:01:08.419731+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:01:25.135961+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:01:37.617515+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:02:59.095203+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:03:26.144731+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:04:56.327493+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:05:16.715674+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T13:05:25.754863+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0
+    },
+    {
+        "timestamp": "2025-02-18T14:54:15.250473+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T14:55:36.620244+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T14:58:31.106143+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T14:59:48.855535+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:01:07.019408+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:02:31.899090+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:03:54.349443+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:05:11.572082+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:19:06.472103+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:21:50.758952+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:23:08.152043+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:24:14.771152+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:24:38.066051+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:26:28.755714+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:33:23.338136+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:33:44.210932+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:42:08.743341+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:42:18.419588+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:42:34.078309+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:42:46.848011+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:42:57.928076+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:44:58.349656+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:45:10.196670+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:45:19.841363+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T15:45:27.812245+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:28:12.766997+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:28:20.740590+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:28:31.902798+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:28:38.875423+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:28:52.662545+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:30:25.168438+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:30:32.874431+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:30:45.821763+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:31:00.279651+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:32:09.078503+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:32:19.358217+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:32:29.888800+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:33:07.318181+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:35:27.397357+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:35:44.618076+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:35:53.997762+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T16:36:08.684906+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:10:47.891650+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:13:05.819327+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:13:41.205876+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:13:51.949486+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:14:05.286803+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:14:12.511323+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:14:23.543618+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T17:14:47.971772+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T18:36:52.739956+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T18:37:05.871390+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T18:37:19.033131+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T18:37:27.411280+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T18:37:35.461125+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:36:18.519863+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:36:38.046906+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:38:56.556968+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:40:30.063507+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:40:53.326775+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:42:19.551266+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:42:42.382724+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:47:14.868640+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:48:27.756442+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:50:29.760846+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:52:10.894360+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:53:37.208434+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:55:11.469282+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:55:46.677916+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:57:01.937737+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T20:57:17.817865+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:28:10.405144+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:28:19.985878+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:30:58.631843+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:31:08.495949+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:32:44.033593+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:34:00.067497+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:35:24.500116+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:38:50.873871+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:40:10.028739+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:40:25.714014+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:41:39.648072+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:41:50.063838+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:42:57.904881+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:43:06.443616+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:43:15.918100+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:44:24.215381+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:44:31.274275+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:44:41.115998+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:45:55.886230+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:46:06.576319+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:47:14.079107+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:47:22.280906+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:47:31.954342+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:48:45.784279+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:50:04.018682+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:50:10.395010+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:50:20.497155+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:51:28.067389+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:51:34.572566+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:51:45.115821+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:57:34.347043+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T21:58:43.087796+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:07:59.462408+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:08:12.839571+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:08:26.636537+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:08:36.909294+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:08:47.516033+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:09:58.026357+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:10:09.837425+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:10:21.815113+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:10:33.201638+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:10:42.754034+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:11:52.024105+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:12:24.326923+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:12:33.611665+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:13:42.894100+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:13:53.846972+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:14:07.980392+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:14:30.336231+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:14:39.936291+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:15:49.715956+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:16:01.101713+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:16:14.644554+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:16:24.492760+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:16:34.060285+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:17:43.195849+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:17:53.361560+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:18:08.281913+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:18:18.109343+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:18:27.946072+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:20:00.118802+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:20:21.517614+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:20:36.843759+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:20:48.666354+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:22:00.722022+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:22:12.576465+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:22:24.746049+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:22:34.987454+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:22:44.535563+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:23:55.744014+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:24:08.311749+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:24:20.022360+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:24:34.190114+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:24:48.226715+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:26:03.563934+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:26:15.347854+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:26:27.888443+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:26:37.603963+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:26:46.866367+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:27:56.765844+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:28:09.886975+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:28:22.274486+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:28:31.942327+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:28:41.562871+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:29:49.899571+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:29:58.590130+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:30:09.803667+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:30:18.091977+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:30:26.367174+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:31:34.369232+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:31:43.156805+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:31:53.254604+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:32:01.586932+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:32:10.360510+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:33:18.590853+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:33:27.999185+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:33:38.101681+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:33:46.712630+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:33:56.404835+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:35:04.390707+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:35:13.378840+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:35:24.148595+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:35:32.814680+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:36:48.708783+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:36:57.742337+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:37:07.764147+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:37:16.672210+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:37:24.907183+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:38:33.251012+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:38:41.969123+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:38:52.192575+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:39:01.476142+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:39:09.957779+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:40:19.104546+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:40:27.833175+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:40:37.858900+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:40:46.184928+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:41:56.399377+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:42:05.139599+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:42:15.187078+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:42:24.158828+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:43:34.754477+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:43:44.316449+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:43:54.602998+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:44:04.563042+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:45:18.955179+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:45:29.888248+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:45:38.730315+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:47:00.880331+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:48:37.409500+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:50:12.940887+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:51:49.457529+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:53:26.040265+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:54:56.423183+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:56:26.546159+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:57:56.549587+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-18T23:59:26.873799+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:00:57.445285+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:01:05.848263+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:02:28.418338+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:02:37.982939+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:03:57.246735+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:04:14.007977+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:04:22.764879+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:05:40.987152+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:05:49.537681+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:06:00.221896+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:07:18.375364+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:07:30.811572+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:08:52.187065+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:09:08.243808+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:24:12.972545+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:24:24.199115+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:24:47.002413+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:25:00.138623+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:27:47.235642+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:33:05.938494+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:33:31.325979+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:33:52.334736+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:35:08.542920+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:35:50.691247+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:36:13.460775+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:37:27.745049+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:37:37.708690+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:37:49.437989+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T00:39:39.090550+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:02:32.592151+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:02:39.932035+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:02:51.466098+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:03:08.622471+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:03:17.406450+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:03:24.436713+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:04:36.821895+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:04:54.196255+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:05:13.400641+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:06:47.527141+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:07:16.129508+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 0.0,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:30:36.118107+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:30:43.134368+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:30:52.460805+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:31:00.768328+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:31:09.280171+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:32:26.246608+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:32:40.224625+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:32:47.525189+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:32:55.238922+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:34:12.170161+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:34:20.923635+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:34:31.093557+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:35:53.362576+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:45:23.839351+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:45:32.258545+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:45:40.522220+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:46:58.683020+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:48:32.781402+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:48:41.145230+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:50:08.987739+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:50:24.522583+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:51:34.363367+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:54:19.655798+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:54:31.870012+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:55:48.116843+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:55:56.706253+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:56:06.792075+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:56:34.097750+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:56:42.737497+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:56:51.028942+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:58:05.409656+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:58:14.068519+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:59:25.021051+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T01:59:35.666578+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:01:08.702792+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:02:47.487887+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:03:02.592573+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:04:29.132489+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:04:37.680310+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T02:04:47.560929+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:07:00.939834+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:07:12.671915+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:09:15.394599+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:09:47.003199+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:10:24.903557+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:11:00.818864+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:12:45.258776+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:13:24.496539+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:13:41.944913+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:14:57.911264+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:15:23.532615+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:15:35.080827+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:15:47.729175+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:17:00.529394+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:17:20.170603+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:17:32.898123+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:19:03.026408+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:19:15.672387+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:21:49.739406+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:22:17.196601+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:22:31.622636+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:24:09.735648+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:24:19.273358+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:25:29.386784+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:25:43.819153+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:25:52.300562+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:27:12.385684+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:27:24.566154+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:28:44.291331+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:30:00.552023+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:30:14.315697+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:30:22.201178+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:31:30.514196+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:31:43.415405+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:31:55.327090+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:33:06.905941+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:33:18.942343+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:33:26.854962+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:34:36.189704+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:34:47.974400+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:34:56.688843+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:36:07.156608+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:36:22.884749+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:36:34.870769+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:37:46.201044+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:38:10.550596+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:39:21.406685+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:39:41.687560+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T10:39:52.031156+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:04:18.618623+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:04:32.080455+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:04:46.737692+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:53:07.775299+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:53:15.229265+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:53:21.980950+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:53:30.561514+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:54:39.859637+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:54:48.345879+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T11:55:02.882369+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:06:05.302203+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:06:12.149412+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:06:20.760013+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:14:39.536878+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:14:46.450572+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:15:01.155103+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:16:09.932360+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:16:16.769393+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:17:37.246112+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:17:44.443871+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:52:51.657284+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:53:18.458532+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:56:49.584841+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:56:59.949671+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:58:30.984739+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:59:48.371559+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T12:59:55.379881+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:00:02.815899+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:01:28.178360+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:01:35.862984+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:02:55.446385+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:03:09.859113+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:04:38.360937+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:06:08.803745+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:06:17.511392+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:07:39.744912+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:07:48.939061+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:09:17.165562+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:09:30.236626+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:09:42.482055+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:11:14.183719+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:11:27.194425+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:11:43.773222+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:13:08.750611+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:13:46.583012+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:13:55.043798+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:15:21.222215+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:15:46.718196+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:16:25.529258+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:18:04.090815+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:18:11.465081+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:18:34.166335+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:20:09.309626+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:20:16.765586+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:21:43.136190+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:21:58.249877+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:22:14.084835+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:23:40.658121+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:24:01.463688+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:24:08.871756+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:24:15.640253+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:24:25.940435+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:24:32.677154+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:25:50.280079+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:26:10.818498+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:26:17.617821+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:26:24.713972+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:26:33.466641+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T13:26:39.968859+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:18:29.175691+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:18:36.015647+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:18:45.164012+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:18:53.216752+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "CADJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:00.319469+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:11.254645+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "XAUUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:23.202389+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURCHF",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:30.968160+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:38.322878+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "EURJPY",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:44.850467+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:19:52.302597+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDUSD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:47:41.800463+00:00",
+        "profit": 0.0,
+        "trade_type": "BUY",
+        "symbol": "AUDCAD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    },
+    {
+        "timestamp": "2025-02-19T16:50:03.653380+00:00",
+        "profit": 0.0,
+        "trade_type": "SELL",
+        "symbol": "AUDCAD",
+        "cumulative": 295.25,
+        "poi_score": 0.2
+    }
+]

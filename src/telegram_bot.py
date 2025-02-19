@@ -48,8 +48,8 @@ class TelegramBot:
             logger.info("Registering command handlers...")
             handlers = [
                 ("start", self.start_command),
-                ("enable", self.enable_trading),
-                ("disable", self.disable_trading),
+                ("enable", self.handle_enable_command),
+                ("disable", self.handle_disable_command),
                 ("status", self.status_command),
                 ("metrics", self.metrics_command),
                 ("history", self.history_command),
@@ -174,117 +174,58 @@ Details: {str(context.error)}"""
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /start command."""
-        user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
-            welcome_text = """🤖 <b>Trading Bot Initialized</b>
-
-Welcome to your Automated Trading Assistant! The bot is now ready to help you manage your trades.
-
-🔑 <b>Quick Start Guide</b>:
-1. Use /enable to start automated trading
-2. Use /disable to pause trading
-3. Use /metrics to view performance
-4. Use /history to see past trades
-5. Use /status to check bot status
-6. Use /help for full command list
-
-⚠️ Current Status: Trading is {status}
-
-Use /help to see all available commands and features."""
-
-            status = "enabled" if self.trading_enabled else "disabled"
-            await update.message.reply_text(
-                welcome_text.format(status=status),
-                parse_mode='HTML'
-            )
-            
-            # Send initial status update
-            metrics_text = f"""📊 <b>Current Statistics</b>
-
-Total Trades: {self.performance_metrics['total_trades']}
-Winning Trades: {self.performance_metrics['winning_trades']}
-Total Profit: {self.performance_metrics['total_profit']:.2f}
-
-Use /metrics for detailed performance stats."""
-            
-            await update.message.reply_text(metrics_text, parse_mode='HTML')
-        else:
-            await update.message.reply_text(
-                "⚠️ Unauthorized access. This incident will be logged.",
-                parse_mode='HTML'
-            )
-            logger.warning(f"Unauthorized access attempt from user ID: {user_id}")
+        await update.message.reply_text(
+            "Welcome to the Trading Bot! Use /help to see available commands."
+        )
     
-    async def enable_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enable trading."""
-        user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
-            if self.trading_enabled:
-                await update.message.reply_text("Trading is already enabled.")
-                return
-                
-            if not self.is_running:
-                await update.message.reply_text("Cannot enable trading - bot is not running.")
-                return
-                
+    async def enable_trading_core(self):
+        """Core functionality to enable trading."""
+        try:
             self.trading_enabled = True
-            status_msg = """✅ <b>Trading Enabled</b>
+            await self.send_message("Trading has been enabled.")
+            logger.info("Trading enabled via Telegram")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to enable trading: {str(e)}")
+            return False
 
-The bot will now:
-• Analyze markets
-• Look for trading setups
-• Execute trades when conditions are met
-• Send real-time alerts
-
-Use /status to check bot status
-Use /disable to stop trading"""
-            
-            await update.message.reply_text(status_msg, parse_mode='HTML')
-            logger.info("Trading enabled via Telegram command")
-        else:
-            await update.message.reply_text("Unauthorized access.")
-    
-    async def disable_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Disable trading."""
-        user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
-            if not self.trading_enabled:
-                await update.message.reply_text("Trading is already disabled.")
-                return
-                
+    async def disable_trading_core(self):
+        """Core functionality to disable trading."""
+        try:
             self.trading_enabled = False
-            status_msg = """🛑 <b>Trading Disabled</b>
+            await self.send_message("Trading has been disabled.")
+            logger.info("Trading disabled via Telegram")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to disable trading: {str(e)}")
+            return False
 
-• No new trades will be opened
-• Existing trades will be monitored
-• Alerts will continue
+    async def handle_enable_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle the /enable command to enable trading."""
+        try:
+            if str(update.effective_user.id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+                await self.enable_trading_core()
+                await update.message.reply_text("Trading has been enabled.")
+            else:
+                await update.message.reply_text("Unauthorized access.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed to enable trading: {str(e)}")
 
-Use /status to check bot status
-Use /enable to resume trading"""
-            
-            await update.message.reply_text(status_msg, parse_mode='HTML')
-            logger.info("Trading disabled via Telegram command")
-        else:
-            await update.message.reply_text("Unauthorized access.")
-    
+    async def handle_disable_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle the /disable command to disable trading."""
+        try:
+            if str(update.effective_user.id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+                await self.disable_trading_core()
+                await update.message.reply_text("Trading has been disabled.")
+            else:
+                await update.message.reply_text("Unauthorized access.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed to disable trading: {str(e)}")
+
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check bot status."""
-        user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
-            status = "enabled" if self.trading_enabled else "disabled"
-            
-            status_msg = f"""📊 <b>Bot Status Report</b>
-
-Trading Status: {'🟢 Enabled' if self.trading_enabled else '🔴 Disabled'}
-Total Trades: {self.performance_metrics['total_trades']}
-Active Since: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}
-
-Use /metrics for detailed performance stats
-Use /{'disable' if self.trading_enabled else 'enable'} to {'stop' if self.trading_enabled else 'start'} trading"""
-            
-            await update.message.reply_text(status_msg, parse_mode='HTML')
-        else:
-            await update.message.reply_text("Unauthorized access.")
+        """Handle the /status command to check trading status."""
+        status = "enabled" if self.trading_enabled else "disabled"
+        await update.message.reply_text(f"Trading is currently {status}.")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /help command."""
@@ -543,18 +484,39 @@ Stay profitable! 📈"""
         """Check if a user is authorized."""
         return str(chat_id) in self.allowed_user_ids
     
-    async def send_error_alert(self, error_message):
-        """Send error alert to Telegram."""
-        if self.bot:
-            message = f"⚠️ ERROR ALERT ⚠️\n\n{error_message}"
-            
-            for user_id in TELEGRAM_CONFIG["allowed_user_ids"]:
+    async def send_error_alert(self, message: str) -> bool:
+        """Send error alert to Telegram with retry logic and timeout handling."""
+        if not self.is_running or not self.bot:
+            logger.warning("Telegram bot not running, skipping error alert")
+            return False
+
+        max_retries = 3
+        retry_delay = 2  # seconds
+        success = False
+        
+        for user_id in self.allowed_user_ids:
+            for attempt in range(max_retries):
                 try:
-                    await self.bot.send_message(chat_id=user_id, text=message)
+                    async with asyncio.timeout(5):  # 5 second timeout
+                        await self.bot.send_message(
+                            chat_id=int(user_id),  # Convert string ID to int
+                            text=f"🚨 Error Alert:\n{message}",
+                            parse_mode='HTML'
+                        )
+                        success = True
+                        break
+                except asyncio.TimeoutError:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Telegram alert timed out, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Failed to send error alert to {user_id} after {max_retries} attempts: Timed out")
                 except Exception as e:
                     logger.error(f"Failed to send error alert to {user_id}: {str(e)}")
-        else:
-            logger.error("Cannot send error alert. Bot is not initialized.")
+                    break
+                    
+        return success
     
     async def stop(self):
         """Stop the Telegram bot."""
@@ -630,10 +592,11 @@ Stay profitable! 📈"""
         symbol: str,
         action: str,
         price: float,
-        pnl: Optional[float] = None
+        pnl: Optional[float] = None,
+        r_multiple: Optional[float] = None
     ):
         """Send trade update to users."""
-        update_msg = f"""📊 <b>Trade Update</b> ��
+        update_msg = f"""📊 <b>Trade Update</b>
 
 Trade ID: {trade_id}
 Symbol: {symbol}
@@ -642,6 +605,9 @@ Price: {price:.5f}"""
         
         if pnl is not None:
             update_msg += f"\nPnL: {pnl:.2f}"
+        
+        if r_multiple is not None:
+            update_msg += f"\nR-Multiple: {r_multiple:.2f}"
         
         update_msg += f"\nTime: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
         

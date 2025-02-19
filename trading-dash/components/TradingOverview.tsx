@@ -1,182 +1,237 @@
 "use client"
 
-import type React from "react"
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
   ResponsiveContainer,
   Area,
-  AreaChart
+  AreaChart,
+  Legend,
+  Tooltip
 } from "recharts"
-import { TrendingUp, ArrowUpCircle, ArrowDownCircle, BarChart2 } from "lucide-react"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { API_ENDPOINTS } from "@/app/config"
+import { Loader2 } from "lucide-react"
 
-interface TradingOverviewProps {
-  data: any
+interface ProfitHistory {
+  timestamp: string
+  profit: number
+  trade_type: string | null
+  cumulative: number
 }
 
-const TradingOverview: React.FC<TradingOverviewProps> = ({ data }) => {
-  if (!data) return null
+interface ProfitHistoryResponse {
+  data: ProfitHistory[]
+  cumulative_profit: number
+  timeframe: string
+}
+
+const TradingOverview = () => {
+  const [chartData, setChartData] = useState<ProfitHistory[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [timeframe, setTimeframe] = useState("24H")
+  const [totalProfit, setTotalProfit] = useState(0)
+  const [profitableCount, setProfitableCount] = useState(0)
+  const [totalTrades, setTotalTrades] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        setRefreshing(true)
+        const response = await fetch(`${API_ENDPOINTS.PROFIT_HISTORY}?timeframe=${timeframe}`)
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch data: ${response.statusText}`)
+        }
+
+        const result: ProfitHistoryResponse = await response.json()
+        console.log('API response:', result)
+
+        // Validate the response structure
+        if (!result.data || !Array.isArray(result.data)) {
+          console.error('Invalid response structure:', result)
+          throw new Error('Invalid profit history data format')
+        }
+
+        // Process profit history data
+        const processedData = result.data.map((entry: ProfitHistory) => ({
+          ...entry,
+          profit: Number(entry.profit),
+          cumulative: Number(entry.cumulative)
+        }))
+
+        // Calculate statistics
+        const profitable = processedData.filter(entry => entry.profit > 0).length
+        
+        setChartData(processedData)
+        setTotalProfit(result.cumulative_profit)
+        setProfitableCount(profitable)
+        setTotalTrades(processedData.length)
+        console.log('Total trades:', processedData.length)
+        console.log('Profitable trades:', profitable)
+        setError(null)
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'An error occurred while fetching profit history'
+        setError(errorMessage)
+        console.error('Error fetching data:', err)
+      } finally {
+        setLoading(false)
+        setRefreshing(false)
+      }
+    }
+
+    fetchData()
+    const interval = setInterval(fetchData, 5000)
+    return () => clearInterval(interval)
+  }, [timeframe])
+
+  const CustomTooltip = ({ active, payload }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload;
+      return (
+        <div className="bg-white/10 backdrop-blur-xl p-4 rounded-lg border border-white/20">
+          <p className="text-white/80">{new Date(data.timestamp).toLocaleString()}</p>
+          <p className="text-white">
+            Trade Profit: ${Number(data.profit).toFixed(2)}
+          </p>
+          <p className="text-emerald-400">
+            Cumulative: ${Number(data.cumulative).toFixed(2)}
+          </p>
+          {data.trade_type && (
+            <p className="text-white/60">
+              Trade Type: {data.trade_type}
+            </p>
+          )}
+        </div>
+      )
+    }
+    return null
+  }
+
+  if (loading) {
+    return (
+      <Card className="bg-white/5 backdrop-blur-xl border-white/10 rounded-xl overflow-hidden">
+        <CardContent className="p-6">
+          <div className="h-[400px] flex items-center justify-center">
+            <p className="text-white/60">Loading profit history...</p>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (error) {
+    return (
+      <Card className="bg-white/5 backdrop-blur-xl border-white/10 rounded-xl overflow-hidden">
+        <CardContent className="p-6">
+          <div className="h-[400px] flex items-center justify-center">
+            <p className="text-white/60">{error}</p>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card className="bg-white/5 backdrop-blur-xl border-white/10 rounded-xl overflow-hidden">
-      <CardHeader className="border-b border-white/10">
+      <CardHeader className="border-b border-white/10 p-6">
         <div className="flex items-center justify-between">
-        <div>
-            <CardTitle className="text-xl font-semibold text-white">Profit History</CardTitle>
-            <p className="text-sm text-white/60 mt-1">Performance over time</p>
-        </div>
-          <div className="flex items-center gap-2">
-            <button className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white text-sm transition-colors">
-              24H
-            </button>
-            <button className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white text-sm transition-colors">
-              7D
-            </button>
-            <button className="px-3 py-1 rounded-lg bg-white/10 text-white text-sm">
-              30D
-            </button>
-            <button className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white text-sm transition-colors">
-              ALL
-            </button>
+          <div>
+            <CardTitle className="text-xl font-semibold text-white flex items-center">
+              Profit History
+              {refreshing && (
+                <div className="relative group">
+                  <Loader2 className="animate-spin h-4 w-4 ml-2 text-white/50" />
+                  <div className="absolute hidden group-hover:block left-0 mt-2 px-2 py-1 bg-black/80 text-white text-xs rounded">
+                    Refreshing data...
+                  </div>
+                </div>
+              )}
+            </CardTitle>
+            <div className="mt-2 space-x-4">
+              <span className="text-white/60">
+                Total Profit: <span className={`font-medium ${totalProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ${totalProfit.toFixed(2)}
+                </span>
+              </span>
+              <span className="text-white/60">
+                Win Rate: <span className="text-emerald-400 font-medium">
+                  {totalTrades > 0 ? ((profitableCount / totalTrades) * 100).toFixed(1) : 0}%
+                </span>
+              </span>
+              <span className="text-white/60">
+                Total Trades: <span className="text-white font-medium">{totalTrades}</span>
+              </span>
+            </div>
           </div>
+          <Select value={timeframe} onValueChange={setTimeframe}>
+            <SelectTrigger className="w-32 bg-white/5 border-white/10 text-white">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="24H">24 Hours</SelectItem>
+              <SelectItem value="7D">7 Days</SelectItem>
+              <SelectItem value="1M">1 Month</SelectItem>
+              <SelectItem value="ALL">All Time</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </CardHeader>
       <CardContent className="p-6">
-        <div className="h-[400px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data.profit_history}>
-              <defs>
-                <linearGradient id="profitGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="rgb(59, 130, 246)" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="rgb(59, 130, 246)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid 
-                strokeDasharray="3 3" 
-                stroke="rgba(255,255,255,0.1)" 
-                horizontal={true}
-                vertical={false}
-              />
-              <XAxis 
-                dataKey="timestamp" 
-                stroke="rgba(255,255,255,0.5)"
-                tickFormatter={(value) => {
-                  const date = new Date(value);
-                  return `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
-                }}
-                tick={{ fontSize: 12 }}
-                axisLine={false}
-                tickLine={false}
-                dy={10}
-              />
-              <YAxis 
-                stroke="rgba(255,255,255,0.5)"
-                tick={{ fontSize: 12 }}
-                axisLine={false}
-                tickLine={false}
-                dx={-10}
-                tickFormatter={(value) => `$${value.toLocaleString()}`}
-              />
-              <Tooltip 
-                contentStyle={{ 
-                  backgroundColor: 'rgba(17,17,17,0.9)', 
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  borderRadius: '8px',
-                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
-                  color: 'white',
-                  padding: '12px'
-                }}
-                labelStyle={{ color: 'rgba(255,255,255,0.7)', marginBottom: '4px' }}
-                labelFormatter={(value) => {
-                  const date = new Date(value);
-                  return date.toLocaleString();
-                }}
-                formatter={(value: any) => [`$${value.toLocaleString()}`, 'Profit']}
-              />
-              <Area
-                type="monotone"
-                dataKey="profit"
-                stroke="#3b82f6"
-                strokeWidth={2}
-                fill="url(#profitGradient)"
-                animationDuration={500}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
-          <div className="bg-white/5 rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-8 w-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                <TrendingUp className="h-4 w-4 text-blue-500" />
-              </div>
-              <div>
-                <p className="text-xs text-white/60">Daily Change</p>
-                <p className="text-sm font-semibold text-white mt-0.5">
-                  {((data.profit_history[data.profit_history.length - 1]?.profit || 0) - 
-                    (data.profit_history[0]?.profit || 0)).toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD'
-                  })}
-                </p>
-              </div>
-            </div>
+        {chartData.length === 0 ? (
+          <div className="h-[400px] flex flex-col items-center justify-center space-y-4">
+            <p className="text-white/60">No trading data available for the selected timeframe.</p>
+            {timeframe !== 'ALL' && (
+              <button 
+                onClick={() => setTimeframe('ALL')}
+                className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
+              >
+                View All Data
+              </button>
+            )}
           </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-8 w-8 rounded-lg bg-green-500/10 flex items-center justify-center">
-                <ArrowUpCircle className="h-4 w-4 text-green-500" />
-              </div>
-              <div>
-                <p className="text-xs text-white/60">Peak Balance</p>
-                <p className="text-sm font-semibold text-white mt-0.5">
-                  {Math.max(...data.profit_history.map((p: any) => p.profit)).toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD'
-                  })}
-                </p>
-              </div>
-            </div>
+        ) : (
+          <div className="h-[400px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart
+                data={chartData}
+                margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+              >
+                <defs>
+                  <linearGradient id="colorCumulative" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#10B981" stopOpacity={0.1}/>
+                    <stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                <XAxis
+                  dataKey="timestamp"
+                  stroke="rgba(255,255,255,0.5)"
+                  tick={{ fill: 'rgba(255,255,255,0.5)' }}
+                />
+                <YAxis
+                  stroke="rgba(255,255,255,0.5)"
+                  tick={{ fill: 'rgba(255,255,255,0.5)' }}
+                />
+                <Tooltip content={<CustomTooltip />} />
+                <Area
+                  type="monotone"
+                  dataKey="cumulative"
+                  stroke="#10B981"
+                  fillOpacity={1}
+                  fill="url(#colorCumulative)"
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-8 w-8 rounded-lg bg-red-500/10 flex items-center justify-center">
-                <ArrowDownCircle className="h-4 w-4 text-red-500" />
-              </div>
-              <div>
-                <p className="text-xs text-white/60">Lowest Balance</p>
-                <p className="text-sm font-semibold text-white mt-0.5">
-                  {Math.min(...data.profit_history.map((p: any) => p.profit)).toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD'
-                  })}
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-8 w-8 rounded-lg bg-purple-500/10 flex items-center justify-center">
-                <BarChart2 className="h-4 w-4 text-purple-500" />
-              </div>
-              <div>
-                <p className="text-xs text-white/60">Average Daily Profit</p>
-                <p className="text-sm font-semibold text-white mt-0.5">
-                  {(data.profit_history.reduce((acc: number, curr: any) => acc + curr.profit, 0) / 
-                    data.profit_history.length).toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD'
-                  })}
-                </p>
-              </div>
-        </div>
-      </div>
-      </div>
+        )}
       </CardContent>
     </Card>
   )

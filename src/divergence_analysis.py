@@ -7,8 +7,11 @@ class DivergenceAnalysis:
     def __init__(self):
         self.lookback_period = 20  # Bars to look back for divergence
         self.divergence_threshold = 0.0010  # 10 pips minimum price movement
-        self.min_swing_size = 0.0005  # Minimum swing size for divergence
-        self.confirmation_bars = 2  # Number of bars to confirm divergence
+        self.hidden_divergence_threshold = 0.0003  # Reduced threshold for hidden divergences
+        self.momentum_divergence_threshold = 0.0003  # Reduced threshold for momentum divergences
+        self.min_swing_size = 0.0008  # Increased minimum swing size for divergence
+        self.min_rsi_swing = 8.0     # Increased minimum RSI swing
+        self.confirmation_bars = 2    # Number of bars to confirm divergence
         
     def analyze(self, df: pd.DataFrame) -> Dict:
         """Analyze multiple types of divergences with enhanced logging and validation."""
@@ -158,27 +161,31 @@ class DivergenceAnalysis:
                 if price_swing >= self.min_swing_size:
                     stats['price_swings_found'] += 1
                     logger.debug(f"Found price swing at index {i}: {price_swing:.5f}")
+                else:
+                    stats['rejected_reasons']['small_price_swing'] += 1
+                    logger.debug(f"Rejected at index {i}: Price swing too small ({price_swing:.5f})")
+                    continue
                     
-                    # Check RSI divergence
-                    if 'rsi' in df.columns:
-                        rsi_low = window['rsi'].min()
-                        rsi_high = window['rsi'].max()
-                        rsi_swing = abs(rsi_high - rsi_low)
+                # Check RSI divergence
+                if 'rsi' in df.columns:
+                    rsi_low = window['rsi'].min()
+                    rsi_high = window['rsi'].max()
+                    rsi_swing = abs(rsi_high - rsi_low)
+                    
+                    if rsi_swing >= self.min_rsi_swing:  # Minimum RSI swing
+                        stats['indicator_swings_found'] += 1
                         
-                        if rsi_swing >= 5:  # Minimum RSI swing
-                            stats['indicator_swings_found'] += 1
+                        # Check for potential bullish divergence
+                        if window['low'].iloc[-1] < window['low'].iloc[:-1].min():
                             stats['potential_divergences'] += 1
                             
-                            # Bullish divergence (lower price low but higher RSI low)
-                            if window['low'].iloc[-1] < window['low'].min() and \
-                               window['rsi'].iloc[-1] > window['rsi'].min():
-                                
+                            if window['rsi'].iloc[-1] > window['rsi'].iloc[:-1].min():
                                 # Validate the pattern
                                 if self._validate_bullish_divergence(window):
                                     stats['confirmed_divergences'] += 1
                                     logger.info(f"Found bullish RSI divergence at index {i}")
-                                    logger.debug(f"Price: {window['low'].iloc[-1]:.5f} < {window['low'].min():.5f}")
-                                    logger.debug(f"RSI: {window['rsi'].iloc[-1]:.2f} > {window['rsi'].min():.2f}")
+                                    logger.debug(f"Price: {window['low'].iloc[-1]:.5f} < {window['low'].iloc[:-1].min():.5f}")
+                                    logger.debug(f"RSI: {window['rsi'].iloc[-1]:.2f} > {window['rsi'].iloc[:-1].min():.2f}")
                                     
                                     bullish.append({
                                         'type': 'rsi',
@@ -193,17 +200,21 @@ class DivergenceAnalysis:
                                 else:
                                     stats['rejected_reasons']['invalid_pattern'] += 1
                                     logger.debug(f"Rejected bullish divergence at index {i}: Invalid pattern")
+                            else:
+                                stats['rejected_reasons']['no_confirmation'] += 1
+                                logger.debug(f"Rejected bullish divergence at index {i}: No RSI confirmation")
+                        
+                        # Check for potential bearish divergence
+                        if window['high'].iloc[-1] > window['high'].iloc[:-1].max():
+                            stats['potential_divergences'] += 1
                             
-                            # Bearish divergence (higher price high but lower RSI high)
-                            elif window['high'].iloc[-1] > window['high'].max() and \
-                                 window['rsi'].iloc[-1] < window['rsi'].max():
-                                
+                            if window['rsi'].iloc[-1] < window['rsi'].iloc[:-1].max():
                                 # Validate the pattern
                                 if self._validate_bearish_divergence(window):
                                     stats['confirmed_divergences'] += 1
                                     logger.info(f"Found bearish RSI divergence at index {i}")
-                                    logger.debug(f"Price: {window['high'].iloc[-1]:.5f} > {window['high'].max():.5f}")
-                                    logger.debug(f"RSI: {window['rsi'].iloc[-1]:.2f} < {window['rsi'].max():.2f}")
+                                    logger.debug(f"Price: {window['high'].iloc[-1]:.5f} > {window['high'].iloc[:-1].max():.5f}")
+                                    logger.debug(f"RSI: {window['rsi'].iloc[-1]:.2f} < {window['rsi'].iloc[:-1].max():.2f}")
                                     
                                     bearish.append({
                                         'type': 'rsi',
@@ -218,12 +229,12 @@ class DivergenceAnalysis:
                                 else:
                                     stats['rejected_reasons']['invalid_pattern'] += 1
                                     logger.debug(f"Rejected bearish divergence at index {i}: Invalid pattern")
+                            else:
+                                stats['rejected_reasons']['no_confirmation'] += 1
+                                logger.debug(f"Rejected bearish divergence at index {i}: No RSI confirmation")
                         else:
                             stats['rejected_reasons']['small_indicator_swing'] += 1
                             logger.debug(f"Rejected at index {i}: RSI swing too small ({rsi_swing:.2f})")
-                else:
-                    stats['rejected_reasons']['small_price_swing'] += 1
-                    logger.debug(f"Rejected at index {i}: Price swing too small ({price_swing:.5f})")
             
             # Log statistics
             logger.info("Regular divergence detection statistics:")
@@ -247,49 +258,73 @@ class DivergenceAnalysis:
             return {'bullish': [], 'bearish': [], 'stats': {}}
     
     def _validate_bullish_divergence(self, window: pd.DataFrame) -> bool:
-        """Validate a bullish divergence pattern."""
+        """Validate a bullish divergence pattern with stricter criteria."""
         try:
-            # Check for proper price action (lower lows)
-            price_valid = window['low'].iloc[-1] < window['low'].iloc[-2] < window['low'].iloc[-3]
+            # Calculate differences between the current swing and previous swings
+            price_diff = window['low'].iloc[:-1].min() - window['low'].iloc[-1]
+            rsi_diff = window['rsi'].iloc[-1] - window['rsi'].iloc[:-1].min()
+
+            # Calculate trend context
+            price_trend = window['close'].diff().rolling(5).mean().iloc[-1]
+            volume_trend = window['volume'].diff().rolling(5).mean().iloc[-1]
             
-            # Check for proper indicator action (higher lows)
-            indicator_valid = window['rsi'].iloc[-1] > window['rsi'].iloc[-2] > window['rsi'].iloc[-3]
+            # Validate price movement
+            price_valid = price_diff >= self.min_swing_size
             
-            # Check for oversold condition
-            oversold = window['rsi'].iloc[-1] < 30 or window['rsi'].min() < 30
+            # Validate RSI movement
+            rsi_valid = rsi_diff >= 2.0  # Minimum 2 point RSI difference
             
-            # Check for momentum
-            momentum = window['rsi'].iloc[-1] - window['rsi'].iloc[-2] > 0
+            # Check if volume is increasing (adds confirmation)
+            volume_confirming = volume_trend > 0
             
-            return price_valid and indicator_valid and (oversold or momentum)
+            # Check if price is showing signs of reversal
+            reversal_forming = price_trend > -0.0001  # Price decline slowing or reversing
+            
+            logger.debug(f"Bullish validation - Price diff: {price_diff:.5f}, RSI diff: {rsi_diff:.2f}")
+            logger.debug(f"Volume trend: {volume_trend:.2f}, Price trend: {price_trend:.5f}")
+            
+            # Return True only if all conditions are met
+            return price_valid and rsi_valid and (volume_confirming or reversal_forming)
             
         except Exception as e:
             logger.error(f"Error validating bullish divergence: {str(e)}")
             return False
     
     def _validate_bearish_divergence(self, window: pd.DataFrame) -> bool:
-        """Validate a bearish divergence pattern."""
+        """Validate a bearish divergence pattern with stricter criteria."""
         try:
-            # Check for proper price action (higher highs)
-            price_valid = window['high'].iloc[-1] > window['high'].iloc[-2] > window['high'].iloc[-3]
+            # Calculate differences between the current swing and previous swings
+            price_diff = window['high'].iloc[-1] - window['high'].iloc[:-1].max()
+            rsi_diff = window['rsi'].iloc[:-1].max() - window['rsi'].iloc[-1]
+
+            # Calculate trend context
+            price_trend = window['close'].diff().rolling(5).mean().iloc[-1]
+            volume_trend = window['volume'].diff().rolling(5).mean().iloc[-1]
             
-            # Check for proper indicator action (lower highs)
-            indicator_valid = window['rsi'].iloc[-1] < window['rsi'].iloc[-2] < window['rsi'].iloc[-3]
+            # Validate price movement
+            price_valid = price_diff >= self.min_swing_size
             
-            # Check for overbought condition
-            overbought = window['rsi'].iloc[-1] > 70 or window['rsi'].max() > 70
+            # Validate RSI movement
+            rsi_valid = rsi_diff >= 2.0  # Minimum 2 point RSI difference
             
-            # Check for momentum
-            momentum = window['rsi'].iloc[-1] - window['rsi'].iloc[-2] < 0
+            # Check if volume is increasing (adds confirmation)
+            volume_confirming = volume_trend > 0
             
-            return price_valid and indicator_valid and (overbought or momentum)
+            # Check if price is showing signs of reversal
+            reversal_forming = price_trend < 0.0001  # Price rise slowing or reversing
+            
+            logger.debug(f"Bearish validation - Price diff: {price_diff:.5f}, RSI diff: {rsi_diff:.2f}")
+            logger.debug(f"Volume trend: {volume_trend:.2f}, Price trend: {price_trend:.5f}")
+            
+            # Return True only if all conditions are met
+            return price_valid and rsi_valid and (volume_confirming or reversal_forming)
             
         except Exception as e:
             logger.error(f"Error validating bearish divergence: {str(e)}")
             return False
     
     def _find_hidden_divergences(self, df: pd.DataFrame) -> Dict[str, List[Dict]]:
-        """Find hidden divergences."""
+        """Find hidden divergences with improved sensitivity."""
         try:
             bullish = []
             bearish = []
@@ -297,22 +332,22 @@ class DivergenceAnalysis:
             for i in range(self.lookback_period, len(df)):
                 window = df.iloc[i-self.lookback_period:i+1]
                 
-                # Find price swings
-                price_low = window['low'].min()
-                price_high = window['high'].max()
-                price_low_idx = window['low'].idxmin()
-                price_high_idx = window['high'].idxmax()
+                # Find price swings with smoothed data
+                price_low = window['low'].rolling(2).mean().min()
+                price_high = window['high'].rolling(2).mean().max()
+                price_low_idx = window['low'].rolling(2).mean().idxmin()
+                price_high_idx = window['high'].rolling(2).mean().idxmax()
                 
-                # RSI divergence
-                rsi_low = window['rsi'].min()
-                rsi_high = window['rsi'].max()
-                rsi_low_idx = window['rsi'].idxmin()
-                rsi_high_idx = window['rsi'].idxmax()
+                # RSI divergence with smoothed data
+                rsi_low = window['rsi'].rolling(2).mean().min()
+                rsi_high = window['rsi'].rolling(2).mean().max()
+                rsi_low_idx = window['rsi'].rolling(2).mean().idxmin()
+                rsi_high_idx = window['rsi'].rolling(2).mean().idxmax()
                 
                 # Bullish hidden (price higher low, indicator lower low)
                 if price_low > window['low'].iloc[-self.lookback_period] and \
                    rsi_low < window['rsi'].iloc[-self.lookback_period] and \
-                   abs(price_low - window['low'].iloc[-self.lookback_period]) > self.divergence_threshold:
+                   abs(price_low - window['low'].iloc[-self.lookback_period]) > self.hidden_divergence_threshold:
                     bullish.append({
                         'type': 'rsi',
                         'start_index': price_low_idx,
@@ -320,13 +355,14 @@ class DivergenceAnalysis:
                         'price_start': price_low,
                         'price_end': window['close'].iloc[-1],
                         'indicator_start': rsi_low,
-                        'indicator_end': window['rsi'].iloc[-1]
+                        'indicator_end': window['rsi'].iloc[-1],
+                        'strength': abs(rsi_low - window['rsi'].iloc[-1]) / 30  # Normalized strength
                     })
                 
                 # Bearish hidden (price lower high, indicator higher high)
                 if price_high < window['high'].iloc[-self.lookback_period] and \
                    rsi_high > window['rsi'].iloc[-self.lookback_period] and \
-                   abs(price_high - window['high'].iloc[-self.lookback_period]) > self.divergence_threshold:
+                   abs(price_high - window['high'].iloc[-self.lookback_period]) > self.hidden_divergence_threshold:
                     bearish.append({
                         'type': 'rsi',
                         'start_index': price_high_idx,
@@ -334,7 +370,8 @@ class DivergenceAnalysis:
                         'price_start': price_high,
                         'price_end': window['close'].iloc[-1],
                         'indicator_start': rsi_high,
-                        'indicator_end': window['rsi'].iloc[-1]
+                        'indicator_end': window['rsi'].iloc[-1],
+                        'strength': abs(rsi_high - window['rsi'].iloc[-1]) / 30  # Normalized strength
                     })
             
             return {
@@ -412,7 +449,7 @@ class DivergenceAnalysis:
             return {'bullish': [], 'bearish': []}
     
     def _find_momentum_divergences(self, df: pd.DataFrame) -> Dict[str, List[Dict]]:
-        """Find momentum divergences using multiple indicators."""
+        """Find momentum divergences with improved sensitivity and edge case handling."""
         try:
             bullish = []
             bearish = []
@@ -420,73 +457,133 @@ class DivergenceAnalysis:
             for i in range(self.lookback_period, len(df)):
                 window = df.iloc[i-self.lookback_period:i+1]
                 
-                # Find price swings
+                # Find price swings with reduced smoothing
                 price_low = window['low'].min()
                 price_high = window['high'].max()
                 price_low_idx = window['low'].idxmin()
                 price_high_idx = window['high'].idxmax()
                 
-                # MFI divergence
-                mfi_low = window['mfi'].min()
-                mfi_high = window['mfi'].max()
+                # MFI divergence with relaxed bounds checking
+                if 'mfi' in window.columns:
+                    mfi_values = window['mfi'].ffill()
+                    if not mfi_values.empty and mfi_values.notna().any():
+                        mfi_low = mfi_values.min()
+                        mfi_high = mfi_values.max()
                 
                 # Bullish MFI divergence
-                if price_low < window['low'].iloc[-self.lookback_period] and \
-                   mfi_low > window['mfi'].iloc[-self.lookback_period] and \
-                   abs(price_low - window['low'].iloc[-self.lookback_period]) > self.divergence_threshold:
-                    bullish.append({
-                        'type': 'mfi',
-                        'start_index': price_low_idx,
-                        'end_index': i,
-                        'price_start': price_low,
-                        'price_end': window['close'].iloc[-1],
-                        'indicator_start': mfi_low,
-                        'indicator_end': window['mfi'].iloc[-1]
-                    })
+                        if (price_low < window['low'].iloc[-self.lookback_period] and 
+                            mfi_values.iloc[-1] > mfi_values.iloc[-self.lookback_period] and
+                            abs(price_low - window['low'].iloc[-self.lookback_period]) > self.momentum_divergence_threshold):
+                            
+                            bullish.append({
+                                'type': 'mfi',
+                                'start_index': price_low_idx,
+                                'end_index': i,
+                                'price_start': price_low,
+                                'price_end': window['close'].iloc[-1],
+                                'indicator_start': mfi_low,
+                                'indicator_end': mfi_values.iloc[-1],
+                                'strength': abs(mfi_values.iloc[-1] - mfi_low) / 100
+                            })
                 
                 # Bearish MFI divergence
-                if price_high > window['high'].iloc[-self.lookback_period] and \
-                   mfi_high < window['mfi'].iloc[-self.lookback_period] and \
-                   abs(price_high - window['high'].iloc[-self.lookback_period]) > self.divergence_threshold:
-                    bearish.append({
-                        'type': 'mfi',
-                        'start_index': price_high_idx,
-                        'end_index': i,
-                        'price_start': price_high,
-                        'price_end': window['close'].iloc[-1],
-                        'indicator_start': mfi_high,
-                        'indicator_end': window['mfi'].iloc[-1]
-                    })
+                        if (price_high > window['high'].iloc[-self.lookback_period] and 
+                            mfi_values.iloc[-1] < mfi_values.iloc[-self.lookback_period] and
+                            abs(price_high - window['high'].iloc[-self.lookback_period]) > self.momentum_divergence_threshold):
+                            
+                            bearish.append({
+                                'type': 'mfi',
+                                'start_index': price_high_idx,
+                                'end_index': i,
+                                'price_start': price_high,
+                                'price_end': window['close'].iloc[-1],
+                                'indicator_start': mfi_high,
+                                'indicator_end': mfi_values.iloc[-1],
+                                'strength': abs(mfi_high - mfi_values.iloc[-1]) / 100
+                            })
                 
-                # OBV divergence
-                obv_low = window['obv'].min()
-                obv_high = window['obv'].max()
+                # OBV divergence with improved volume analysis
+                if 'obv' in window.columns and 'volume' in window.columns:
+                    obv_values = window['obv'].ffill()
+                    volume_mean = window['volume'].mean()
+                    
+                    if not obv_values.empty and obv_values.notna().any():
+                        # Calculate rate of change for both price and OBV
+                        price_roc = (window['close'].iloc[-1] - window['close'].iloc[0]) / window['close'].iloc[0]
+                        obv_roc = (obv_values.iloc[-1] - obv_values.iloc[0]) / abs(obv_values.iloc[0]) if obv_values.iloc[0] != 0 else 0
                 
                 # Bullish OBV divergence
-                if price_low < window['low'].iloc[-self.lookback_period] and \
-                   obv_low > window['obv'].iloc[-self.lookback_period]:
-                    bullish.append({
-                        'type': 'obv',
-                        'start_index': price_low_idx,
-                        'end_index': i,
-                        'price_start': price_low,
-                        'price_end': window['close'].iloc[-1],
-                        'indicator_start': obv_low,
-                        'indicator_end': window['obv'].iloc[-1]
-                    })
+                        if (price_roc < -0.0005 and  # Reduced threshold
+                            obv_roc > 0.0005 and     # Reduced threshold
+                            window['volume'].iloc[-1] > volume_mean * 0.7):  # Reduced volume requirement
+                            
+                            bullish.append({
+                                'type': 'obv',
+                                'start_index': i - self.lookback_period,
+                                'end_index': i,
+                                'price_start': window['close'].iloc[0],
+                                'price_end': window['close'].iloc[-1],
+                                'indicator_start': obv_values.iloc[0],
+                                'indicator_end': obv_values.iloc[-1],
+                                'strength': abs(obv_roc)
+                            })
                 
                 # Bearish OBV divergence
-                if price_high > window['high'].iloc[-self.lookback_period] and \
-                   obv_high < window['obv'].iloc[-self.lookback_period]:
-                    bearish.append({
-                        'type': 'obv',
-                        'start_index': price_high_idx,
-                        'end_index': i,
-                        'price_start': price_high,
-                        'price_end': window['close'].iloc[-1],
-                        'indicator_start': obv_high,
-                        'indicator_end': window['obv'].iloc[-1]
-                    })
+                        if (price_roc > 0.0005 and   # Reduced threshold
+                            obv_roc < -0.0005 and    # Reduced threshold
+                            window['volume'].iloc[-1] > volume_mean * 0.7):  # Reduced volume requirement
+                            
+                            bearish.append({
+                                'type': 'obv',
+                                'start_index': i - self.lookback_period,
+                                'end_index': i,
+                                'price_start': window['close'].iloc[0],
+                                'price_end': window['close'].iloc[-1],
+                                'indicator_start': obv_values.iloc[0],
+                                'indicator_end': obv_values.iloc[-1],
+                                'strength': abs(obv_roc)
+                            })
+            
+            # Add MACD momentum divergence detection
+            if 'macd' in df.columns and 'macd_hist' in df.columns:
+                for i in range(self.lookback_period, len(df)):
+                    window = df.iloc[i-self.lookback_period:i+1]
+                    
+                    # Calculate MACD momentum
+                    macd_momentum = window['macd_hist'].diff().rolling(3).mean()
+                    price_momentum = window['close'].diff().rolling(3).mean()
+                    
+                    # Bullish MACD divergence
+                    if (price_momentum.iloc[-1] < -0.0001 and  # Reduced threshold
+                        macd_momentum.iloc[-1] > 0.0001 and    # Reduced threshold
+                        window['volume'].iloc[-1] > window['volume'].mean() * 0.7):
+                        
+                        bullish.append({
+                            'type': 'macd',
+                            'start_index': i - self.lookback_period,
+                            'end_index': i,
+                            'price_start': window['close'].iloc[0],
+                            'price_end': window['close'].iloc[-1],
+                            'indicator_start': window['macd'].iloc[0],
+                            'indicator_end': window['macd'].iloc[-1],
+                            'strength': abs(macd_momentum.iloc[-1] / price_momentum.iloc[-1])
+                        })
+                    
+                    # Bearish MACD divergence
+                    if (price_momentum.iloc[-1] > 0.0001 and   # Reduced threshold
+                        macd_momentum.iloc[-1] < -0.0001 and   # Reduced threshold
+                        window['volume'].iloc[-1] > window['volume'].mean() * 0.7):
+                        
+                        bearish.append({
+                            'type': 'macd',
+                            'start_index': i - self.lookback_period,
+                            'end_index': i,
+                            'price_start': window['close'].iloc[0],
+                            'price_end': window['close'].iloc[-1],
+                            'indicator_start': window['macd'].iloc[0],
+                            'indicator_end': window['macd'].iloc[-1],
+                            'strength': abs(macd_momentum.iloc[-1] / price_momentum.iloc[-1])
+                        })
             
             return {
                 'bullish': bullish,
@@ -535,9 +632,10 @@ class DivergenceAnalysis:
             if 'obv' in df.columns and 'volume' in df.columns:
                 obv_changes = df['obv'].diff().abs()
                 volume_values = df['volume'].abs()
-                if not (obv_changes <= volume_values + 1e-10).all():
-                    quality_score *= 0.8
-                    issues.append("OBV changes larger than volume")
+                # Allow for some numerical precision differences and cumulative effects
+                if (obv_changes > volume_values * 1.1).any():  # Allow 10% margin
+                    quality_score *= 0.9  # Reduced penalty
+                    issues.append("OBV changes larger than expected")
             
             quality_score = round(quality_score, 2)
             reason = '; '.join(issues) if issues else "All indicators valid"
@@ -557,23 +655,34 @@ class DivergenceAnalysis:
                 'issues': ['Error assessing indicator quality']
             }
     
-    def _validate_divergences(self, df: pd.DataFrame, divergences: Dict[str, List[Dict]], divergence_type: str) -> Dict[str, List[Dict]]:
-        """Validate divergence patterns."""
+    def _validate_divergences(self, df: pd.DataFrame, divergences: Dict[str, List[Dict]], indicator_label: str) -> Dict[str, List[Dict]]:
+        """Validate divergence patterns in the provided divergences dictionary.
+        
+        Args:
+            df (pd.DataFrame): The dataframe containing price and indicator data.
+            divergences (Dict[str, List[Dict]]): Dictionary with keys 'bullish' and 'bearish'
+                containing divergence entries.
+            indicator_label (str): A label for the indicator used (e.g., 'rsi', 'mfi', etc.)
+                This is used to verify indicator values in the dataframe (using divergence['type'] is
+                preferred if available).
+        
+        Returns:
+            Dict[str, List[Dict]]: Validated divergences categorized into 'bullish' and 'bearish'.
+        """
         try:
             validated_divergences = {'bullish': [], 'bearish': []}
-            
-            for divergence in divergences[divergence_type]:
-                # Validate price and indicator consistency
-                if divergence['price_start'] < df['close'].iloc[divergence['start_index']] and \
-                   divergence['price_end'] > df['close'].iloc[divergence['end_index']] and \
-                   divergence['indicator_start'] < df[divergence['type']].iloc[divergence['start_index']] and \
-                   divergence['indicator_end'] > df[divergence['type']].iloc[divergence['end_index']]:
-                    validated_divergences[divergence_type].append(divergence)
-            
+            for side in ['bullish', 'bearish']:
+                for divergence in divergences.get(side, []):
+                    # Use divergence['type'] if available; otherwise fallback to indicator_label
+                    indicator_key = divergence.get('type', indicator_label)
+                    if (divergence['price_start'] < df['close'].iloc[divergence['start_index']] and
+                        divergence['price_end'] > df['close'].iloc[divergence['end_index']] and
+                        divergence['indicator_start'] < df[indicator_key].iloc[divergence['start_index']] and
+                        divergence['indicator_end'] > df[indicator_key].iloc[divergence['end_index']]):
+                        validated_divergences[side].append(divergence)
             return validated_divergences
-            
         except Exception as e:
-            logger.error(f"Error validating {divergence_type} divergences: {str(e)}")
+            logger.error(f"Error validating divergences for {indicator_label}: {str(e)}")
             return {'bullish': [], 'bearish': []}
     
     def _analyze_divergence_relationships(self, regular: Dict[str, List[Dict]], hidden: Dict[str, List[Dict]], structural: Dict[str, List[Dict]], momentum: Dict[str, List[Dict]]) -> Dict:

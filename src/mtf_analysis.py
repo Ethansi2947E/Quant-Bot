@@ -487,4 +487,32 @@ class MTFAnalysis:
             
         except Exception as e:
             logger.error(f"Error finding key levels: {str(e)}")
-            return [] 
+            return []
+
+    def analyze_timeframe_correlation(self, timeframes_data: Dict[str, pd.DataFrame]) -> Dict:
+        """Analyze correlation between multiple timeframes."""
+        correlations = {}
+        for tf1, df1 in timeframes_data.items():
+            for tf2, df2 in timeframes_data.items():
+                if tf1 != tf2:
+                    correlation = self.calculate_timeframe_correlation(df1, df2)
+                    correlations[f"{tf1}-{tf2}"] = correlation
+        return correlations
+
+    def calculate_timeframe_correlation(self, df1: pd.DataFrame, df2: pd.DataFrame) -> float:
+        """Calculate correlation between two timeframes."""
+        try:
+            # Resample data to a common timeframe (e.g., 1 hour)
+            resampled_df1 = df1.resample('1H').last()
+            resampled_df2 = df2.resample('1H').last()
+            
+            # Align the data
+            aligned_data = resampled_df1.align(resampled_df2, join='inner')
+            
+            # Calculate correlation
+            correlation = aligned_data[0]['close'].corr(aligned_data[1]['close'])
+            
+            return correlation
+        except Exception as e:
+            logger.error(f"Error calculating timeframe correlation: {str(e)}")
+            return 0.0 
