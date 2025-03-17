@@ -26,23 +26,65 @@ MT5_CONFIG = {
 
 # Trading Configuration
 TRADING_CONFIG = {
-    "symbols": ['AUDCAD', 'CADJPY', 'XAUUSD', 'EURCHF', 'EURJPY', 'AUDUSD'],
-    "timeframes": ['M5', 'M15'],
+    "symbols": [
+        {"symbol": "AUDCADm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "AUDJPYm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "CADJPYm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "EURCADm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "XAUUSDm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "EURCHFm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "EURGBPm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "EURJPYm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "AUDUSDm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "GBPUSDm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "NZDUSDm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "USDCADm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "USDJPYm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "USDCHFm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        {"symbol": "XAGUSDm", "timeframe": "M15", "additional_timeframes": ["H1", "H4", "D1"]},
+        
+
+    ],
+    "timeframes": ['M5', 'M15', 'H1', 'H4', 'D1'],
     "risk_per_trade": 0.008,
+    "fixed_lot_size": 0.01,  # Fixed lot size to use if use_fixed_lot_size is true
+    "use_fixed_lot_size": True,  # When true, use fixed lot size instead of risk-based calculation
+    "max_lot_size": 0.3,  # Maximum lot size even when using risk-based calculation
     "max_daily_risk": 0.06,
     "min_volatility": 5.0,
-    "max_spread": 20.0,
+    "max_spread": 12.0,
     "min_atr": 4.0,
     "max_atr": 100.0,
     "volatility_factor": 1.2,
     "spread_factor": 1.5,
+    # Position addition settings
+    "allow_position_additions": True,  # Disable adding to existing positions
+    "max_position_size": 2.0,         # Maximum total position size after additions
+    "position_addition_threshold": 0.5,  # Minimum distance in ATR for adding positions
+    # Dashboard configuration
+    "enable_dashboard": True,
+    "dashboard_api_port": 8000,
+    "dashboard_frontend_port": 3000,
+    "auto_start_frontend": False,  # Only start API by default, frontend on demand
+    # Shutdown behavior
+    "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
+    # Signal generators configuration
+    "signal_generators": [
+        # Uncomment or comment these lines to enable/disable specific signal generators
+           # Alternative signal generator from signal_generator1.py
+        #"signal_generator",  # The default signal generator (SignalGenerator123)
+        "signal_generator1", 
+        #"signal_generator2",
+        #"signal_generator3", 
+    ],
 }
 
 # Telegram Configuration
 TELEGRAM_CONFIG = {
     "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "allowed_user_ids": [
-        "6018798296"  # Add the user ID here
+        "6018798296",
+        "5421178210"
     ],
 }
 
@@ -53,11 +95,6 @@ AI_CONFIG = {
     "sentiment_threshold": 0.5,  # Minimum sentiment score to consider
 }
 
-# Database Configuration
-DB_CONFIG = {
-    "url": f"sqlite:///{DATA_DIR}/trading_bot.db",
-    "echo": False,
-}
 
 # Logging Configuration
 LOG_CONFIG = {
@@ -179,17 +216,8 @@ MARKET_STRUCTURE_CONFIG = {
     }
 }
 
-# Signal Classification Thresholds
-SIGNAL_THRESHOLDS = {
-    "strong": 0.8,
-    "moderate": 0.6,
-    "weak": 0.4,
-    "minimum": 0.2,
-}
 
-# Log the signal thresholds
-logging.info(f"Loaded SIGNAL_THRESHOLDS: {SIGNAL_THRESHOLDS}")
-
+   
 # Confirmation Requirements
 CONFIRMATION_CONFIG = {
     "min_required": 2,  # Reduced from 3
@@ -212,99 +240,10 @@ BACKTEST_CONFIG = {
     "risk_per_trade": 0.01,      # Risk per trade (1% of balance)
     "enable_visualization": True, # Enable trade visualization
     "save_results": True,        # Save backtest results to file
-    "results_dir": "backtest_results"  # Directory to save results
+    "results_dir": "backtest_results",  # Directory to save results
+    "use_signal_fallback": False  # Set to False to disable fallback to basic signal generator
 }
 
-# Signal Generator Configuration
-SIGNAL_CONFIG = {
-    'timeframe_thresholds': {
-        'M5': {
-            'base_score': 0.65,
-            'ranging_market': 0.45,
-            'trending_market': 0.75,
-            'volatility_filter': 1.2,
-            'min_trend_strength': 0.60,
-            'rr_ratio': 2.0,
-            'min_confirmations': 2
-        },
-        'M15': {
-            'base_score': 0.15,
-            'ranging_market': 0.15,
-            'trending_market': 0.25,
-            'volatility_filter': 1.2,
-            'min_trend_strength': 0.15,
-            'rr_ratio': 1.0,
-            'min_confirmations': 1
-        },
-        'H1': {
-            'base_score': 0.65,
-            'ranging_market': 0.40,
-            'trending_market': 0.75,
-            'volatility_filter': 1.2,
-            'min_trend_strength': 0.60,
-            'rr_ratio': 2.4,
-            'min_confirmations': 2
-        },
-        'H4': {
-            'base_score': 0.65,
-            'ranging_market': 0.40,
-            'trending_market': 0.70,
-            'volatility_filter': 1.1,
-            'min_trend_strength': 0.60,
-            'rr_ratio': 2.8,
-            'min_confirmations': 2
-        }
-    },
-    'timeframe_weights': {
-        'M5': {
-            'structure': 0.35,
-            'volume': 0.25,
-            'smc': 0.25,
-            'mtf': 0.15
-        },
-        'M15': {
-            'structure': 0.35,
-            'volume': 0.25,
-            'smc': 0.25,
-            'mtf': 0.15
-        },
-        'H1': {
-            'structure': 0.30,
-            'volume': 0.30,
-            'smc': 0.25,
-            'mtf': 0.15
-        },
-        'H4': {
-            'structure': 0.35,
-            'volume': 0.25,
-            'smc': 0.25,
-            'mtf': 0.15
-        }
-    },
-    'signal_thresholds': {
-        'strong': 0.75,
-        'moderate': 0.65,
-        'weak': 0.55,
-        'minimum': 0.45
-    },
-    'timeframe_multipliers': {
-        'H4': 1.25,
-        'H1': 1.0,
-        'M15': 0.85,
-        'M5': 0.75
-    },
-    'base_thresholds': {
-        'score': 0.15,
-        'ranging_market': 0.15,
-        'trending_market': 0.12
-    },
-    'component_weights': {
-        'structure': 0.40,
-        'volume': 0.20,
-        'smc': 0.30,
-        'mtf': 0.10
-    }
-}
 
 # Risk Management Configuration
 RISK_CONFIG = {
@@ -373,12 +312,13 @@ MARKET_FILTERS = {
 TRADE_EXIT_CONFIG = {
     'partial_tp_ratio': 0.5,
     'tp_levels': [
-        {'ratio': 1.0, 'size': 0.5},
-        {'ratio': 2.0, 'size': 0.5}
+        {'ratio': 0.5, 'size': 0.4},
+        {'ratio': 1.0, 'size': 0.3},
+        {'ratio': 1.5, 'size': 0.3}
     ],
     'trailing_stop': {
         'enabled': True,
-        'activation_ratio': 1.0,
+        'activation_ratio': 0.5,
         'trail_points': 0.5
     }
 }
@@ -393,7 +333,3 @@ VOLATILITY_CONFIG = {
     }
 }
 
-# RSI Configuration
-RSI_CONFIG = {
-    'default': {'overbought': 70, 'oversold': 30}
-} 

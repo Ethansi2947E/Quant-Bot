@@ -1,69 +1,170 @@
 import asyncio
-from typing import Dict, List, Optional
-from loguru import logger
-import pandas as pd
-from datetime import datetime, timedelta, UTC, time
 import json
-import sys
-import MetaTrader5 as mt5
-import numpy as np
-import threading
-import pytz
-from pathlib import Path
 import traceback
-import time as tm
-import math
+import pytz
+import time
+import sys
+import socket  # Add socket module import
+import MetaTrader5 as mt5  # Add MetaTrader5 import
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Type, Union
+import string  # Add string module import
 
-from config.config import (
-    TRADING_CONFIG, SESSION_CONFIG, MT5_CONFIG, MARKET_STRUCTURE_CONFIG,
-    SIGNAL_THRESHOLDS, CONFIRMATION_CONFIG, MARKET_SCHEDULE_CONFIG, TELEGRAM_CONFIG
-)
+from loguru import logger
+
+# Import custom modules
 from src.mt5_handler import MT5Handler
 from src.signal_generator import SignalGenerator
+from src.signal_generator1 import SignalGenerator1  # Import the second signal generator
+from src.signal_generator2 import SignalGeneratorBankTrading as SignalGenerator2  # Add the new signal generator
+from src.signal_generator3 import SignalGenerator3  # Add the new signal generator
 from src.risk_manager import RiskManager
 from src.telegram_bot import TelegramBot
-from src.models import Trade, Signal, MarketData, NewsEvent
-from src.dashboard import init_app, app, add_signal
+from src.database import db
 from src.market_analysis import MarketAnalysis
 from src.smc_analysis import SMCAnalysis
 from src.mtf_analysis import MTFAnalysis
-from src.divergence_analysis import DivergenceAnalysis
-from src.volume_analysis import VolumeAnalysis
-from src.poi_detector import POIDetector, POI
+
+
+# Import configuration
+from config.config import TRADING_CONFIG, SESSION_CONFIG, MARKET_SCHEDULE_CONFIG
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 class TradingBot:
-    def __init__(self, config=None):
-        """Initialize the trading bot."""
-        self.config = config
-        self.mt5 = None
-        self.signal_generator = SignalGenerator()
+    def __init__(self, config=None, signal_generator_class: Type[SignalGenerator] = SignalGenerator):
+        """
+        Initialize the trading bot with configurable signal generator.
+        
+        Args:
+            config: Optional configuration override
+            signal_generator_class: Class to use for signal generation (defaults to SignalGenerator)
+        """
+        self.config = config or TRADING_CONFIG
+        self.trading_config = self.config
+        
+        # Initialize components
         self.risk_manager = RiskManager()
+        self.signal_generators = []
+        
+        # Available signal generators mapping
+        self.available_signal_generators = {
+            "default": SignalGenerator,
+            "signal_generator": SignalGenerator,  # Add direct mapping for config.py
+            "signal_generator1": SignalGenerator1,
+            "signal_generator2": SignalGenerator2,
+            "signal_generator3": SignalGenerator3
+        }
+        
+        # Initialize with a fresh MT5 connection
+        # First make sure any existing connections are closed
+        try:
+            mt5.shutdown()
+            logger.debug("Cleaned up any existing MT5 connections before initialization")
+        except Exception as e:
+            # Ignore errors here, just being cautious
+            pass
+            
+        # Create MT5 handler with fresh connection
+        self.mt5_handler = MT5Handler()
+        self.mt5 = self.mt5_handler  # Alias for backward compatibility
+        
+        # Verify MT5 connection is working
+        if not self.mt5_handler.connected:
+            if self.mt5_handler.initialize():
+                logger.info("MT5 connection established during initialization")
+        
+        # Track connection status
+        self.mt5_connected = self.mt5_handler.connected
+        
+        # Initialize other components
+        self.risk_manager = RiskManager(self.mt5_handler)
         self.telegram_bot = TelegramBot()
-        self.dashboard = None
+        self.market_analysis = MarketAnalysis()
+        
+        # Initialize dashboard API
+        self.dashboard_api = None
+        self.dashboard_thread = None
+        self.dashboard_enabled = TRADING_CONFIG.get("enable_dashboard", True)
+        
+       
+        
+        # Configuration - set this BEFORE initializing signal generators
         self.session_config = SESSION_CONFIG
         self.market_schedule = MARKET_SCHEDULE_CONFIG
         self.trading_config = TRADING_CONFIG if config is None else config.TRADING_CONFIG
+        
+        # Initialize multiple signal generators
+        self.signal_generators = []
+        self._init_signal_generators(signal_generator_class)
+        
+        # Keep the original signal generator for backward compatibility
+        self.signal_generator_class = signal_generator_class
+        self.signal_generator = signal_generator_class(risk_manager=self.risk_manager)
+        
+        # State management
         self.running = False
-        self.trading_enabled = False  # Add this line
-        self.trades: List[Trade] = []
-        self.signals: List[Signal] = []
-        self.market_data: Dict[str, MarketData] = {}
-        self.news_events: List[NewsEvent] = []
+        self.trading_enabled = True  # Enabled by default as requested
+        self.shutdown_requested = False  # Flag to gracefully exit the main loop
+        self.signals: List[Dict] = []
         self.trade_counter = 0
         self.last_signal = {}  # Dictionary to track last signal timestamp and direction per symbol
-        self.ny_timezone = pytz.timezone('America/New_York')
-        self.min_confidence = SIGNAL_THRESHOLDS["weak"]
+        self.check_interval = 60  # Default check interval in seconds
         
-        # Initialize analysis components with H4 timeframe thresholds as default
-        self.market_analysis = MarketAnalysis(ob_threshold=MARKET_STRUCTURE_CONFIG['structure_levels']['H4']['ob_size'])
-        self.smc_analysis = SMCAnalysis()
-        self.mtf_analysis = MTFAnalysis()
-        self.divergence_analysis = DivergenceAnalysis()
-        self.volume_analysis = VolumeAnalysis()
-        self.poi_detector = POIDetector()  # Add POIDetector initialization
-    
+        # Timezone handling
+        self.ny_timezone = pytz.timezone('America/New_York')
+        
+        # Signal thresholds
+        self.min_confidence = self.trading_config.get("min_confidence", 0.5)  # Default to 50% confidence
+        
+        # Trade management
+        self.trailing_stop_enabled = True
+        self.trailing_stop_data = {}  # Store trailing stop data for open positions
+        
+        # Shutdown behavior
+        self.close_positions_on_shutdown = self.trading_config.get("close_positions_on_shutdown", False)  # Default to False
+        
+    def _init_signal_generators(self, default_generator_class: Type[SignalGenerator] = None):
+        """Initialize signal generators from configuration.
+        
+        Args:
+            default_generator_class: Default signal generator class if not specified in config
+        """
+        # Get configured signal generators from trading config
+        configured_generators = self.trading_config.get("signal_generators", [])
+        
+        # If no generators configured, use the default
+        if not configured_generators and default_generator_class:
+            generator = default_generator_class(mt5_handler=self.mt5_handler, risk_manager=self.risk_manager)
+            self.signal_generators.append(generator)
+            logger.info(f"Using default signal generator: {default_generator_class.__name__}")
+            return
+            
+        # Initialize each configured generator
+        for generator_name in configured_generators:
+            try:
+                # Get the generator class from the available generators dictionary
+                generator_class = self.available_signal_generators.get(generator_name)
+                
+                if generator_class:
+                    # Initialize the generator with the MT5 handler and risk manager
+                    generator = generator_class(mt5_handler=self.mt5_handler, risk_manager=self.risk_manager)
+                    self.signal_generators.append(generator)
+                    logger.info(f"Initialized signal generator: {generator_name}")
+                else:
+                    logger.error(f"Signal generator {generator_name} not found in available generators")
+                
+            except Exception as e:
+                logger.error(f"Failed to initialize signal generator {generator_name}: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+        # If no generators could be initialized, add the default
+        if not self.signal_generators and default_generator_class:
+            generator = default_generator_class(mt5_handler=self.mt5_handler, risk_manager=self.risk_manager)
+            self.signal_generators.append(generator)
+            logger.info(f"Falling back to default signal generator: {default_generator_class.__name__}")
+
     def setup_logging(self):
         """Set up detailed logging configuration."""
         # Define custom format for different log levels
@@ -87,122 +188,78 @@ class TradingBot:
             diagnose=True,
             catch=True,
         )
-        logger.add(sys.stderr, format=fmt, level="INFO", colorize=True)
+        logger.add(sys.stderr, format=fmt, level="DEBUG", colorize=True)
+
+    def change_signal_generator(self, signal_generator_class: Type[SignalGenerator]):
+        """
+        Change the signal generator used by the trading bot.
+        
+        Args:
+            signal_generator_class: New signal generator class to use
+        """
+        logger.info(f"Changing signal generator to {signal_generator_class.__name__}")
+        
+        # Store current MT5 connection state
+        mt5_was_connected = False
+        if hasattr(self, 'mt5_handler') and self.mt5_handler and self.mt5_handler.connected:
+            mt5_was_connected = True
+        
+        # Create new signal generator instance
+        self.signal_generator_class = signal_generator_class
+        self.signal_generator = signal_generator_class(mt5_handler=self.mt5_handler, risk_manager=self.risk_manager)
+        
+        # Ensure MT5 connection is maintained or reestablished if it was connected before
+        if mt5_was_connected:
+            if not hasattr(self, 'mt5_handler') or not self.mt5_handler or not self.mt5_handler.connected:
+                logger.warning("MT5 connection was lost during signal generator change. Attempting to reconnect...")
+                self.mt5_handler = MT5Handler()
+                if not self.initialize_mt5():
+                    logger.error("Failed to reestablish MT5 connection after signal generator change")
+                    # Attempt direct initialization as a fallback
+                    try:
+                        self.mt5_handler.initialize()
+                        logger.info("MT5 connection reestablished through direct initialization")
+                    except Exception as e:
+                        logger.error(f"Failed to reestablish MT5 connection: {str(e)}")
+        
+        # Send notification via Telegram
+        if self.telegram_bot and self.telegram_bot.is_running:
+            # Create a task to send notification asynchronously
+            async def send_notification_task():
+                await self.telegram_bot.send_notification(
+                    f"Signal generator changed to {signal_generator_class.__name__}"
+                )
+            
+            # Create and run the task in the background
+            asyncio.create_task(send_notification_task())
 
     def initialize_mt5(self):
-        """Initialize connection to MetaTrader 5."""
+        """Initialize MT5 connection with robust error handling and recovery."""
         try:
-            # Initialize MT5
-            if not mt5.initialize():
-                logger.error("MT5 initialization failed")
-                return False
+            # Check if already connected
+            if hasattr(self, 'mt5_handler') and self.mt5_handler and getattr(self.mt5_handler, 'connected', False):
+                logger.debug("MT5 already connected")
+                return True
             
-            # Get MT5 config from either passed config or imported config
-            mt5_config = self.config.MT5_CONFIG if self.config else MT5_CONFIG
+            # Ensure we have a valid MT5Handler instance
+            if not hasattr(self, 'mt5_handler') or self.mt5_handler is None:
+                self.mt5_handler = MT5Handler()
             
-            # Login to MT5
-            if not mt5.login(
-                login=mt5_config["login"],
-                password=mt5_config["password"],
-                server=mt5_config["server"]
-            ):
-                logger.error("MT5 login failed")
-                return False
-            
-            # Initialize MT5Handler
-            self.mt5 = MT5Handler()
-            
-            logger.info("MT5 initialized successfully")
-            return True
+            # Attempt standard initialization
+            if self.mt5_handler.initialize():
+                logger.info("MT5 connection initialized successfully")
+                return True
+            else:
+                logger.error("Failed to initialize MT5 connection, attempting recovery")
+                return self.recover_mt5_connection()
             
         except Exception as e:
             logger.error(f"Error initializing MT5: {str(e)}")
-            return False
-
-    def initialize_dashboard(self):
-        """Initialize and start the dashboard server."""
-        try:
-            # Initialize the Flask app with bot reference
-            self.dashboard = init_app(self)
-            
-            # Start the Flask server in a background thread
-            def run_server():
-                self.dashboard.run(host='localhost', port=5000, debug=False, use_reloader=False)
-            
-            dashboard_thread = threading.Thread(target=run_server, daemon=True)
-            dashboard_thread.start()
-            logger.info("Dashboard server started successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to start dashboard server: {str(e)}")
-            raise Exception("Failed to start dashboard server")
-
-    def is_market_open(self) -> bool:
-        """
-        Check if the forex market is currently open based on schedule and holidays.
-        Returns True if market is open, False otherwise.
-        
-        Forex market is open 24/5 - from Sunday evening to Friday evening local time,
-        except for holidays.
-        """
-        try:
-            # Get current local time
-            local_time = datetime.now()
-            current_date = local_time.date()
-            current_weekday = current_date.weekday()  # 0 = Monday, 6 = Sunday
-            
-            logger.info(f"Local time: {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Check if it's a holiday
-            current_year = str(current_date.year)
-            if current_year in self.market_schedule["holidays"]:
-                holiday_dates = [
-                    datetime.strptime(date, "%Y-%m-%d").date()
-                    for date in self.market_schedule["holidays"][current_year].values()
-                ]
-                if current_date in holiday_dates:
-                    logger.info(f"Market is closed for holiday on {current_date}")
-                    return False
-            
-            # Check if it's a partial trading day
-            if current_year in self.market_schedule["partial_trading_days"]:
-                for day_info in self.market_schedule["partial_trading_days"][current_year].values():
-                    if datetime.strptime(day_info["date"], "%Y-%m-%d").date() == current_date:
-                        close_time = datetime.strptime(day_info["close_time"], "%H:%M").time()
-                        if local_time.time() >= close_time:
-                            logger.info(f"Market is closed for partial trading day at {close_time} local time")
-                            return False
-            
-            # Market is closed on Saturday
-            if current_weekday == 5:  # Saturday
-                logger.debug("Market is closed (Saturday)")
-                return False
-            
-            # Market is closed on Sunday until 23:00 (11 PM) local time
-            if current_weekday == 6:  # Sunday
-                market_open = local_time.replace(hour=23, minute=0, second=0, microsecond=0)
-                if local_time < market_open:
-                    logger.debug("Market is closed (Sunday before 11 PM)")
-                    return False
-            
-            # Market is closed Friday after 22:00 (10 PM) local time
-            if current_weekday == 4:  # Friday
-                market_close = local_time.replace(hour=22, minute=0, second=0, microsecond=0)
-                if local_time >= market_close:
-                    logger.debug("Market is closed (Friday after 10 PM)")
-                    return False
-            
-            # If we got here, market is open
-            logger.debug("Market is open")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error checking market schedule: {str(e)}")
-            # If there's an error checking the schedule, assume market is closed for safety
-            return False
+            logger.info("Attempting connection recovery due to initialization error")
+            return self.recover_mt5_connection()
 
     async def start(self):
-        """Start the trading bot."""
+        """Start the trading bot with proper initialization of all components."""
         try:
             # If already running, just enable trading
             if self.running:
@@ -213,22 +270,16 @@ class TradingBot:
             
             logger.info("Starting trading bot...")
             
+            # Setup logging
+            self.setup_logging()
+            
             # Initialize MT5 first
             if not self.initialize_mt5():
                 raise Exception("Failed to initialize MT5")
             logger.info("MT5 initialized successfully")
             
-            # Initialize dashboard only if not already running
-            try:
-                if not hasattr(self, '_dashboard_initialized'):
-                    self.initialize_dashboard()
-                    self._dashboard_initialized = True
-                    logger.info("Dashboard initialized successfully")
-                else:
-                    logger.info("Dashboard already initialized")
-            except Exception as e:
-                logger.error(f"Dashboard initialization failed: {str(e)}")
-                # Continue even if dashboard fails
+            # Reconcile trades that may have closed while offline
+            await self.reconcile_trades()
             
             # Initialize Telegram bot with retry
             telegram_init_attempts = 3
@@ -241,6 +292,9 @@ class TradingBot:
                         if await self.telegram_bot.initialize(self.trading_config):
                             telegram_init_success = True
                             logger.info("Telegram bot initialized successfully")
+                            
+                            # Register custom commands
+                            await self.register_telegram_commands()
                             break
                     else:
                         logger.info("Telegram bot already running")
@@ -259,6 +313,14 @@ class TradingBot:
             if not telegram_init_success:
                 raise Exception("Failed to initialize Telegram bot after multiple attempts")
             
+            # Initialize Dashboard if enabled
+            if self.dashboard_enabled:
+                dashboard_init_success = await self.initialize_dashboard()
+                if dashboard_init_success:
+                    logger.info("Dashboard initialized successfully")
+                else:
+                    logger.warning("Failed to initialize dashboard, continuing without it")
+            
             # Enable trading by default
             self.trading_enabled = True
             await self.enable_trading()  # This will also enable trading on the Telegram bot
@@ -266,74 +328,25 @@ class TradingBot:
             self.running = True
             logger.info("Trading bot started successfully")
             
-            # Load existing trades into memory
-            trades_file = Path(BASE_DIR) / "data" / "active_trades.json"
-            if trades_file.exists():
-                try:
-                    with open(trades_file, 'r') as f:
-                        self.trades = json.load(f)
-                    logger.info(f"Loaded {len(self.trades)} existing trades")
-                except Exception as e:
-                    logger.error(f"Error loading existing trades: {str(e)}")
+            
+            # Send startup notification
+            if self.telegram_bot and self.telegram_bot.is_running:
+                account_info = self.mt5_handler.get_account_info()
+                
+                startup_message = (
+                    "📊 Trading Bot Started 📊\n\n"
+                    f"Using signal generator: {self.signal_generator_class.__name__}\n"
+                    f"Account Balance: {account_info.get('balance', 'N/A')}\n"
+                    f"Symbols: {', '.join([s['symbol'] if isinstance(s, dict) else s for s in self.trading_config['symbols']])}\n"
+                    f"Trailing Stop: {'Enabled' if self.trailing_stop_enabled else 'Disabled'}\n"
+                    f"Dashboard: {'Enabled' if self.dashboard_enabled else 'Disabled'}\n\n"
+                    "Use /status for more information"
+                )
+                
+                await self.telegram_bot.send_notification(startup_message)
             
             # Start main trading loop
-            while self.running:
-                try:
-                    # Check if Telegram bot is running and trading is enabled
-                    if not (self.telegram_bot and self.telegram_bot.is_running):
-                        logger.error("Telegram bot not running. Stopping trading bot...")
-                        break
-                        
-                    if not self.telegram_bot.trading_enabled:
-                        logger.debug("Trading is disabled. Waiting for /enable command...")
-                        await asyncio.sleep(5)
-                        continue
-                    
-                    # Check if market is open
-                    if not self.is_market_open():
-                        logger.info("Market is currently closed. Waiting for market open...")
-                        # Check every 5 minutes when market is closed
-                        await asyncio.sleep(300)
-                        continue
-                    
-                    logger.info("Starting market analysis cycle...")
-                    
-                    # Get current session
-                    current_session = self.analyze_session()
-                    logger.info(f"Current trading session: {current_session}")
-                    
-                    # Process each symbol
-                    for symbol in self.trading_config["symbols"]:
-                        try:
-                            # Process each timeframe
-                            for timeframe in self.trading_config["timeframes"]:
-                                # Perform market analysis
-                                analysis = await self.analyze_market(symbol, timeframe)
-                                if analysis:
-                                    # Generate signals based on analysis
-                                    signals = await self.generate_signals(analysis, symbol, timeframe)
-                                    if signals:
-                                        # Process the signals
-                                        await self.process_signals(signals)
-                            
-                            # Manage open trades for this symbol
-                            await self.manage_open_trades()
-                            
-                        except Exception as e:
-                            error_trace = traceback.format_exc()
-                            logger.error(f"Error processing {symbol}: {str(e)}\nTraceback:\n{error_trace}")
-                            if self.telegram_bot and self.telegram_bot.is_running:
-                                await self.telegram_bot.send_error_alert(
-                                    f"Error analyzing {symbol}: {str(e)}\nTraceback:\n{error_trace}"
-                                )
-                    
-                    await asyncio.sleep(60)  # Main loop interval
-                    
-                except Exception as e:
-                    logger.error(f"Error in main loop: {str(e)}")
-                    if self.telegram_bot and self.telegram_bot.is_running:
-                        await self.telegram_bot.send_error_alert(f"Error in main loop: {str(e)}")
-                    await asyncio.sleep(60)  # Wait longer on error
+            await self.main_loop()
                     
         except Exception as e:
             logger.error(f"Bot error: {str(e)}")
@@ -344,1790 +357,729 @@ class TradingBot:
             if not self.running:  # Only stop if we're actually shutting down
                 await self.stop()
 
-    async def stop(self, cleanup_only=False):
-        """Stop the trading bot."""
+    async def initialize_dashboard(self) -> bool:
+        """Initialize and start the dashboard API server."""
         try:
-            if not cleanup_only:
-                self.running = False
-                logger.info("Stopping trading bot...")
+            logger.info("Initializing trading dashboard...")
             
-            # Close open positions if MT5 is available
-            if self.mt5 is not None:
-                try:
-                    positions = self.mt5.get_open_positions()
-                    if positions:
-                        for position in positions:
-                            if self.mt5.close_position(position["ticket"]):
-                                if self.telegram_bot and self.telegram_bot.is_running:
-                                    await self.telegram_bot.send_trade_update(
-                                        position["ticket"],
-                                        position["symbol"],
-                                        "CLOSED (Bot Stop)",
-                                        position["price_current"],
-                                        position["profit"]
-                                    )
-                except Exception as e:
-                    logger.warning(f"Error closing positions: {str(e)}")
+            # Import DashboardAPI here to avoid circular imports
+            from src.dashboard_api import DashboardAPI
+            import uvicorn
+            import asyncio
+            import threading
             
-            # Stop Telegram bot only if we're doing a full shutdown
-            if self.telegram_bot is not None and not cleanup_only and not self.telegram_bot.trading_enabled:
-                try:
-                    await self.telegram_bot.stop()
-                except Exception as e:
-                    logger.warning(f"Error stopping Telegram bot: {str(e)}")
+            # Get dashboard configuration
+            dashboard_api_port = self.trading_config.get("dashboard_api_port", 8000)
+            auto_start_frontend = self.trading_config.get("auto_start_frontend", False)
             
-            # Shutdown MT5 if we're not just cleaning up
-            if self.mt5 is not None and not cleanup_only:
-                try:
-                    mt5.shutdown()
-                    self.mt5 = None
-                except Exception as e:
-                    logger.warning(f"Error shutting down MT5: {str(e)}")
-            
-            if not cleanup_only:
-                logger.info("Trading bot stopped")
-                
-        except Exception as e:
-            logger.error(f"Error stopping trading bot: {str(e)}")
-            raise
-    
-    async def check_symbol(self, symbol: str, timeframe: str):
-        """Check a symbol for trading opportunities."""
-        try:
-            # Get market data
-            df = self.mt5.get_market_data(symbol, timeframe)
-            if df is None or len(df) < self.signal_generator.max_period:
-                logger.warning(f"Insufficient data for {symbol} {timeframe}")
-                return
-            
-            # Generate signal based on technical indicators only
-            signal = self.signal_generator.generate_signal(df)
-            
-            # Send setup alert if potential setup is forming
-            if signal["confidence"] >= 0.3 and signal["signal_type"] != "HOLD":
-                await self.telegram_bot.send_setup_alert(
-                    symbol,
-                    timeframe,
-                    signal["signal_type"],
-                    signal["confidence"] * 100
-                )
-            
-            if signal["signal_type"] != "HOLD" and signal["confidence"] >= 0.5:
-                # Get current price
-                current_price = df['close'].iloc[-1]
-                
-                # Calculate stop loss and take profit
-                stop_loss = self.risk_manager.calculate_stop_loss(
-                    df,
-                    signal["signal_type"],
-                    current_price
-                )
-                
-                take_profit = self.risk_manager.calculate_take_profit(
-                    current_price,
-                    stop_loss
-                )
-                
-                # Validate trade parameters
-                valid, reason = self.risk_manager.validate_trade(
-                    signal["signal_type"],
-                    current_price,
-                    stop_loss,
-                    take_profit,
-                    signal["confidence"]
-                )
-                
-                if valid:
-                    # Calculate position size
-                    account_info = self.mt5.get_account_info()
-                    if not account_info:
-                        return
+            # Check if the port is already in use
+            def is_port_in_use(port):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    return s.connect_ex(('localhost', port)) == 0
                     
-                    position_size = self.risk_manager.calculate_position_size(
-                        account_info["balance"],
-                        current_price,
-                        stop_loss,
-                        symbol
+            if is_port_in_use(dashboard_api_port):
+                logger.warning(f"Port {dashboard_api_port} is already in use. Dashboard API may already be running.")
+                # Don't attempt to start a new server, but continue with the rest of initialization
+                self.dashboard_api = DashboardAPI(trading_bot=self)
+                return True
+            
+            # Initialize the dashboard API with the current trading bot instance
+            self.dashboard_api = DashboardAPI(trading_bot=self)
+            
+            # Define a simple function to run the dashboard API server directly
+            def run_dashboard():
+                try:
+                    logger.info(f"Starting dashboard API server directly on port {dashboard_api_port}")
+                    # Call uvicorn directly to run the dashboard API
+                    uvicorn.run(
+                        self.dashboard_api.app,
+                        host="0.0.0.0",
+                        port=dashboard_api_port,
+                        log_level="info"
                     )
-                    
-                    # Check daily risk limit
-                    if not self.risk_manager.check_daily_risk(account_info["balance"]):
-                        await self.telegram_bot.send_error_alert(
-                            f"Daily risk limit reached for {symbol}"
-                        )
-                        return
-                    
-                    # Before placing a new order, check if a trade for the same symbol and same direction already exists
-                    if any(pos["symbol"] == symbol and pos.get("type", "") == signal["signal"] for pos in self.risk_manager.open_trades):
-                        logger.info(f"Trade for {symbol} with direction {signal['signal']} already active, skipping duplicate signal.")
-                        return
-                    
-                    # Place trade
-                    self.trade_counter += 1
-                    trade_result = self.mt5.place_market_order(
-                        symbol,
-                        signal["signal_type"],
-                        position_size,
-                        stop_loss,
-                        take_profit,
-                        f"Signal: {signal['confidence']:.2f}"
-                    )
-                    
-                    if trade_result:
-                        # Send trade alert
-                        await self.telegram_bot.send_trade_alert(
-                            chat_id=int(TELEGRAM_CONFIG["allowed_user_ids"][0]),
-                            direction=signal["signal_type"],
-                            symbol=symbol,
-                            entry=current_price,
-                            sl=stop_loss,
-                            tp=take_profit,
-                            confidence=signal["confidence"],
-                            reason=f"Analysis: Trend={signal['trend']}"
-                        )
-                    else:
-                        await self.telegram_bot.send_error_alert(
-                            f"Failed to place trade for {symbol}"
-                        )
-            
-        except Exception as e:
-            logger.error(f"Error checking symbol {symbol}: {str(e)}")
-            await self.telegram_bot.send_error_alert(
-                f"Error checking {symbol}: {str(e)}"
-            )
-    
-    async def manage_open_trades(self):
-        """Manage existing trades with trailing stop loss."""
-        try:
-            # Get open positions
-            positions = self.mt5.get_open_positions()
-            if not positions:
-                return
-                
-            self.risk_manager.update_open_trades(positions)
-            
-            for position in positions:
-                try:
-                    symbol = position["symbol"]
-                    entry_price = position["price_open"]
-                    initial_stop = position["sl_initial"]
-                    current_stop = position["sl"]
-                    position_size = position["volume"]
-                    trade_type = "BUY" if position["type"] == mt5.ORDER_TYPE_BUY else "SELL"
-                
-                    # Skip if essential data is missing
-                    if not all([entry_price, current_stop, position_size]):
-                        logger.warning(f"Missing essential data for position {position['ticket']}")
-                        continue
-                    
-                    # Get current market data
-                    df = self.mt5.get_market_data(symbol, "M5", 100)  # Increased lookback for better context
-                    if df is None or df.empty:
-                        continue
-                
-                    current_price = df['close'].iloc[-1]
-                    
-                    # Get current tick data
-                    current_tick = mt5.symbol_info_tick(symbol)
-                    if not current_tick:
-                        continue
-                
-                    # Calculate risk metrics
-                    if trade_type == "BUY":
-                        adverse_exc = (entry_price - df['low'].min()) / entry_price * 100
-                        favorable_exc = (df['high'].max() - entry_price) / entry_price * 100
-                        current_risk = (current_price - current_stop) / current_price * 100
-                    else:
-                        adverse_exc = (df['high'].max() - entry_price) / entry_price * 100
-                        favorable_exc = (entry_price - df['low'].min()) / entry_price * 100
-                        current_risk = (current_stop - current_price) / current_price * 100
-
-                    should_adjust = False
-                    new_stop = None
-                
-                    # Only adjust stops if we have sufficient favorable excursion
-                    min_favorable_exc = 0.5  # Minimum 0.5% favorable excursion before adjusting stops
-                    if favorable_exc >= min_favorable_exc:
-                        should_adjust, new_stop = self.risk_manager.should_adjust_stops(
-                            trade={
-                                'entry_price': entry_price,
-                                'initial_stop': initial_stop,
-                                'stop_loss': current_stop,
-                                'direction': trade_type,
-                                'favorable_excursion': favorable_exc
-                            },
-                            current_price=current_price,
-                            current_atr=df['atr'].iloc[-1] if 'atr' in df.columns else None
-                        )
-                
-                    if should_adjust and new_stop != current_stop:
-                        # Validate stop adjustment
-                        min_stop_distance = self.get_min_stop_distance(symbol)
-                        if min_stop_distance:
-                            if (trade_type == "BUY" and new_stop < current_price - min_stop_distance) or \
-                               (trade_type == "SELL" and new_stop > current_price + min_stop_distance):
-                                if self.mt5.modify_position(position["ticket"], new_stop, position["tp"]):
-                                    await self.telegram_bot.send_management_alert(
-                                        position["ticket"],
-                                        symbol,
-                                        "Stop Loss Adjusted",
-                                        current_stop,
-                                        new_stop,
-                                        "Trailing Stop Update"
-                                    )
-                    
-                    # Check for emergency closure conditions
-                    emergency_close = False
-                    emergency_reason = ""
-                    
-                    # 1. Excessive adverse excursion
-                    max_adverse_exc = 2.0  # Maximum 2% adverse excursion
-                    if adverse_exc > max_adverse_exc:
-                        emergency_close = True
-                        emergency_reason = f"Excessive adverse excursion: {adverse_exc:.2f}%"
-                    
-                    # 2. Invalid stop loss
-                    if current_stop == 0 or not current_stop:
-                        emergency_close = True
-                        emergency_reason = "Invalid stop loss detected"
-                    
-                    # 3. Risk too high
-                    max_risk = 2.0  # Maximum 2% risk per trade
-                    if current_risk > max_risk:
-                        emergency_close = True
-                        emergency_reason = f"Risk too high: {current_risk:.2f}%"
-                    
-                    if emergency_close:
-                        logger.warning(f"Emergency closure for {symbol} - {emergency_reason}")
-                        if self.mt5.close_position(position["ticket"]):
-                            await self.telegram_bot.send_trade_update(
-                                position["ticket"],
-                                symbol,
-                                f"Emergency Close: {emergency_reason}",
-                                current_price,
-                                position["profit"]
-                            )
-                        continue
-                
                 except Exception as e:
-                    logger.error(f"Error managing position for {position.get('symbol', 'Unknown')}: {str(e)}")
-                    continue
+                    logger.error(f"Error running dashboard API: {str(e)}")
             
-        except Exception as e:
-            logger.error(f"Error managing open trades: {str(e)}")
-            await self.telegram_bot.send_error_alert(
-                f"Error managing trades: {str(e)}"
-            )
-    
-    async def main_loop(self):
-        """Main trading loop."""
-        try:
-            while self.running:
-                try:
-                    if not self.telegram_bot.trading_enabled:
-                        await asyncio.sleep(60)
-                        continue
-                    
-                    # Check each symbol and timeframe
-                    for symbol in self.trading_config["symbols"]:
-                        for timeframe in self.trading_config["timeframes"]:
-                            await self.check_symbol(symbol, timeframe)
-                    
-                    # Manage open trades
-                    await self.manage_open_trades()
-                    
-                    # Wait before next iteration
-                    await asyncio.sleep(60)  # Check every minute
-                    
-                except Exception as e:
-                    logger.error(f"Error in main loop iteration: {str(e)}")
-                    if self.telegram_bot:
-                        await self.telegram_bot.send_error_alert(f"Error in main loop: {str(e)}")
-        except Exception as e:
-            logger.error(f"Fatal error in main loop: {str(e)}")
-            await self.stop()
-
-    def analyze_trend(self, df: pd.DataFrame) -> str:
-        """Analyze trend using moving averages and multiple confirmations.
-        
-        Returns:
-            str: 'bullish', 'bearish', or 'neutral'
-        """
-        try:
-            # Calculate moving averages
-            df['MA20'] = df['close'].rolling(window=20).mean()
-            df['MA50'] = df['close'].rolling(window=50).mean()
-            df['MA200'] = df['close'].rolling(window=200).mean()
+            # Start a thread to run the dashboard
+            self.dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
+            self.dashboard_thread.start()
             
-            # Get current values
-            current_close = df['close'].iloc[-1]
-            current_ma20 = df['MA20'].iloc[-1]
-            current_ma50 = df['MA50'].iloc[-1]
-            current_ma200 = df['MA200'].iloc[-1]
+            # Wait a moment to ensure the server has time to start
+            await asyncio.sleep(3)
             
-            # Calculate short-term momentum (last 5 candles)
-            short_term_change = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
-            
-            # Calculate medium-term momentum (last 20 candles)
-            medium_term_change = (df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20] * 100
-            
-            # Calculate price position relative to MAs
-            above_ma20 = current_close > current_ma20
-            above_ma50 = current_close > current_ma50
-            above_ma200 = current_close > current_ma200
-            
-            # Calculate MA alignments
-            bullish_alignment = current_ma20 > current_ma50 and current_ma50 > current_ma200
-            bearish_alignment = current_ma20 < current_ma50 and current_ma50 < current_ma200
-            
-            # Define trend thresholds
-            MOMENTUM_THRESHOLD = 0.1  # 0.1% change
-            
-            # Determine trend with multiple confirmations
-            bullish_conditions = [
-                above_ma20,
-                above_ma50,
-                short_term_change > MOMENTUM_THRESHOLD,
-                medium_term_change > 0,
-                bullish_alignment
-            ]
-            
-            bearish_conditions = [
-                not above_ma20,
-                not above_ma50,
-                short_term_change < -MOMENTUM_THRESHOLD,
-                medium_term_change < 0,
-                bearish_alignment
-            ]
-            
-            # Count confirmations
-            bullish_count = sum(bullish_conditions)
-            bearish_count = sum(bearish_conditions)
-            
-            # Require at least 3 confirmations for a trend
-            if bullish_count >= 3:
-                return 'bullish'
-            elif bearish_count >= 3:
-                return 'bearish'
-            else:
-                # Check if price is showing strong momentum in either direction
-                if abs(short_term_change) > MOMENTUM_THRESHOLD * 2:
-                    return 'bullish' if short_term_change > 0 else 'bearish'
-                return 'neutral'
-                
-        except Exception as e:
-            logger.error(f"Error analyzing trend: {str(e)}")
-            return 'neutral'
-
-    def calculate_momentum(self, df: pd.DataFrame) -> float:
-        """Calculate momentum score based on multiple factors with enhanced accuracy."""
-        try:
-            # Calculate RSI with error handling
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss.replace(0, np.inf)  # Handle division by zero
-            rsi = 100 - (100 / (1 + rs))
-            
-            # Calculate price momentum over multiple periods
-            price_momentum_5 = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
-            price_momentum_10 = (df['close'].iloc[-1] - df['close'].iloc[-10]) / df['close'].iloc[-10] * 100
-            price_momentum_20 = (df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20] * 100
-            
-            # Calculate volume momentum with moving average crossovers
-            volume_sma_short = df['volume'].rolling(window=10).mean()
-            volume_sma_long = df['volume'].rolling(window=20).mean()
-            volume_momentum = ((volume_sma_short.iloc[-1] - volume_sma_long.iloc[-1]) / volume_sma_long.iloc[-1]) * 100
-            
-            # Calculate MACD for trend confirmation
-            exp1 = df['close'].ewm(span=12, adjust=False).mean()
-            exp2 = df['close'].ewm(span=26, adjust=False).mean()
-            macd = exp1 - exp2
-            signal = macd.ewm(span=9, adjust=False).mean()
-            macd_momentum = (macd.iloc[-1] - signal.iloc[-1]) / abs(macd).mean()
-            
-            # Calculate moving average trend
-            ma20 = df['close'].rolling(window=20).mean()
-            ma50 = df['close'].rolling(window=50).mean()
-            ma_trend = (ma20.iloc[-1] - ma50.iloc[-1]) / ma50.iloc[-1] * 100
-            
-            # Normalize and combine all factors with weighted importance
-            rsi_score = (rsi.iloc[-1] - 50) / 50  # -1 to 1 scale
-            price_score = (0.5 * price_momentum_5 + 0.3 * price_momentum_10 + 0.2 * price_momentum_20) / 10
-            volume_score = volume_momentum / 100
-            macd_score = macd_momentum
-            ma_score = ma_trend / 5
-            
-            # Weighted combination with emphasis on recent price action and volume
-            momentum_score = (
-                0.25 * rsi_score +      # RSI weight
-                0.30 * price_score +    # Recent price action weight
-                0.20 * volume_score +   # Volume trend weight
-                0.15 * macd_score +     # MACD confirmation weight
-                0.10 * ma_score         # Moving average trend weight
-            )
-            
-            # Scale to percentage and round to 2 decimals
-            final_score = round(momentum_score * 100, 2)
-            
-            # Log components for debugging
-            logger.debug(f"Momentum Components:")
-            logger.debug(f"    RSI Score: {rsi_score:.4f}")
-            logger.debug(f"    Price Score: {price_score:.4f}")
-            logger.debug(f"    Volume Score: {volume_score:.4f}")
-            logger.debug(f"    MACD Score: {macd_score:.4f}")
-            logger.debug(f"    MA Score: {ma_score:.4f}")
-            logger.debug(f"    Final Score: {final_score:.2f}")
-            
-            return final_score
-            
-        except Exception as e:
-            logger.error(f"Error calculating momentum: {str(e)}")
-            return 0.0
-
-    def analyze_volume_trend(self, df: pd.DataFrame, momentum_score: float) -> str:
-        """Determine volume trend with enhanced accuracy."""
-        try:
-            # Calculate volume moving averages
-            volume_sma_10 = df['volume'].rolling(window=10).mean()
-            volume_sma_20 = df['volume'].rolling(window=20).mean()
-            
-            # Calculate price direction
-            price_direction = df['close'].iloc[-1] > df['close'].iloc[-5]
-            
-            # Calculate volume trend metrics
-            volume_trend = volume_sma_10.iloc[-1] > volume_sma_20.iloc[-1]
-            volume_increase = df['volume'].iloc[-1] > volume_sma_10.iloc[-1]
-            
-            # Calculate volume ratio
-            recent_volume_avg = df['volume'].tail(5).mean()
-            baseline_volume_avg = df['volume'].tail(20).mean()
-            volume_ratio = recent_volume_avg / baseline_volume_avg if baseline_volume_avg > 0 else 1.0
-            
-            # Determine trend based on multiple factors
-            if abs(momentum_score) >= 15:  # Strong momentum threshold
-                if momentum_score > 0 and volume_trend and price_direction:
-                    return 'bullish'
-                elif momentum_score < 0 and volume_trend and not price_direction:
-                    return 'bearish'
-            
-            if volume_ratio > 1.2 and volume_increase:  # Significant volume increase
-                if price_direction:
-                    return 'bullish'
+            # Auto-start frontend if configured
+            frontend_started = False
+            if auto_start_frontend:
+                logger.info("Auto-starting dashboard frontend...")
+                frontend_started = self.dashboard_api.start_frontend()
+                if frontend_started:
+                    logger.info("Dashboard frontend started successfully")
                 else:
-                    return 'bearish'
+                    logger.warning("Failed to auto-start dashboard frontend")
             
-            return 'neutral'
-            
-        except Exception as e:
-            logger.error(f"Error analyzing volume trend: {str(e)}")
-            return 'neutral'
-
-    async def analyze_market(self, symbol: str, timeframe: str) -> Optional[Dict]:
-        """Analyze market conditions with enhanced logging."""
-        try:
-            logger.info(f"🔍 Starting market analysis for {symbol} on {timeframe}")
-            
-            # Get market data
-            data = await self.mt5.get_rates(symbol, timeframe)
-            if data is None:
-                logger.error(f"❌ No data received for {symbol}")
-                return None
+            # Send notification if Telegram is running
+            if self.telegram_bot and self.telegram_bot.is_running:
+                dashboard_url = f"http://localhost:{dashboard_api_port}"
+                frontend_url = "http://localhost:3000" if frontend_started else None
                 
-            if len(data) < 100:  # Minimum required candles
-                logger.error(f"❌ Insufficient data for {symbol} analysis: {len(data)} candles")
-                return None
-                
-            # Convert to DataFrame and validate
-            try:
-                # Ensure data is a DataFrame
-                df = pd.DataFrame(data) if not isinstance(data, pd.DataFrame) else data.copy()
-            except Exception as e:
-                logger.error(f"Error converting data to DataFrame: {str(e)}")
-                return None
-                
-            # Add type tracing for debugging
-            logger.debug(f"DataFrame types: {df.dtypes}")
-                
-            # Validate required columns
-            required_columns = ['open', 'high', 'low', 'close', 'volume', 'time']
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                logger.error(f"❌ Missing required columns in DataFrame for {symbol}: {missing_columns}")
-                return None
-                
-            # Ensure proper data types and handle NaN values
-            df = df.astype({
-                'open': 'float64',
-                'high': 'float64',
-                'low': 'float64',
-                'close': 'float64',
-                'volume': 'float64'
-            })
-            
-            # Handle NaN values
-            if df.isna().any().any():
-                logger.warning(f"Found NaN values in {symbol} data, dropping affected rows")
-            df = df.dropna()
-            if len(df) < 100:
-                logger.error("❌ Insufficient data after dropping NaN values")
-                return None
-                
-            current_price = float(df['close'].iloc[-1])  # Ensure current_price is float
-            logger.debug(f"Current price type: {type(current_price)}")
-        
-            # Log basic market stats
-            daily_range = ((df['high'].max() - df['low'].min()) / df['close'].mean()) * 100
-            logger.info(f"    Daily Range: {daily_range:.2f}%")
-            logger.info(f"    Analyzing {len(df)} candles")
-            
-            # Calculate technical indicators
-            indicators = self.calculate_indicators(df)
-            logger.info("📈 Technical Indicators:")
-            logger.info(f"    RSI: {indicators['rsi']:.2f}")
-            logger.info(f"    MACD Line: {indicators['macd']['macd_line']:.5f}")
-            logger.info(f"    Signal Line: {indicators['macd']['signal_line']:.5f}")
-            
-            # Perform trend analysis
-            trend = self.analyze_trend(df)
-            logger.info(f"📈 Trend Analysis: {trend}")
-            
-            # Perform comprehensive market analysis
-            structure = self.market_analysis.analyze(df, symbol=symbol, timeframe=timeframe)
-            logger.info("🏗️ Market Structure:")
-            if structure and isinstance(structure, dict):
-                logger.info(f"    Structure Type: {structure.get('structure_type', 'Unknown')}")
-                logger.info(f"    Key Levels: {structure.get('key_levels', [])}")
-            else:
-                logger.info("    Structure Type: Unknown")
-                logger.info("    Key Levels: []")
-            
-            # Perform SMC analysis
-            smc_results = self.smc_analysis.analyze(df)
-            logger.info("🎯 SMC Analysis:")
-            logger.info(f"    Liquidity Sweeps: {len(smc_results['liquidity_sweeps'])}")
-            logger.info(f"    Breaker Blocks: {len(smc_results['breaker_blocks']['bullish']) + len(smc_results['breaker_blocks']['bearish'])}")
-            logger.info(f"    Manipulation Points: {len(smc_results['manipulation_points'])}")
-            
-            # Detect points of interest
-            pois = await self.detect_pois(df, symbol, timeframe)
-            logger.info(f"🎯 Points of Interest detected: {len(pois['zones']['supply']) + len(pois['zones']['demand'])}")
-            
-            # Ensure POI values are numeric
-            if isinstance(pois, dict):
-                # Helper function to safely convert to float
-                def safe_float_conversion(value):
-                    if isinstance(value, dict):
-                        if 'price_start' in value:
-                            return float(value['price_start'])
-                        elif 'price_end' in value:
-                            return float(value['price_end'])
-                        return None
-                    elif value is not None:
-                        try:
-                            return float(value)
-                        except (ValueError, TypeError):
-                            return None
-                    return None
-
-                # Convert resistance
-                pois['resistance'] = safe_float_conversion(pois.get('resistance'))
-
-                # Convert support
-                pois['support'] = safe_float_conversion(pois.get('support'))
-
-                # Convert current price
-                if pois.get('current_price') is not None:
-                    pois['current_price'] = safe_float_conversion(pois.get('current_price'))
+                notification = f"Trading Dashboard API is now available at {dashboard_url}"
+                if frontend_url:
+                    notification += f"\nDashboard frontend is available at {frontend_url}"
                 else:
-                    pois['current_price'] = float(df['close'].iloc[-1])
-
-                # Log POI conversions for debugging
-                logger.debug(f"POI Conversions:")
-                logger.debug(f"    Resistance: {pois['resistance']} ({type(pois['resistance'])})")
-                logger.debug(f"    Support: {pois['support']} ({type(pois['support'])})")
-                logger.debug(f"    Current Price: {pois['current_price']} ({type(pois['current_price'])})")
-        
-            # Perform multi-timeframe analysis
-            higher_tf = self.get_higher_timeframe(timeframe)
-            if higher_tf:
-                higher_tf_data = await self.mt5.get_rates(symbol, higher_tf)
-                if higher_tf_data is not None:
-                    mtf_analysis = self.mtf_analysis.analyze(higher_tf_data)
-                    logger.info(
-                        f"📊 Higher Timeframe ({higher_tf}) Analysis:\n"
-                        f"    Trend: {mtf_analysis.get('trend', 'Unknown')}\n"
-                        f"    Key Levels: {mtf_analysis.get('key_levels', [])}"
-                    )
-                else:
-                    mtf_analysis = None
+                    notification += "\nUse /startdashboard to start the frontend"
+                    
+                await self.telegram_bot.send_notification(notification)
             
-            # Enhanced Volume analysis
-            volume_data = self.volume_analysis.analyze(df)
-            
-            # Calculate momentum using the new method
-            momentum_score = self.calculate_momentum(df)
-            
-            # Update volume data with calculated momentum
-            volume_data['momentum'] = momentum_score
-            
-            # Determine volume trend based on momentum
-            volume_trend = self.analyze_volume_trend(df, momentum_score)
-            
-            # Calculate volume profile
-            volume_profile = self.volume_analysis._calculate_volume_profile(df)
-            
-            # Calculate cumulative delta
-            cumulative_delta = self.volume_analysis._calculate_cumulative_delta(df)
-            
-            # Update cumulative delta trend based on momentum
-            if abs(momentum_score) > 25:
-                cumulative_delta['trend'] = 'bullish' if momentum_score > 0 else 'bearish'
-            
-            # Find volume-based support/resistance levels
-            volume_levels = self.volume_analysis._find_volume_levels(df, volume_profile)
-            
-            logger.info(
-                f"📊 Volume Analysis:\n"
-                f"    Volume Trend: {volume_trend}\n"
-                f"    Momentum: {momentum_score:.2f}\n"
-                f"    CVD Trend: {cumulative_delta.get('trend', 'neutral')}\n"
-                f"    POC Price: {volume_profile.get('poc', 0):.5f}"
-            )
-            
-            # Combine all analyses
-            analysis = {
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'trend': trend,
-                'structure': structure,
-                'smc': smc_results,
-                'pois': pois,
-                'volume': {
-                    **volume_data,
-                    'profile': volume_profile,
-                    'cumulative_delta': cumulative_delta,
-                    'levels': volume_levels
-                },
-                'indicators': indicators,
-                'current_price': current_price,
-                'candle_count': len(df),
-                'mtf_analysis': mtf_analysis,
-                'timestamp': datetime.now(UTC).isoformat()
-            }
-            
-            logger.info(f"✅ Market analysis completed for {symbol} on {timeframe}")
-            return analysis
-            
-        except Exception as e:
-            import traceback
-            error_trace = traceback.format_exc()
-            logger.error(f"❌ Error in market analysis for {symbol} on {timeframe}: {str(e)}\nTraceback:\n{error_trace}")
-            return None
-            
-    def get_higher_timeframe(self, timeframe: str) -> Optional[str]:
-        """Get the next higher timeframe."""
-        timeframes = ['M5', 'M15', 'H1', 'H4']
-        try:
-            current_index = timeframes.index(timeframe)
-            if current_index < len(timeframes) - 1:
-                return timeframes[current_index + 1]
-        except ValueError:
-            pass
-        return None
-
-    async def detect_pois(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict:
-        """Detect and analyze points of interest with enhanced tracking."""
-        try:
-            logger.info(f"Detecting POIs for {symbol} on {timeframe}")
-            
-            # Get POIs from detector
-            poi_zones = self.poi_detector.detect_supply_demand_zones(df, timeframe)
-            
-            # Get current price
-            current_price = float(df['close'].iloc[-1])
-            logger.debug(f"POI Detection - Current Price: {current_price} ({type(current_price)})")
-            
-            # Update POI status based on current price
-            for zone_type in ['supply', 'demand']:
-                for poi in poi_zones[zone_type]:
-                    try:
-                        price_start = float(poi.price_start)
-                        price_end = float(poi.price_end)
-                        logger.debug(f"POI {zone_type} zone - Start: {price_start} ({type(price_start)}), End: {price_end} ({type(price_end)})")
-                        
-                        if zone_type == 'supply':
-                            if current_price > price_start:
-                                poi.status = 'broken'
-                            elif current_price > price_end:
-                                poi.status = 'tested'
-                        else:  # demand
-                            if current_price < price_end:
-                                poi.status = 'broken'
-                            elif current_price < price_start:
-                                poi.status = 'tested'
-                    except (ValueError, TypeError, AttributeError) as e:
-                        logger.error(f"Error processing POI zone: {str(e)}")
-                        continue
-            
-            # Get nearest POIs for immediate use and ensure numeric values
-            try:
-                nearest_supply = min(
-                    (p for p in poi_zones['supply'] if float(p.price_start) > current_price),
-                    key=lambda x: abs(float(x.price_start) - current_price),
-                    default=None
-                )
-                
-                nearest_demand = max(
-                    (p for p in poi_zones['demand'] if float(p.price_end) < current_price),
-                    key=lambda x: abs(float(x.price_end) - current_price),
-                    default=None
-                )
-                
-                resistance_level = float(nearest_supply.price_start) if nearest_supply else None
-                support_level = float(nearest_demand.price_end) if nearest_demand else None
-                
-                logger.debug(f"POI Prices - Resistance: {resistance_level} ({type(resistance_level)}), "
-                             f"Support: {support_level} ({type(support_level)})")
-                
-                result = {
-                    'current_price': current_price,
-                    'resistance': resistance_level,
-                    'support': support_level,
-                    'zones': {
-                        'supply': [vars(p) for p in poi_zones['supply']],
-                        'demand': [vars(p) for p in poi_zones['demand']]
-                    },
-                    'active_zones': [
-                        vars(p) for zone_type in ['supply', 'demand']
-                        for p in poi_zones[zone_type]
-                        if p.status not in ['broken', 'invalid']
-                    ]
-                }
-                
-                # Log the structure of the result for debugging
-                logger.debug(f"POI Result Structure: {result.keys()}")
-                logger.debug(f"POI Result Types - current_price: {type(result['current_price'])}, "
-                           f"resistance: {type(result['resistance'])}, support: {type(result['support'])}")
-                
-                return result
-                
-            except Exception as e:
-                logger.error(f"Error processing nearest POIs: {str(e)}")
-                return {
-                    'current_price': current_price,
-                    'resistance': None,
-                    'support': None,
-                    'zones': {'supply': [], 'demand': []},
-                    'active_zones': []
-                }
-            
-        except Exception as e:
-            import traceback
-            error_trace = traceback.format_exc()
-            logger.error(f"Error detecting POIs: {str(e)}\nTraceback:\n{error_trace}")
-            return {
-                'current_price': float(df['close'].iloc[-1]) if not df.empty else None,
-                'resistance': None,
-                'support': None,
-                'zones': {'supply': [], 'demand': []},
-                'active_zones': []
-            }
-
-    def analyze_session(self) -> str:
-        """Determine the current trading session based on local system time."""
-        current_time = datetime.now().time()
-        
-        # Define session time ranges adjusted for local timezone
-        sessions = {
-            'asia': {
-                'start': time(23, 0),  # 11:00 PM
-                'end': time(8, 0)      # 8:00 AM
-            },
-            'london': {
-                'start': time(8, 0),   # 8:00 AM
-                'end': time(16, 0)     # 4:00 PM
-            },
-            'new_york': {
-                'start': time(13, 0),  # 1:00 PM
-                'end': time(22, 0)     # 10:00 PM
-            }
-        }
-        
-        # Log current time for debugging
-        logger.info(f"🕒 Current local time: {current_time}")
-        
-        # Check each session
-        for session_name, session_times in sessions.items():
-            # Handle sessions that cross midnight
-            if session_times['start'] > session_times['end']:
-                # Session spans across midnight
-                if current_time >= session_times['start'] or current_time <= session_times['end']:
-                    logger.info(f"✅ Current session: {session_name}")
-                    return session_name
-            else:
-                # Normal session within same day
-                if session_times['start'] <= current_time <= session_times['end']:
-                    logger.info(f"✅ Current session: {session_name}")
-                    return session_name
-            
-        logger.info("❌ No active trading session")
-        return "no_session"
-    async def generate_signals(self, analysis, symbol, timeframe):
-        """Generate trading signals based on market analysis."""
-        logger.info(f"Generating signals for {symbol} on {timeframe}")
-        
-        # Validate input parameters
-        if not symbol or not timeframe:
-            logger.error("Missing required parameters: symbol or timeframe")
-            return []
-        
-        if not analysis or not isinstance(analysis, dict):
-            logger.error("Invalid analysis data")
-            return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        
-        # NEW: Check if there is already an open position for the symbol
-        open_positions = self.mt5.get_open_positions()
-        if open_positions:
-            for position in open_positions:
-                if position["symbol"] == symbol:
-                    logger.info(f"Existing position detected for {symbol}. Skipping signal generation.")
-                    return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        
-        # Validate input parameters
-        if not symbol or not timeframe:
-            logger.error("Missing required parameters: symbol or timeframe")
-            return []
-        
-        # Validate analysis data
-        if not analysis or not isinstance(analysis, dict):
-            logger.error("Invalid analysis data")
-            return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        
-        # Apply primary filters - removed session check
-        tf_alignment = await self.check_timeframe_alignment(analysis)
-        
-        logger.debug(f"Primary Filters: TF_Alignment={tf_alignment}")
-        
-        if not tf_alignment:
-            logger.debug("Primary filters not met")
-            return [{
-                "symbol": symbol,
-                "signal": "HOLD",
-                "direction": "HOLD",
-                "timeframe": timeframe,
-                "confidence": 0,
-                "current_price": analysis.get("current_price", 0),
-                "entry_price": analysis.get("current_price", 0),
-                "support": analysis.get("pois", {}).get("support"),
-                "resistance": analysis.get("pois", {}).get("resistance"),
-                "stop_loss": analysis.get("current_price", 0),  # Set to current price for HOLD
-                "take_profit": analysis.get("current_price", 0),  # Set to current price for HOLD
-                "trend": "neutral",
-                "session": analysis.get("session", self.analyze_session())
-            }]
-        
-        # Calculate confirmation score using weights from config
-        confirmation_score = 0
-        confirmations_met = 0
-        
-        # Get POI data and calculate POI score
-        poi_data = analysis.get('pois', {})
-        nearest_supply = poi_data.get('resistance')
-        nearest_demand = poi_data.get('support')
-        active_zones = poi_data.get('active_zones', [])
-        
-        # Ensure POI values are numeric
-        if isinstance(nearest_supply, dict):
-            nearest_supply = float(nearest_supply.get('price_start', 0))
-        elif nearest_supply is not None:
-            nearest_supply = float(nearest_supply)
-            
-        if isinstance(nearest_demand, dict):
-            nearest_demand = float(nearest_demand.get('price_end', 0))
-        elif nearest_demand is not None:
-            nearest_demand = float(nearest_demand)
-            
-        current_price = float(analysis.get('current_price', 0))
-        
-        # Analyze POI zones for signal confirmation
-        poi_score = 0
-        trend_lower = analysis['trend'].lower()
-        
-        # Get price action direction instead of relying solely on trend
-        price_direction = None
-        if 'current_price' in analysis and 'indicators' in analysis:
-            last_close = current_price
-            sma20 = float(analysis.get('indicators', {}).get('sma20', last_close))
-            if last_close > sma20:
-                price_direction = "bullish"
-            elif last_close < sma20:
-                price_direction = "bearish"
-        
-        # Use price_direction if trend is neutral
-        direction = trend_lower if trend_lower != "neutral" else price_direction
-        
-        if direction == "bullish":
-            if nearest_demand is not None:
-                distance_to_demand = abs(current_price - nearest_demand)
-                if distance_to_demand <= analysis.get('atr', 0) * 0.5:
-                    poi_score += 0.3
-                    logger.debug(f"Price near demand zone: +0.3 POI score")
-            
-            active_demand_zones = [z for z in active_zones if z['type'] == 'demand' and z['strength'] >= 0.7]
-            if active_demand_zones:
-                poi_score += 0.2
-                logger.debug(f"Strong active demand zones present: +0.2 POI score")
-        elif direction == "bearish":
-            if nearest_supply is not None:
-                distance_to_supply = abs(current_price - nearest_supply)
-                if distance_to_supply <= analysis.get('atr', 0) * 0.5:
-                    poi_score += 0.3
-                    logger.debug(f"Price near supply zone: +0.3 POI score")
-            
-            active_supply_zones = [z for z in active_zones if z['type'] == 'supply' and z['strength'] >= 0.7]
-            if active_supply_zones:
-                poi_score += 0.2
-                logger.debug(f"Strong active supply zones present: +0.2 POI score")
-            
-        # Add POI score to confirmation score
-        confirmation_score += poi_score
-        if poi_score > 0:
-            confirmations_met += 1
-            logger.debug(f"POI confirmation met with score: {poi_score:.2f}")
-            
-        # Analyze SMC patterns
-        smc_score = 0
-        smc_data = analysis.get('smc', {})
-        
-        # Check for liquidity sweeps using candle_count from analysis
-        candle_count = analysis.get('candle_count', 0)
-        recent_sweeps = [s for s in smc_data.get('liquidity_sweeps', []) 
-                         if s['index'] >= candle_count - 5]
-        
-        if recent_sweeps:
-            sweep = recent_sweeps[-1]  # Most recent sweep
-            if (trend_lower == "bullish" and sweep['type'] == 'bullish') or \
-               (trend_lower == "bearish" and sweep['type'] == 'bearish'):
-                smc_score += 0.3
-                logger.debug(f"Recent {sweep['type']} liquidity sweep: +0.3 SMC score")
-        
-        # Check for breaker blocks
-        breaker_blocks = smc_data.get('breaker_blocks', {})
-        if trend_lower == "bullish":
-            bullish_breakers = breaker_blocks.get('bullish', [])
-            if bullish_breakers and abs(analysis['current_price'] - bullish_breakers[-1]['low']) <= analysis.get('atr', 0):
-                smc_score += 0.2
-                logger.debug("Price near bullish breaker block: +0.2 SMC score")
-        elif trend_lower == "bearish":
-            bearish_breakers = breaker_blocks.get('bearish', [])
-            if bearish_breakers and abs(analysis['current_price'] - bearish_breakers[-1]['high']) <= analysis.get('atr', 0):
-                smc_score += 0.2
-                logger.debug("Price near bearish breaker block: +0.2 SMC score")
-        
-        # Add SMC score to confirmation score
-        if smc_score > 0:
-            confirmation_score += smc_score
-            confirmations_met += 1
-            logger.debug(f"SMC confirmation met with score: {smc_score:.2f}")
-        
-        # Analyze Volume patterns
-        volume_score = 0
-        volume_data = analysis.get('volume', {})
-        
-        # Check volume trend alignment
-        if (trend_lower == "bullish" and volume_data.get('trend') == 'bullish') or \
-           (trend_lower == "bearish" and volume_data.get('trend') == 'bearish'):
-            volume_score += 0.2
-            logger.debug(f"Volume trend aligned: +0.2 Volume score")
-        
-        # Check cumulative delta
-        cvd_data = volume_data.get('cumulative_delta', {})
-        if (trend_lower == "bullish" and cvd_data.get('trend') == 'bullish') or \
-           (trend_lower == "bearish" and cvd_data.get('trend') == 'bearish'):
-            volume_score += 0.2
-            logger.debug(f"CVD trend aligned: +0.2 Volume score")
-        
-        # Check volume levels
-        volume_levels = volume_data.get('levels', {})
-        if trend_lower == "bullish":
-            support_levels = volume_levels.get('support', [])
-            if support_levels:
-                # Extract price value from support level dictionary
-                support_price = support_levels[0].get('price') if isinstance(support_levels[0], dict) else support_levels[0]
-                try:
-                    support_price = float(support_price)
-                    if abs(analysis['current_price'] - support_price) <= analysis.get('atr', 0):
-                        volume_score += 0.1
-                        logger.debug("Price near volume-based support: +0.1 Volume score")
-                except (TypeError, ValueError) as e:
-                    logger.warning(f"Could not convert support price to float: {e}")
-        elif trend_lower == "bearish":
-            resistance_levels = volume_levels.get('resistance', [])
-            if resistance_levels:
-                # Extract price value from resistance level dictionary
-                resistance_price = resistance_levels[0].get('price') if isinstance(resistance_levels[0], dict) else resistance_levels[0]
-                try:
-                    resistance_price = float(resistance_price)
-                    if abs(analysis['current_price'] - resistance_price) <= analysis.get('atr', 0):
-                        volume_score += 0.1
-                        logger.debug("Price near volume-based resistance: +0.1 Volume score")
-                except (TypeError, ValueError) as e:
-                    logger.warning(f"Could not convert resistance price to float: {e}")
-        
-        # Add Volume score to confirmation score
-        if volume_score > 0:
-            confirmation_score += volume_score
-            confirmations_met += 1
-            logger.debug(f"Volume confirmation met with score: {volume_score:.2f}")
-        
-        # Check SMT divergence
-        smt_divergence = self.check_smt_divergence(analysis)
-        if smt_divergence:
-            confirmation_score += CONFIRMATION_CONFIG["weights"]["smt_divergence"]
-            confirmations_met += 1
-        
-        # Check liquidity
-        liquidity = self.check_liquidity(analysis)
-        if liquidity:
-            confirmation_score += CONFIRMATION_CONFIG["weights"]["liquidity_sweep"]
-            confirmations_met += 1
-        
-        # Check momentum with adjusted multiplier
-        momentum = self.check_momentum(analysis)
-        if momentum:
-            confirmation_score += CONFIRMATION_CONFIG["weights"]["momentum"]
-            confirmations_met += 1
-        
-        logger.debug(f"Confirmation Scores:\n    POI: {poi_score:.2f}\n    SMC: {smc_score:.2f}\n    Volume: {volume_score:.2f}\n    Total: {confirmation_score:.2f}\n    Confirmations Met: {confirmations_met}")
-        
-        # More flexible confirmation requirements
-        min_required_score = 0.5  # Minimum total score required
-        min_confirmations = 2     # Minimum number of confirmations required
-        
-        # Check if either the score is high enough or we have enough confirmations
-        if confirmation_score < min_required_score and confirmations_met < min_confirmations:
-            logger.debug(f"Insufficient confirmations/score: {confirmations_met}/{min_confirmations} confirmations, score: {confirmation_score:.2f}/{min_required_score}")
-            return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        
-        # Calculate base confidence from confirmations with weighted scoring
-        base_confidence = min(95, (confirmation_score / 1.5) * 100)  # Scale to percentage, max 95%
-        
-        # Generate signal based on trend and confirmation score
-        trend_lower = analysis['trend'].lower()
-        if trend_lower == "bullish":
-            signal = "BUY"
-            confidence = max(60, int(base_confidence))  # Minimum 60% confidence if signal generated
-        elif trend_lower == "bearish":
-            signal = "SELL"
-            confidence = max(60, int(base_confidence))  # Minimum 60% confidence if signal generated
-        else:
-            signal = "HOLD"
-            confidence = 0
-        
-        logger.info(f"Generated {signal} signal for {symbol} with {confidence}% confidence")
-        
-        # Compute trade levels with a minimum risk-reward ratio of 1:2
-        current_price = float(analysis.get("current_price", 0))
-        entry_price = current_price
-        if signal == "BUY":
-            stop_loss = analysis.get("pois", {}).get("support")
-            if stop_loss is None:
-                stop_loss = current_price * 0.999
-            raw_take_profit = analysis.get("pois", {}).get("resistance")
-            if raw_take_profit is None:
-                raw_take_profit = current_price * 1.002
-            # Adjust BUY stop loss if too close to entry
-            min_stop_distance = self.get_min_stop_distance(symbol)
-            if min_stop_distance and (entry_price - stop_loss) < min_stop_distance:
-                logger.debug(f"Adjusting BUY stop loss from {stop_loss} to {entry_price - min_stop_distance} based on min stop dist {min_stop_distance}")
-                stop_loss = entry_price - min_stop_distance
-            risk = entry_price - stop_loss
-            min_take_profit = entry_price + 2 * risk
-            take_profit = raw_take_profit if raw_take_profit >= min_take_profit else min_take_profit
-        else:
-            stop_loss = analysis.get("pois", {}).get("resistance")
-            if stop_loss is None:
-                stop_loss = current_price * 1.001
-            raw_take_profit = analysis.get("pois", {}).get("support")
-            if raw_take_profit is None:
-                raw_take_profit = current_price * 0.998
-            # Adjust SELL stop loss if too close to entry
-            min_stop_distance = self.get_min_stop_distance(symbol)
-            if min_stop_distance and (stop_loss - entry_price) < min_stop_distance:
-                logger.debug(f"Adjusting SELL stop loss from {stop_loss} to {entry_price + min_stop_distance} based on min stop dist {min_stop_distance}")
-                stop_loss = entry_price + min_stop_distance
-            risk = stop_loss - entry_price
-            min_take_profit = entry_price - 2 * risk
-            take_profit = raw_take_profit if raw_take_profit <= min_take_profit else min_take_profit
-        
-        # Create signal with all required fields
-        signal_data = {
-            "symbol": symbol,
-            "signal": signal,
-            "direction": signal,  # Add direction to match required keys
-            "timeframe": timeframe,  # Add timeframe
-            "confidence": confidence,
-            "current_price": current_price,
-            "entry_price": entry_price,
-            "support": analysis.get("pois", {}).get("support"),
-            "resistance": analysis.get("pois", {}).get("resistance"),
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "trend": analysis.get("trend", "neutral"),
-            "session": analysis.get("session", self.analyze_session()),
-            "pois": {
-                "score": poi_score,
-                "nearest_supply": nearest_supply,
-                "nearest_demand": nearest_demand,
-                "active_zones_count": len(active_zones)
-            },
-            "smc_data": {
-                "score": smc_score,
-                "recent_sweeps": recent_sweeps,
-                "breaker_blocks": breaker_blocks
-            },
-            "volume_data": {
-                "score": volume_score,
-                "trend": volume_data.get("trend"),
-                "cvd_trend": cvd_data.get("trend"),
-                "levels": volume_levels
-            }
-        }
-        
-        # Validate signal data before returning
-        required_fields = ['symbol', 'signal', 'confidence']
-        if not all(field in signal_data for field in required_fields):
-            logger.error(f"Generated signal missing required fields: {[field for field in required_fields if field not in signal_data]}")
-            return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        
-        # Add signal to dashboard with enhanced information
-        add_signal({
-            'session': analysis.get('session', self.analyze_session()),
-            'symbol': symbol,  # Ensure symbol is included in dashboard data
-            'type': signal,
-            'price': analysis.get('current_price', 0),
-            'confidence': confidence,
-            'trend': analysis.get('trend', 'neutral'),
-            'confirmations': {
-                'total': confirmations_met,
-                'required': min_confirmations,
-                'score': confirmation_score,
-                'details': {
-                    'poi': poi_score,
-                    'smc': smc_score,
-                    'volume': volume_score,
-                    'smt': smt_divergence,
-                    'liquidity': liquidity,
-                    'momentum': momentum
-                }
-            }
-        })
-        
-        # NEW: Conflict check - implement cooldown period and check for conflicting signals
-        now = datetime.now()
-        cooldown = self.trading_config.get("signal_cooldown", 60)  # cooldown in seconds
-        if symbol in self.last_signal:
-            last_signal = self.last_signal[symbol]
-            elapsed = (now - last_signal["timestamp"]).total_seconds()
-            if elapsed < cooldown and last_signal["direction"] != signal_data["signal"]:
-                logger.info(f"Conflict detected: Last signal for {symbol} was " +
-                            f"{last_signal['direction']} {elapsed:.1f} sec ago; " +
-                            f"new signal {signal_data['signal']} conflicts with cooldown.")
-                return [{"symbol": symbol, "signal": "HOLD", "confidence": 0}]
-        if signal_data["signal"] != "HOLD":
-            self.last_signal[symbol] = {"timestamp": now, "direction": signal_data["signal"]}
-        
-        return [signal_data]
-
-    async def check_timeframe_alignment(self, analysis):
-        """Check if current timeframe trend aligns with higher timeframe trend."""
-        try:
-            # Temporarily disabled - always return True
-            if not analysis or 'trend' not in analysis:
-                logger.error(f"❌ Invalid analysis data for timeframe alignment check: {analysis}")
-                return True  # Changed from False to True
-                
-            symbol = analysis['symbol']
-            current_tf = analysis['timeframe']
-            higher_tf = self.get_higher_timeframe(current_tf)
-            
-            logger.info(
-                f"🔄 Higher Timeframe Alignment Check Disabled\n"
-                f"    Current TF: {current_tf}\n"
-                f"    Higher TF: {higher_tf}"
-            )
-            
-            # Return True regardless of alignment
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error checking timeframe alignment: {str(e)}")
-            logger.exception("Detailed error trace:")
-            return True  # Changed from False to True
+            logger.error(f"Error initializing dashboard: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
 
-    def check_session_conditions(self, analysis):
-        """Check session conditions with enhanced logging."""
-        try:
-            if not analysis:
-                logger.error("❌ Invalid analysis data for session conditions check")
-                return False
+    async def stop(self, cleanup_only=False):
+        """Stop the trading bot and clean up resources"""
+        self.running = False
+        
+        # Stop the telegram bot if it's running
+        if self.telegram_bot is not None and not cleanup_only:
+            try:
+                await self.telegram_bot.stop()
+                self.telegram_bot = None
+            except Exception as e:
+                logger.warning(f"Error stopping Telegram bot: {str(e)}")
+        
+        # Stop Dashboard API server if it's running
+        if self.dashboard_api is not None and not cleanup_only:
+            try:
+                logger.info("Stopping dashboard API server...")
+                # If we're using the direct uvicorn method, we can't easily stop it
+                # The thread will automatically terminate when the process exits
+                # But we can still clean up any frontend processes
+                if hasattr(self.dashboard_api, 'frontend_process') and self.dashboard_api.frontend_process:
+                    try:
+                        logger.info("Stopping dashboard frontend...")
+                        self.dashboard_api.frontend_process.terminate()
+                        self.dashboard_api.frontend_process = None
+                        logger.info("Dashboard frontend stopped")
+                    except Exception as e:
+                        logger.warning(f"Error stopping dashboard frontend: {str(e)}")
                 
-            symbol = analysis['symbol']
-            current_time = datetime.now()
-            current_session = self.analyze_session()
-            
-            logger.info(
-                f"🕒 Checking session conditions for {symbol}:\n"
-                f"    Current Time (Local): {current_time}\n"
-                f"    Current Session: {current_session}"
-            )
-            
-            # Get current volatility and spread
-            volatility = self.calculate_volatility(symbol)
-            spread = self.get_spread(symbol)
-            
-            logger.info(
-                f"🔄 Session Conditions for {symbol}:\n"
-                f"    Trading Allowed: ✅\n"  # Always allowed now
-                f"    Volatility: {volatility:.2f}%\n"
-                f"    Current Spread: {spread:.1f} pips"
-            )
-            
-            # Check if conditions are favorable - ignoring session restrictions
-            conditions_met = (
-                volatility >= self.trading_config['min_volatility'] and
-                spread <= self.trading_config['max_spread']
-            )
-            
-            logger.info(
-                f"{'✅' if conditions_met else '❌'} Session conditions "
-                f"{'met' if conditions_met else 'not met'} for {symbol}"
-            )
-            
-            return conditions_met
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking session conditions: {str(e)}")
-            logger.exception("Detailed error trace:")
-            return False
-
-    def check_smt_divergence(self, analysis):
-        """Check for Smart Money Concepts divergence using full divergence analysis capabilities."""
+                # Set to None to allow garbage collection
+                self.dashboard_api = None
+                self.dashboard_thread = None
+                logger.info("Dashboard API server references cleared")
+            except Exception as e:
+                logger.warning(f"Error stopping dashboard API: {str(e)}")
+        
+        # Stop other subsystems
         try:
-            symbol = analysis['symbol']
-            timeframe = analysis['timeframe']
-            df = self.mt5.get_market_data(symbol, timeframe)
-            if df is None or df.empty:
-                logger.error("No data available for divergence check")
-                return False
-            
-            # Use the full DivergenceAnalysis
-            div_analysis = DivergenceAnalysis()
-            div_result = div_analysis.analyze(df)
-            
-            trend = analysis["trend"].lower()
-            confirmed = False
-            if trend == "bullish":
-                if (len(div_result["regular"]["bullish"]) > 0 or 
-                    len(div_result["hidden"]["bullish"]) > 0 or 
-                    len(div_result["structural"]["bullish"]) > 0 or 
-                    len(div_result["momentum"]["bullish"]) > 0):
-                    confirmed = True
-            elif trend == "bearish":
-                if (len(div_result["regular"]["bearish"]) > 0 or 
-                    len(div_result["hidden"]["bearish"]) > 0 or 
-                    len(div_result["structural"]["bearish"]) > 0 or 
-                    len(div_result["momentum"]["bearish"]) > 0):
-                    confirmed = True
-            
-            logger.debug(f"Divergence analysis result: {div_result}")
-            logger.debug(f"SMT divergence confirmed: {'✅' if confirmed else '❌'}")
-            return confirmed
-        except Exception as e:
-            logger.error(f"Error in SMT divergence check: {str(e)}")
-            return False
-
-    def check_liquidity(self, analysis):
-        """Check for liquidity conditions."""
-        try:
-            # Get market data from MT5
-            df = self.mt5.get_market_data(analysis['symbol'], analysis['timeframe'])
-            if df is None or df.empty:
-                logger.error("No data available for liquidity check")
-                return False
-            
-            # Calculate average volume
-            avg_volume = df['tick_volume'].rolling(window=20).mean()
-            current_volume = df['tick_volume'].iloc[-1]
-            
-            # Determine if there's a volume spike
-            volume_spike = current_volume > (avg_volume.iloc[-1] * 1.5)
-            
-            # Set threshold based on volume spike presence
-            if volume_spike:
-                threshold = 0.002  # Within 0.2%
+            # Only close pending trades if configured to do so
+            if self.close_positions_on_shutdown:
+                logger.info("Closing positions on shutdown (enabled in config)")
+                await self.close_pending_trades()
             else:
-                threshold = 0.001  # Within 0.1% if no volume spike
-                logger.debug("No volume spike detected - applying stricter proximity threshold.")
+                logger.info("Keeping positions open on shutdown (as configured)")
             
-            # Get current price and key levels
-            price = analysis["pois"]["current_price"]
-            # Extract numeric values from POI dictionaries if needed
-            support = analysis["pois"]["support"].get('price') if isinstance(
-                analysis["pois"]["support"], dict) else analysis["pois"]["support"]
-            resistance = analysis["pois"]["resistance"].get('price') if isinstance(
-                analysis["pois"]["resistance"], dict) else analysis["pois"]["resistance"]
-            
-            # Calculate distances as percentage
-            support_distance = abs(price - support) / price if support else float('inf')
-            resistance_distance = abs(price - resistance) / price if resistance else float('inf')
-            
-            # Determine which level is closer and check if price is within the threshold
-            if support_distance < resistance_distance:
-                near_level = support_distance < threshold
-                level_type = "support"
-                distance = support_distance
-            else:
-                near_level = resistance_distance < threshold
-                level_type = "resistance"
-                distance = resistance_distance
-            
-            # Log liquidity conditions
-            logger.info(
-                f"Liquidity Conditions:\n"
-                f"    Volume Spike: {'✅' if volume_spike else '❌'} "
-                f"({current_volume:.0f} vs {avg_volume.iloc[-1]:.0f} avg)\n"
-                f"    Near {level_type.title()} with threshold {threshold * 100:.2f}%: "
-                f"{'✅' if near_level else '❌'} (Distance: {distance * 100:.3f}%)"
-            )
-            
-            # Return true if the proximity condition is met
-            return near_level
-            
-        except Exception as e:
-            logger.error(f"Error in liquidity check: {str(e)}")
-            return False
-
-    def calculate_position_size(self, symbol, signal_confidence: float = 0.5):
-        """Calculate position size based on risk management rules and signal confidence."""
-        try:
-            # Get account info
-            account_info = mt5.account_info()
-            if not account_info:
-                raise Exception("Failed to get account info")
-            
-            balance = account_info.balance
-            base_risk = balance * self.trading_config["risk_per_trade"]
-            
-            # Check daily risk limits first
-            can_trade, limit_reason = self.risk_manager.check_daily_limits(balance, base_risk)
-            if not can_trade:
-                logger.warning(f"Trade rejected due to risk limits: {limit_reason}")
-                return 0.0
-            
-            # Get symbol info
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                raise Exception(f"Failed to get symbol info for {symbol}")
-            
-            # Get current volatility state
-            volatility = self.calculate_volatility(symbol)
-            volatility_state = 'normal'
-            if volatility > 50:
-                volatility_state = 'extreme'
-            elif volatility > 30:
-                volatility_state = 'high'
-            elif volatility < 10:
-                volatility_state = 'low'
-            
-            # Calculate current drawdown
-            current_drawdown = self.calculate_drawdown()
-            
-            # Get current market data for ATR calculation
-            df = self.mt5.get_market_data(symbol, "M5", 50)
-            if df is None or df.empty:
-                raise Exception(f"Failed to get market data for {symbol}")
-            
-            # Calculate ATR
-            high = df['high']
-            low = df['low']
-            close = df['close'].shift()
-            tr1 = high - low
-            tr2 = abs(high - close)
-            tr3 = abs(low - close)
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr = tr.rolling(window=14).mean().iloc[-1]
-            
-            # Get current price
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                raise Exception(f"Failed to get tick data for {symbol}")
-            current_price = tick.ask  # Using ask price for calculations
-            
-            # Calculate fixed stop loss distance based on ATR
-            stop_distance = 2.0 * atr  # Fixed SL distance
-            
-            # Ensure minimum stop distance
-            min_stop_distance = current_price * 0.001  # 0.1% minimum
-            stop_distance = max(stop_distance, min_stop_distance)
-            
-            # Get current trading session
-            session = self.analyze_session()
-            
-            # Calculate position size using risk manager
-            position_size = self.risk_manager.calculate_position_size(
-                account_balance=balance,
-                risk_per_trade=self.trading_config["risk_per_trade"],
-                stop_loss_pips=stop_distance,
-                current_drawdown=current_drawdown,
-                volatility_state=volatility_state,
-                session=session
-            )
-            
-            # Round to valid lot size using math.ceil to round upward
-            import math
-            min_lot = symbol_info.volume_min
-            lot_step = symbol_info.volume_step
-            position_size = math.ceil(position_size / lot_step) * lot_step
-            
-            # Ensure within limits
-            position_size = max(min_lot, min(position_size, symbol_info.volume_max))
-            
-            logger.info(
-                f"Position Size Calculation for {symbol}:\n"
-                f"  Base Risk: {base_risk:.2f}\n"
-                f"  Confidence Score: {signal_confidence:.2f}\n"
-                f"  Volatility State: {volatility_state}\n"
-                f"  Stop Distance: {stop_distance:.5f}\n"
-                f"  ATR: {atr:.5f}\n"
-                f"  Final Position Size: {position_size:.2f} lots"
-            )
-            
-            return position_size
-            
-        except Exception as e:
-            logger.error(f"Error calculating position size: {str(e)}")
-            return 0.0
-
-    def calculate_drawdown(self) -> float:
-        """Calculate current drawdown based on peak balance versus current balance."""
-        try:
-            account_info = mt5.account_info()
-            if not account_info:
-                logger.error("Failed to get account info for drawdown calculation")
-                return 0.0
-            
-            current_balance = account_info.balance
-            equity = account_info.equity
-            
-            # Calculate drawdown from peak balance
-            peak_balance = max(current_balance, self.risk_manager.daily_stats.get('starting_balance', current_balance))
-            absolute_drawdown = peak_balance - equity
-            drawdown_percentage = (absolute_drawdown / peak_balance) if peak_balance > 0 else 0.0
-            
-            logger.debug(f"Drawdown calculation: Peak={peak_balance}, Current={equity}, DD%={drawdown_percentage*100:.2f}%")
-            return drawdown_percentage
-            
-        except Exception as e:
-            logger.error(f"Error calculating drawdown: {str(e)}")
-            return 0.0
-
-    def calculate_trade_levels(self, symbol, signal, poi_data=None):
-        """Calculate dynamic entry, stop loss, and take profit levels based on market conditions."""
-        try:
-            # Get current price data
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                raise Exception(f"Failed to get tick data for {symbol}")
-
-            # Get recent market data for ATR calculation
-            df = self.mt5.get_market_data(symbol, "M5", 50)
-            if df is None or df.empty:
-                raise Exception(f"Failed to get market data for {symbol}")
-
-            # Calculate ATR
-            high = df['high']
-            low = df['low']
-            close = df['close']
-            tr1 = high - low
-            tr2 = abs(high - close.shift())
-            tr3 = abs(low - close.shift())
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr = tr.rolling(window=14).mean().iloc[-1]
-
-            # Get POI levels if available
-            nearest_supply = None
-            nearest_demand = None
-            if poi_data:
+            # Shutdown MT5 connection if doing a full shutdown
+            if not cleanup_only and self.mt5_handler is not None:
                 try:
-                    nearest_supply = float(poi_data.get('resistance')) if poi_data.get('resistance') else None
-                    nearest_demand = float(poi_data.get('support')) if poi_data.get('support') else None
-                except (ValueError, TypeError):
-                    logger.warning("Could not convert POI levels to float")
-
-            # Base ATR multiplier for stop loss
-            atr_multiplier = 1.0  # Reduced from 1.5 to make stops more realistic
+                    logger.info("Shutting down MT5 connection...")
+                    self.mt5_handler.shutdown()
+                    logger.info("MT5 connection closed")
+                except Exception as e:
+                    logger.warning(f"Error shutting down MT5: {str(e)}")
             
-            # Adjust ATR multiplier based on volatility
-            volatility = self.calculate_volatility(symbol)
-            if volatility > 50:  # High volatility
-                atr_multiplier = 1.5
-            elif volatility > 30:  # Medium volatility
-                atr_multiplier = 1.25
-
-            # Calculate base stop distance
-            base_stop_distance = atr * atr_multiplier
-
-            if signal == "BUY":
-                entry = tick.ask
-                
-                # Calculate stop loss using ATR and POI levels
-                atr_based_stop = entry - base_stop_distance
-                poi_based_stop = nearest_demand if nearest_demand else atr_based_stop
-                
-                # Use the higher of ATR-based or POI-based stop (for buy orders, higher means closer to entry)
-                stop_loss = max(atr_based_stop, poi_based_stop)
-                
-                # Ensure minimum stop distance
-                min_stop_distance = entry * 0.001  # 0.1% minimum
-                if entry - stop_loss < min_stop_distance:
-                    stop_loss = entry - min_stop_distance
-
-                # Calculate dynamic take profit based on nearest supply
-                risk = entry - stop_loss
-                if nearest_supply and nearest_supply > entry:
-                    # Use supply level as first target if it gives at least 1:1 RR
-                    if nearest_supply - entry >= risk:
-                        take_profit = nearest_supply
-                    else:
-                        take_profit = entry + (risk * 1.5)  # Default 1:1.5 RR
-                else:
-                    take_profit = entry + (risk * 1.5)  # Default 1:1.5 RR
-                
-            else:  # SELL
-                entry = tick.bid
-                
-                # Calculate stop loss using ATR and POI levels
-                atr_based_stop = entry + base_stop_distance
-                poi_based_stop = nearest_supply if nearest_supply else atr_based_stop
-                
-                # Use the lower of ATR-based or POI-based stop (for sell orders, lower means closer to entry)
-                stop_loss = min(atr_based_stop, poi_based_stop)
-                
-                # Ensure minimum stop distance
-                min_stop_distance = entry * 0.001  # 0.1% minimum
-                if stop_loss - entry < min_stop_distance:
-                    stop_loss = entry + min_stop_distance
-                
-                # Calculate dynamic take profit based on nearest demand
-                risk = stop_loss - entry
-                if nearest_demand and nearest_demand < entry:
-                    # Use demand level as first target if it gives at least 1:1 RR
-                    if entry - nearest_demand >= risk:
-                        take_profit = nearest_demand
-                    else:
-                        take_profit = entry - (risk * 1.5)  # Default 1:1.5 RR
-                else:
-                    take_profit = entry - (risk * 1.5)  # Default 1:1.5 RR
-
-            logger.info(
-                f"Trade Levels for {symbol} {signal}:\n"
-                f"  Entry: {entry:.5f}\n"
-                f"  Stop Loss: {stop_loss:.5f} (Distance: {abs(entry - stop_loss):.5f})\n"
-                f"  Take Profit: {take_profit:.5f} (RR: {abs(take_profit - entry) / abs(stop_loss - entry):.2f})\n"
-                f"  ATR: {atr:.5f}, Multiplier: {atr_multiplier}\n"
-                f"  POI Levels - Supply: {nearest_supply}, Demand: {nearest_demand}"
-            )
-            
-            return entry, stop_loss, take_profit
-            
+            # Log last known balance
+            try:
+                account_info = self.mt5_handler.get_account_info()
+                final_balance = account_info.get('balance', 0)
+                logger.info(f"Final account balance: ${final_balance:.2f}")
+            except:
+                logger.info("Unable to retrieve final account balance")
         except Exception as e:
-            logger.error(f"Error calculating trade levels: {str(e)}")
-            return None, None, None
+            logger.error(f"Error during cleanup: {str(e)}")
+        
+        logger.info("Trading bot stopped")
 
-    def execute_trade(self, trade_params):
-        """Execute trade on MT5 with partial take profits."""
+    async def register_telegram_commands(self):
+        """Register custom command handlers with the Telegram bot."""
+        if not self.telegram_bot or not self.telegram_bot.is_running:
+            logger.warning("Telegram bot not running, skipping command registration")
+            return
+            
+        # Register handler for listing available signal generators
+        await self.telegram_bot.register_command_handler(
+            "listsignalgenerators", 
+            self.handle_list_signal_generators_command
+        )
+        
+        # Register handler for switching signal generators
+        await self.telegram_bot.register_command_handler(
+            "setsignalgenerator", 
+            self.handle_set_signal_generator_command
+        )
+        
+        # Register trailing stop commands
+        await self.telegram_bot.register_command_handler(
+            "enabletrailing",
+            self.handle_enable_trailing_stop_command
+        )
+        
+        await self.telegram_bot.register_command_handler(
+            "disabletrailing",
+            self.handle_disable_trailing_stop_command
+        )
+        
+        # Register command to show current trading status
+        await self.telegram_bot.register_command_handler(
+            "status",
+            self.handle_status_command
+        )
+        
+        # Register dashboard commands
+        await self.telegram_bot.register_command_handler(
+            "startdashboard",
+            self.handle_start_dashboard_command
+        )
+        
+        # Register position closing on shutdown commands (new functionality)
+        await self.telegram_bot.register_command_handler(
+            'enablecloseonshutdown', 
+            self.handle_enable_close_on_shutdown_command
+        )
+        
+        await self.telegram_bot.register_command_handler(
+            'disablecloseonshutdown', 
+            self.handle_disable_close_on_shutdown_command
+        )
+        
+        # Register shutdown command
+        await self.telegram_bot.register_command_handler(
+            'shutdown',
+            self.handle_shutdown_command
+        )
+        
+        # Register new commands
+        await self.telegram_bot.register_command_handler(
+            'enabletrading',
+            self.handle_enable_trading_command
+        )
+        
+        await self.telegram_bot.register_command_handler(
+            'disabletrading',
+            self.handle_disable_trading_command
+        )
+        
+        await self.telegram_bot.register_command_handler(
+            'enablepositionadditions',
+            self.handle_enable_position_additions_command
+        )
+        
+        await self.telegram_bot.register_command_handler(
+            'disablepositionadditions',
+            self.handle_disable_position_additions_command
+        )
+        
+        logger.info("Successfully registered telegram commands")
+
+    async def handle_list_signal_generators_command(self, args):
+        """
+        Handle command to list available signal generators.
+        Format: /listsignalgenerators
+        """
+        generators = list(self.available_signal_generators.keys())
+        current_generator = self.signal_generator_class.__name__
+        
+        message = f"Current signal generator: {current_generator}\n\nAvailable signal generators:\n"
+        for gen in generators:
+            message += f"- {gen}\n"
+        
+        return message
+
+    async def handle_set_signal_generator_command(self, args):
+        """
+        Handle command to change signal generator.
+        Format: /setsignalgenerator <generator_name>
+        """
+        if not args:
+            return "Please specify a signal generator name. Use /listsignalgenerators to see available options."
+            
+        generator_name = args[0].lower()
+        
+        if generator_name in self.available_signal_generators:
+            generator_class = self.available_signal_generators[generator_name]
+            self.change_signal_generator(generator_class)
+            return f"Signal generator set to {generator_name}"
+        else:
+            available_generators = ", ".join(self.available_signal_generators.keys())
+            return f"Unknown signal generator: {generator_name}\nAvailable options: {available_generators}"
+
+    async def handle_enable_trailing_stop_command(self, args):
+        """Handle command to enable trailing stop loss."""
+        self.trailing_stop_enabled = True
+        return "Trailing stop loss enabled"
+        
+    async def handle_disable_trailing_stop_command(self, args):
+        """Handle command to disable trailing stop loss."""
+        self.trailing_stop_enabled = False
+        return "Trailing stop loss disabled"
+
+    async def handle_status_command(self, args):
+        """
+        Handle command to show current trading bot status.
+        Format: /status
+        """
+        # Get account info
+        account_info = self.mt5_handler.get_account_info()
+        
+        # Get open positions
+        positions = self.mt5_handler.get_open_positions()
+        
+        # Determine current session
+        current_session = self.analyze_session()
+        
+        # Build status message
+        status = f"Trading Bot Status\n{'='*20}\n"
+        status += f"Trading Enabled: {'✅' if self.trading_enabled else '❌'}\n"
+        status += f"Trailing Stop: {'✅' if self.trailing_stop_enabled else '❌'}\n"
+        status += f"Position Additions: {'✅' if self.trading_config.get('allow_position_additions', False) else '❌'}\n"
+        status += f"Close Positions on Shutdown: {'✅' if self.close_positions_on_shutdown else '❌'}\n"
+        status += f"Dashboard: {'✅' if self.dashboard_enabled and self.dashboard_api is not None else '❌'}\n"
+        status += f"Current Session: {current_session}\n"
+        status += f"Signal Generator: {self.signal_generator_class.__name__}\n\n"
+        
+        # Dashboard info
+        if self.dashboard_enabled and self.dashboard_api is not None:
+            status += f"Dashboard URL: http://localhost:8000\n"
+            status += f"Dashboard Frontend: http://localhost:3000\n\n"
+            
+        # Account info
+        if account_info:
+            status += f"Account Balance: {account_info.get('balance', 'N/A')}\n"
+            status += f"Account Equity: {account_info.get('equity', 'N/A')}\n"
+            status += f"Free Margin: {account_info.get('free_margin', 'N/A')}\n\n"
+        
+        # Position summary
+        status += f"Open Positions: {len(positions)}\n"
+        if positions:
+            total_profit = sum(pos["profit"] for pos in positions)
+            status += f"Total Floating P/L: {total_profit}\n\n"
+            
+            # List first 5 positions
+            status += "Recent Positions:\n"
+            for pos in positions[:5]:
+                pos_type = "BUY" if pos["type"] == 0 else "SELL"
+                status += f"- {pos['symbol']} {pos_type}: {pos['profit']}\n"
+            
+            if len(positions) > 5:
+                status += f"...and {len(positions) - 5} more\n"
+        
+        return status
+
+    async def handle_start_dashboard_command(self, args):
+        """
+        Handle command to start the dashboard frontend.
+        Format: /startdashboard
+        """
+        if not self.dashboard_enabled or self.dashboard_api is None:
+            return "Dashboard is not enabled. Please enable it in the configuration."
+            
+        # Start the frontend
+        success = self.dashboard_api.start_frontend()
+        
+        if success:
+            return (
+                "Dashboard frontend started!\n\n"
+                "Access it at: http://localhost:3000\n\n"
+                "API URL: http://localhost:8000"
+            )
+        else:
+            return "Failed to start dashboard frontend. Check the logs for more information."
+
+    async def main_loop(self):
+        """Main trading loop."""
+        logger.info("Starting main trading loop")
+        
+        # Initialize MT5 connection
+        if not self.initialize_mt5():
+            logger.error("Failed to initialize MT5. Cannot start trading loop.")
+            return
+        
+        # Initialize dashboard if enabled
+        if self.dashboard_enabled:
+            dashboard_initialized = await self.initialize_dashboard()
+            if not dashboard_initialized:
+                logger.warning("Failed to initialize dashboard. Continuing without dashboard.")
+        
+        self.running = True
+        last_performance_update = datetime.now() - timedelta(hours=2)  # Ensure immediate first update
+        
+        # Track consecutive connection failures
+        consecutive_connection_failures = 0
+        max_consecutive_failures = 5
+        
+        # Create trade monitoring task
+        trade_monitor_task = asyncio.create_task(self._monitor_trades_loop())
+        
         try:
-            # Get base risk and take profit levels from risk manager
-            risk = abs(trade_params['entry_price'] - trade_params['stop_loss'])
-            base_volume = trade_params['position_size']
-            orders = []
-            
-            # Use risk manager's partial take profit configuration
-            for i, tp_level in enumerate(self.risk_manager.partial_tp_levels):
-                # Calculate take profit price based on R-multiple
-                if trade_params['signal_type'] == "BUY":
-                    tp_price = trade_params['entry_price'] + (risk * tp_level['ratio'])
-                else:  # SELL
-                    tp_price = trade_params['entry_price'] - (risk * tp_level['ratio'])
-                
-                # Calculate volume for this partial
-                partial_volume = base_volume * tp_level['size']
-                if i == len(self.risk_manager.partial_tp_levels) - 1:
-                    # Adjust last partial to account for any rounding errors
-                    partial_volume = base_volume - sum(order['volume'] for order in orders)
-                
-                # Round volume to valid lot size
-                symbol_info = mt5.symbol_info(trade_params['symbol'])
-                lot_step = symbol_info.volume_step
-                partial_volume = round(partial_volume / lot_step) * lot_step
-                
-                if partial_volume > 0:  # Only create order if volume is positive
-                    request = {
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": trade_params['symbol'],
-                        "volume": partial_volume,
-                        "type": mt5.ORDER_TYPE_BUY if trade_params['signal_type'] == 'BUY' else mt5.ORDER_TYPE_SELL,
-                        "price": trade_params['entry_price'],
-                        "sl": trade_params['stop_loss'],
-                        "tp": tp_price,
-                        "deviation": 10,
-                        "magic": 234000,
-                        "comment": f"Python Bot - {trade_params['signal_type']} TP{i+1} ({tp_level['ratio']:.1f}R)",
-                        "type_time": mt5.ORDER_TIME_GTC,
-                        "type_filling": mt5.ORDER_FILLING_IOC,
-                    }
-                    orders.append(request)
-            
-            # Ensure the symbol is selected before executing orders
-            if not mt5.symbol_select(trade_params['symbol'], True):
-                logger.error(f"Failed to select symbol: {trade_params['symbol']}")
-                return None
-
-            # Wait for fresh tick data up to 3 times
-            retry_count = 0
-            let_tick = mt5.symbol_info_tick(trade_params['symbol'])
-            while not let_tick and retry_count < 3:
-                tm.sleep(0.5)
-                let_tick = mt5.symbol_info_tick(trade_params['symbol'])
-                retry_count += 1
-            if not let_tick:
-                logger.error("No tick data available for trade execution after retrying")
-                return None
-
-            # Update orders with current tick prices before sending orders
-            for order in orders:
-                if order["type"] == mt5.ORDER_TYPE_BUY:
-                    order["price"] = let_tick.ask
-                else:
-                    order["price"] = let_tick.bid
-            
-            # Execute all orders
-            results = []
-            for order in orders:
-                result = mt5.order_send(order)
-                if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
-                    logger.warning(f"Order requote detected: {result.comment}. Retrying with increased deviation.")
-                    if "No prices" in result.comment:
-                        tick = mt5.symbol_info_tick(order["symbol"])
-                        if not tick:
-                            logger.error("No tick data available to update order price")
-                            raise Exception("No tick data available")
-                        if order["type"] == mt5.ORDER_TYPE_BUY:
-                            order["price"] = tick.ask
+            while self.running:
+                try:
+                    # Check MT5 connection at the start of each iteration
+                    if not hasattr(self, 'mt5_handler') or not self.mt5_handler or not getattr(self.mt5_handler, 'connected', False):
+                        logger.warning("MT5 connection lost. Attempting to recover...")
+                        connection_recovered = self.recover_mt5_connection()
+                        if not connection_recovered:
+                            consecutive_connection_failures += 1
+                            logger.warning(f"Connection recovery failed (attempt {consecutive_connection_failures}/{max_consecutive_failures})")
+                            
+                            if consecutive_connection_failures >= max_consecutive_failures:
+                                logger.error(f"Too many consecutive MT5 connection failures ({consecutive_connection_failures}). Pausing trading for safety.")
+                                self.trading_enabled = False
+                                # Try to notify via Telegram
+                                if self.telegram_bot and self.telegram_bot.is_running:
+                                    await self.telegram_bot.send_notification("Trading disabled due to persistent MT5 connection failures")
+                                await asyncio.sleep(60)  # Wait before retrying
+                                continue
+                            
+                            # Shorter wait time for non-critical failures
+                            await asyncio.sleep(5 * consecutive_connection_failures)  # Increasing backoff
+                            continue
                         else:
-                            order["price"] = tick.bid
-                        logger.info(f"Updated order price to current market price: {order['price']}")
-                    order["deviation"] += 10
-                    result_retry = mt5.order_send(order)
-                    if result_retry.retcode != mt5.TRADE_RETCODE_DONE:
-                        raise Exception(f"Order failed after retry: {result_retry.comment}")
-                    result = result_retry
-                elif result.retcode != mt5.TRADE_RETCODE_DONE:
-                    raise Exception(f"Order failed: {result.comment}")
+                            logger.info("MT5 connection successfully recovered")
+                            consecutive_connection_failures = 0  # Reset on successful recovery
+                    else:
+                        # Check if connection is responsive by doing a simple query
+                        try:
+                            account_info = self.mt5_handler.get_account_info()
+                            if not account_info:
+                                logger.warning("MT5 connection appears unresponsive. Attempting recovery...")
+                                if self.recover_mt5_connection():
+                                    logger.info("MT5 connection successfully recovered")
+                                    consecutive_connection_failures = 0
+                                else:
+                                    consecutive_connection_failures += 1
+                                    await asyncio.sleep(5)  # Brief pause before continuing
+                                    continue
+                            else:
+                                consecutive_connection_failures = 0  # Connection is fine
+                        except Exception as e:
+                            logger.warning(f"Error checking MT5 connection status: {str(e)}")
+                            if "IPC" in str(e) or "connection" in str(e).lower():
+                                if self.recover_mt5_connection():
+                                    logger.info("MT5 connection successfully recovered")
+                                    consecutive_connection_failures = 0
+                                else:
+                                    consecutive_connection_failures += 1
+                                    await asyncio.sleep(5)  # Brief pause
+                                    continue
+                    
+                    # Check which markets are open
+                    any_market_open = False
+                    crypto_markets_open = False
+                    forex_markets_open = False
+                    
+                    # First, check market status without processing any symbols yet
+                    symbols_to_process = []
+                    
+                    for symbol_config in self.trading_config["symbols"]:
+                        if isinstance(symbol_config, dict):
+                            symbol = symbol_config.get("symbol", "").strip()
+                        else:
+                            symbol = symbol_config.strip()
+                            
+                        # Skip if symbol is not defined
+                        if not symbol:
+                            continue
+                            
+                        # Check if the symbol is a crypto symbol using the same logic as market_analysis
+                        is_crypto = False
+                        if symbol is not None:
+                            # True cryptocurrency symbols typically contain BTC, ETH, etc.
+                            crypto_identifiers = ["BTC", "ETH", "XBT", "LTC", "DOT", "SOL", "ADA", "DOGE", "CRYPTO"]
+                            is_crypto = any(identifier in symbol for identifier in crypto_identifiers)
+                            
+                            # Check for explicit cryptocurrency pairs
+                            crypto_pairs = ["BTCUSD", "ETHUSD"]
+                            if any(pair in symbol for pair in crypto_pairs):
+                                is_crypto = True
+                        
+                        # Check if this symbol's market is open
+                        market_open = self.is_market_open(symbol)
+                        
+                        if is_crypto and market_open:
+                            crypto_markets_open = True
+                            any_market_open = True
+                            symbols_to_process.append((symbol_config, "crypto"))
+                        elif not is_crypto and market_open:
+                            forex_markets_open = True
+                            any_market_open = True
+                            symbols_to_process.append((symbol_config, "forex"))
+                    
+                    if not any_market_open:
+                        logger.info("All markets are closed. Waiting for markets to open...")
+                        await asyncio.sleep(300)  # Check every 5 minutes to reduce resource usage
+                        continue
+                    
+                    # Continue with trading as at least one market is open
+                    if forex_markets_open:
+                        logger.info("Forex markets are open")
+                    if crypto_markets_open:
+                        logger.info("Crypto markets are open")
+                    
+                    # Analyze current session
+                    current_session = self.analyze_session()
+                    logger.info(f"Current session: {current_session}")
+                    
+                    # Get account info for risk management
+                    account_info = self.mt5_handler.get_account_info()
+                    
+                    # Periodically update performance metrics (every hour)
+                    current_time = datetime.now()
+                    if (current_time - last_performance_update).total_seconds() > 3600:
+                        await self.update_performance_metrics()
+                        last_performance_update = current_time
+                    
+                    # Process only symbols that have open markets
+                    for symbol_config, market_type in symbols_to_process:
+                        # Check if symbol_config is a string or dictionary
+                        if isinstance(symbol_config, str):
+                            # If it's a string, it's just the symbol name
+                            symbol = symbol_config
+                            timeframe = "M15"  # Default timeframe
+                            additional_timeframes = []
+                        else:
+                            # If it's a dictionary, extract values using get()
+                            symbol = symbol_config.get("symbol")
+                            timeframe = symbol_config.get("timeframe", "H1")
+                            additional_timeframes = symbol_config.get("additional_timeframes", [])
+                        
+                        # Skip if symbol or timeframe is not defined (redundant check)
+                        if not symbol:
+                            continue
+                        
+                        # Double check if this symbol's market is still open
+                        if not self.is_market_open(symbol):
+                            logger.debug(f"Market is now closed for {symbol}. Skipping.")
+                            continue
+                            
+                        logger.info(f"Processing {market_type} symbol: {symbol}")
+                        
+                        # Get market data
+                        market_data = {}
+                        
+                        # Fetch primary timeframe data
+                        logger.debug(f"Fetching primary timeframe data for {symbol} on {timeframe}")
+                        primary_data = await self.mt5_handler.get_rates(symbol, timeframe, 500)
+                        if primary_data is None:
+                            # Log as warning instead of error for missing symbols
+                            logger.warning(f"Failed to get primary data for {symbol} on {timeframe}")
+                            # Skip this symbol but continue with others
+                            continue
+                        elif len(primary_data) < 100:
+                            logger.warning(f"Insufficient data for {symbol} on {timeframe} (only {len(primary_data)} candles available)")
+                            # Skip this symbol but continue with others
+                            continue
+                            
+                        logger.debug(f"Successfully fetched {len(primary_data)} candles for {symbol} on {timeframe}")
+                        market_data[timeframe] = primary_data
+                        
+                        # Fetch additional timeframes if needed
+                        for add_tf in additional_timeframes:
+                            logger.debug(f"Fetching additional timeframe data for {symbol} on {add_tf}")
+                            add_data = await self.mt5_handler.get_rates(symbol, add_tf, 500)
+                            if add_data is not None and len(add_data) >= 100:
+                                logger.debug(f"Successfully fetched {len(add_data)} candles for {symbol} on {add_tf}")
+                                market_data[add_tf] = add_data
+                            else:
+                                logger.warning(f"Could not fetch sufficient data for {symbol} on {add_tf}")
+                        
+                        # Skip if not enough data
+                        if not market_data:
+                            logger.warning(f"No valid market data for {symbol}")
+                            continue
+                        
+                        # Add current session information to market data
+                        market_data['current_session'] = current_session
+                        
+                        # Add market structure, SMC analysis and technical indicators to market data
+                        try:
+                            # Run market structure analysis
+                            market_structure = self.market_analysis.analyze_market_structure(
+                                market_data[timeframe], symbol, timeframe
+                            )
+                            market_data['market_structure'] = market_structure
+                            logger.debug(f"Market structure analysis completed for {symbol}")
+                            
+                            # Run SMC analysis
+                            smc_analysis = SMCAnalysis()
+                            smc_signals = smc_analysis.analyze(market_data[timeframe])
+                            market_data['smc_signals'] = smc_signals
+                            logger.debug(f"SMC analysis completed for {symbol} with {len(smc_signals.get('liquidity_sweeps', []))} liquidity sweeps")
+                            
+                            # Run MTF analysis
+                            mtf_analysis = MTFAnalysis()
+                            mtf_data = mtf_analysis.analyze_multiple_timeframes(market_data)
+                            market_data['mtf_analysis'] = mtf_data
+                            logger.debug(f"MTF analysis completed for {symbol}")
+                            
+                            # Add volatility state
+                            atr_series = self.market_analysis.calculate_atr(market_data[timeframe], 14)
+                            volatility_state = self.market_analysis.classify_volatility(atr_series)
+                            market_data['volatility_state'] = volatility_state
+                            logger.debug(f"Volatility analysis completed for {symbol}: {volatility_state}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error during market analysis for {symbol}: {str(e)}")
+                            logger.exception("Detailed error information:")
+                            market_data['market_structure'] = {}
+                            market_data['smc_signals'] = {}
+                            market_data['mtf_analysis'] = {}
+                            market_data['volatility_state'] = 'normal'
+                        
+                        # Generate signals from all configured signal generators
+                        all_signals = []
+                        
+                        # Log how many signal generators we're using
+                        logger.debug(f"Using {len(self.signal_generators)} signal generators for {symbol}")
+                        
+                        # Skip using the legacy signal generator if we have multiple generators configured
+                        if len(self.signal_generators) > 0:
+                            # Use each configured signal generator
+                            for i, generator in enumerate(self.signal_generators):
+                                logger.debug(f"Running signal generator #{i+1} ({generator.__class__.__name__}) for {symbol}")
+                                try:
+                                    # Call the generator with the appropriate market data
+                                    if asyncio.iscoroutinefunction(generator.generate_signals):
+                                        result = await generator.generate_signals(market_data=market_data, symbol=symbol, timeframe=timeframe, account_info=account_info)
+                                    else:
+                                        result = generator.generate_signals(market_data=market_data, symbol=symbol, timeframe=timeframe, account_info=account_info)
+                                    
+                                    # Handle both old (direct signals list) and new (dict with signals key) formats
+                                    if isinstance(result, dict) and "signals" in result:
+                                        signals = result["signals"]
+                                    else:
+                                        signals = result
+                                    
+                                    # Enhanced signal logging for debugging
+                                    gen_name = generator.__class__.__name__
+                                    if signals and len(signals) > 0:
+                                        logger.info(f"Generator {gen_name} produced {len(signals)} signals for {symbol}")
+                                        logger.debug(f"Signal details from {gen_name}: {json.dumps(signals[0], default=str)[:200]}...")
+                                        # Tag signals with generator name for tracking
+                                        for signal in signals:
+                                            signal['generator'] = gen_name
+                                        all_signals.extend(signals)
+                                    else:
+                                        logger.debug(f"Generator {gen_name} produced no signals for {symbol}")
+                                        if gen_name == "SignalGenerator3":
+                                            logger.debug(f"SignalGenerator3 returned: {type(signals)} - {signals}")
+                                except Exception as e:
+                                    logger.error(f"Error in signal generator {generator.__class__.__name__}: {str(e)}")
+                                    logger.error(traceback.format_exc())
+                        else:
+                            # Fall back to the legacy single generator for backward compatibility
+                            logger.debug(f"Using legacy signal generator for {symbol}")
+                            all_signals = await self.signal_generator.generate_signals(
+                                market_data=market_data,
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                account_info=account_info
+                            )
+                        
+                        # Process signals
+                        if all_signals:
+                            logger.info(f"Generated a total of {len(all_signals)} signals for {symbol} from all generators")
+                            await self.process_signals(all_signals)
+                    
+                    # Manage existing positions
+                    await self.manage_open_trades()
+                    
+                    # Sleep between iterations
+                    await asyncio.sleep(self.trading_config.get("loop_interval", 60))
+                    
+                except Exception as e:
+                    logger.error(f"Error in main loop: {str(e)}")
+                    logger.exception("Exception details:")
+                    await asyncio.sleep(10)  # Sleep a bit before retrying
                 
-                results.append(result)
+            logger.info("Main loop exited cleanly")
             
-            # Save trade details
-            trades_data = []
-            for i, (result, order) in enumerate(zip(results, orders)):
-                trade_data = {
-                    "ticket": result.order,
-                    "symbol": trade_params['symbol'],
-                    "type": trade_params['signal_type'],
-                    "volume": order['volume'],
-                    "entry_price": trade_params['entry_price'],
-                    "stop_loss": trade_params['stop_loss'],
-                    "take_profit": order['tp'],
-                    "r_multiple": self.risk_manager.partial_tp_levels[i]['ratio'],
-                    "partial_number": i + 1,
-                    "open_time": datetime.now(UTC).isoformat(),
-                    "profit": 0.0
-                }
-                trades_data.append(trade_data)
-            
-            self._save_trades_to_file(trades_data)
-            
-            logger.info(
-                f"Successfully opened {len(results)} partial positions for {trade_params['symbol']} {trade_params['signal_type']}\n" +
-                "\n".join([f"  Partial {i+1}: {order['volume']:.2f} lots, TP at {order['tp']:.5f} ({self.risk_manager.partial_tp_levels[i]['ratio']:.1f}R)"
-                          for i, order in enumerate(orders)])
-            )
-            
-            return [result.order for result in results]
+        except asyncio.CancelledError:
+            logger.info("Main loop cancelled")
             
         except Exception as e:
-            logger.error(f"Error executing trade: {str(e)}")
-            return None
+            logger.error(f"Unexpected error in main loop: {str(e)}")
+            logger.exception("Exception details:")
+            
+        finally:
+            self.running = False
+            # Cancel trade monitoring task
+            if not trade_monitor_task.done():
+                trade_monitor_task.cancel()
+                try:
+                    await trade_monitor_task
+                except asyncio.CancelledError:
+                    pass
+            # Close MT5 connection if we own it
+            self.mt5_handler.shutdown()
 
-    def calculate_rsi(self, prices, period=14):
-        """Calculate RSI indicator."""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-
-    def calculate_volatility(self, symbol):
-        """Calculate current volatility for a symbol in pips."""
-        try:
-            # Get recent price data (last hour of M5 data = 12 bars)
-            data = self.mt5.get_market_data(symbol, "M5", 12)
-            if data is None or len(data) < 2:
-                logger.error(f"Insufficient data to calculate volatility for {symbol}")
-                return 0
+    async def _monitor_trades_loop(self):
+        """Separate loop for monitoring trades more frequently."""
+        logger.info("Starting trade monitoring loop")
+        
+        while self.running:
+            try:
+                # Check for active positions first
+                active_positions = self.mt5_handler.get_open_positions()
                 
-            # Calculate volatility as high-low range in pips
-            high = data['high'].max()
-            low = data['low'].min()
-            
-            # Convert to pips based on symbol type
-            multiplier = 100 if symbol.endswith('JPY') else 10000
-            volatility = (high - low) * multiplier
-            
-            logger.debug(f"Current volatility for {symbol}: {volatility} pips")
-            return volatility
-            
-        except Exception as e:
-            logger.error(f"Error calculating volatility: {str(e)}")
-            return 0
+                if not active_positions:
+                    # No open positions, no need to check market status or manage trades
+                    await asyncio.sleep(30)  # Longer sleep when no positions
+                    continue
+                
+                # Get unique symbols from active positions
+                active_symbols = set(pos.get("symbol") for pos in active_positions if pos.get("symbol"))
+                
+                # Check if any of the markets for the active positions are open
+                markets_open = False
+                for symbol in active_symbols:
+                    if self.is_market_open(symbol):
+                        markets_open = True
+                        break
+                
+                if not markets_open:
+                    logger.debug("Markets are closed for all active positions. Monitoring paused.")
+                    await asyncio.sleep(300)  # Check every 5 minutes during closed markets
+                    continue
+                
+                # Markets are open for at least one active position, manage trades
+                await self.manage_open_trades()
+                
+                # Sleep for a shorter interval (5 seconds) to monitor trades more frequently
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Error in trade monitoring loop: {str(e)}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(1)  # Brief sleep on error before retrying
 
-    def get_spread(self, symbol):
-        """Get current spread for a symbol in pips."""
-        try:
-            # Calculate pip multiplier dynamically using the symbol's point value
-            sym_info = mt5.symbol_info(symbol)
-            if not sym_info:
-                logger.error(f"Failed to get symbol info for {symbol}")
-                return float('inf')
-            multiplier = 1 / sym_info.point
-            
-            # Get current symbol info using MT5 directly
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                logger.error(f"Failed to get tick data for {symbol}")
-                return float('inf')
-            
-            spread = (tick.ask - tick.bid) * multiplier
-            logger.debug(f"Current spread for {symbol}: {spread} pips")
-            return spread
-        except Exception as e:
-            logger.error(f"Error getting spread: {str(e)}")
-            return float('inf')
+    def is_market_open(self, symbol: str = None) -> bool:
+        """
+        Check if the market is currently open based on schedule.
+        
+        Args:
+            symbol: Optional symbol to check. If provided, used to determine if it's a crypto symbol.
+        """
+        # Use the implementation from MarketAnalysis
+        return self.market_analysis.is_market_open(symbol)
+
+    def analyze_session(self) -> str:
+        """Determine the current trading session (Asian, London, NY)."""
+        # Use the implementation from MarketAnalysis
+        return self.market_analysis.analyze_session()
 
     async def process_signals(self, signals: List[Dict]) -> None:
-        """Process trading signals with improved error handling and validation."""
+        """Process trading signals and execute trades as needed."""
         try:
             if not self.trading_enabled:
                 logger.info("Trading is disabled, skipping signal processing")
@@ -2136,102 +1088,154 @@ class TradingBot:
             logger.info(f"Processing {len(signals)} trading signals with trading enabled: ✅")
             
             if not signals:
-                logger.warning("No signals to process")
+                logger.debug("No signals to process")
                 return
                 
             # Log the full signals list for debugging
-            logger.debug(f"Full signals list: {signals}")
+            logger.debug(f"Full signals list: {json.dumps(signals, default=str, indent=2)}")
             
-            for signal in signals:
-                try:
-                    logger.info(f"Processing signal for {signal.get('symbol', 'UNKNOWN')}")
-                    logger.debug(f"Signal details: {json.dumps(signal, default=str, indent=2)}")
-                    
-                    # Skip processing for HOLD signals
-                    if signal.get('signal') == 'HOLD':
-                        logger.info("Skipping HOLD signal")
-                        continue
-                    
-                    # Validate signal structure
-                    required_keys = [
-                        'timeframe', 'direction', 'entry_price', 'stop_loss',
-                        'take_profit', 'symbol', 'confidence'
-                    ]
-                    
-                    # Check for missing keys
-                    missing_keys = [k for k in required_keys if k not in signal]
-                    if missing_keys:
-                        logger.warning(f"Signal missing required keys: {missing_keys}")
-                        logger.debug("Attempting to set default values...")
-                        
-                        # Set default values for missing keys
-                        signal.setdefault('timeframe', 'M15')
-                        signal.setdefault('direction', signal.get('signal', 'HOLD'))
-                        
-                        # Ensure we have a valid current price
-                        current_price = signal.get('current_price')
-                        if current_price is None or not isinstance(current_price, (int, float)):
-                            logger.error("Invalid or missing current_price")
-                        continue
-                        
-                        signal.setdefault('entry_price', current_price)
-                        
-                        if 'stop_loss' not in signal:
-                            if signal.get('direction', '').lower() == 'buy':
-                                signal['stop_loss'] = signal.get('support', current_price * 0.999)
-                                logger.debug(f"Set default BUY stop_loss: {signal['stop_loss']}")
-                            else:
-                                signal['stop_loss'] = signal.get('resistance', current_price * 1.001)
-                                logger.debug(f"Set default SELL stop_loss: {signal['stop_loss']}")
-                                
-                        if 'take_profit' not in signal:
-                            if signal.get('direction', '').lower() == 'buy':
-                                signal['take_profit'] = signal.get('resistance', current_price * 1.002)
-                                logger.debug(f"Set default BUY take_profit: {signal['take_profit']}")
-                            else:
-                                signal['take_profit'] = signal.get('support', current_price * 0.998)
-                                logger.debug(f"Set default SELL take_profit: {signal['take_profit']}")
-                    
-                    # Validate signal values
-                    if not all(isinstance(signal.get(k), (int, float)) for k in ['entry_price', 'stop_loss', 'take_profit']):
-                        logger.error("Invalid price values in signal")
-                        logger.error(f"entry_price: {signal.get('entry_price')}, stop_loss: {signal.get('stop_loss')}, take_profit: {signal.get('take_profit')}")
-                        continue
-                    
-                    # Validate signal direction
-                    if signal['direction'].upper() not in ['BUY', 'SELL']:
-                        logger.error(f"Invalid signal direction: {signal['direction']}")
-                        continue
-                    
-                    # Calculate position size
-                    position_size = self.calculate_position_size(signal['symbol'], signal['confidence'])
-                    if position_size <= 0:
-                        logger.warning(f"Invalid position size calculated: {position_size}")
-                        continue
-                    
-                    logger.info(f"Executing trade for {signal['symbol']} - Direction: {signal['direction']}, Entry: {signal['entry_price']}, SL: {signal['stop_loss']}, TP: {signal['take_profit']}")
-                    
-                    # Execute the trade
-                    trade_params = {
-                        'symbol': signal['symbol'],
-                        'signal_type': signal['direction'],
-                        'entry_price': signal['entry_price'],
-                        'stop_loss': signal['stop_loss'],
-                        'take_profit': signal['take_profit'],
-                        'position_size': position_size
-                    }
-                    
-                    result = self.execute_trade(trade_params)
-                    if result:
-                        logger.info(f"Trade executed successfully: {result}")
-                    else:
-                        logger.error("Trade execution failed")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing signal: {str(e)}")
-                    logger.error(f"Signal that caused error: {json.dumps(signal, default=str, indent=2)}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
+            # Validate signals before processing
+            valid_signals = []
+            for i, signal in enumerate(signals):
+                # Check required fields
+                required_fields = ['symbol', 'direction', 'entry_price', 'stop_loss', 'take_profit', 'position_size']
+                missing_fields = [field for field in required_fields if signal.get(field) is None]
+                
+                if missing_fields:
+                    logger.warning(f"Signal #{i+1} missing required fields: {', '.join(missing_fields)}")
                     continue
+                
+                # Check if market is open for this symbol
+                symbol = signal.get('symbol')
+                if not self.is_market_open(symbol):
+                    logger.warning(f"Market is closed for {symbol}. Skipping signal.")
+                    continue
+                
+                # Validate numeric fields
+                numeric_fields = ['entry_price', 'stop_loss', 'position_size']
+                invalid_fields = []
+                
+                for field in numeric_fields:
+                    value = signal.get(field)
+                    try:
+                        if value is None:
+                            invalid_fields.append(f"{field} (None)")
+                            continue
+                            
+                        # Try converting to float
+                        float_value = float(value)
+                        if float_value <= 0:
+                            invalid_fields.append(f"{field} (not positive)")
+                    except (ValueError, TypeError):
+                        invalid_fields.append(f"{field} (not numeric)")
+                
+                # Special handling for take_profit which can be either a numeric value or a dictionary
+                take_profit = signal.get('take_profit')
+                if take_profit is None:
+                    invalid_fields.append("take_profit (None)")
+                elif isinstance(take_profit, dict):
+                    # For dictionary format, verify it has a 'price' field that's numeric and positive
+                    if 'price' not in take_profit:
+                        invalid_fields.append("take_profit (missing 'price' field)")
+                    else:
+                        try:
+                            tp_price = float(take_profit['price'])
+                            if tp_price <= 0:
+                                invalid_fields.append("take_profit.price (not positive)")
+                            # If valid, normalize signal to store price in the main signal object
+                            signal['tp_price'] = tp_price
+                        except (ValueError, TypeError):
+                            invalid_fields.append("take_profit.price (not numeric)")
+                else:
+                    # For direct numeric format
+                    try:
+                        tp_value = float(take_profit)
+                        if tp_value <= 0:
+                            invalid_fields.append("take_profit (not positive)")
+                        # Store the value in a consistent way
+                        signal['tp_price'] = tp_value
+                    except (ValueError, TypeError):
+                        invalid_fields.append("take_profit (not numeric)")
+                
+                if invalid_fields:
+                    logger.warning(f"Signal #{i+1} has invalid fields: {', '.join(invalid_fields)}")
+                    continue
+                
+                # Add validated signal
+                valid_signals.append(signal)
+            
+            if len(valid_signals) < len(signals):
+                logger.warning(f"Filtered out {len(signals) - len(valid_signals)} invalid signals, proceeding with {len(valid_signals)} valid signals")
+            
+            if not valid_signals:
+                logger.warning("No valid signals after validation, stopping processing")
+                return
+                
+            # Continue with the valid signals
+            signals = valid_signals
+            
+            # Group signals by symbol for better management
+            signals_by_symbol = {}
+            for signal in signals:
+                symbol = signal.get('symbol', 'UNKNOWN')
+                if symbol not in signals_by_symbol:
+                    signals_by_symbol[symbol] = []
+                signals_by_symbol[symbol].append(signal)
+            
+            # Process signals by symbol
+            for symbol, symbol_signals in signals_by_symbol.items():
+                logger.info(f"Processing {len(symbol_signals)} signals for {symbol}")
+                
+                # Log signals by generator
+                generators = set(signal.get('generator', 'unknown') for signal in symbol_signals)
+                for generator in generators:
+                    gen_signals = [s for s in symbol_signals if s.get('generator', 'unknown') == generator]
+                    logger.info(f"  - {len(gen_signals)} signals from {generator}")
+                
+                # Process each signal
+                for signal in symbol_signals:
+                    try:
+                        # Get signal details
+                        generator = signal.get('generator', 'unknown')
+                        logger.info(f"Processing {symbol} signal from {generator}")
+                        
+                        # Skip processing for HOLD signals
+                        if signal.get('signal') == 'HOLD':
+                            logger.info("Skipping HOLD signal")
+                            continue
+                        
+                        # Only check confidence if it's included in the signal
+                        if 'confidence' in signal:
+                            confidence = signal.get('confidence', 0)
+                            if confidence < self.min_confidence:
+                                logger.info(f"Signal confidence {confidence} below minimum threshold {self.min_confidence}")
+                                continue
+                        
+                        # Store the signal in the database
+                        signal_id = db.insert_signal(signal)
+                        if signal_id > 0:
+                            logger.info(f"Signal stored in database with ID: {signal_id}")
+                            # Add the database ID to the signal object
+                            signal['id'] = signal_id
+                        else:
+                            logger.error("Failed to store signal in database")
+                        
+                        # Check for existing positions on this symbol
+                        open_positions = self.mt5_handler.get_open_positions()
+                        existing_positions = [p for p in open_positions if p["symbol"] == symbol]
+                        
+                        if existing_positions:
+                            # Handle existing positions
+                            await self.handle_signal_with_existing_positions(signal, existing_positions)
+                        else:
+                            # Place new trade using existing functionality
+                            await self.execute_trade_from_signal(signal)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing signal for {symbol}: {str(e)}")
+                        logger.error(f"Signal that caused error: {json.dumps(signal, default=str, indent=2)}")
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                        continue
                 
         except Exception as e:
             logger.error(f"Error in process_signals: {str(e)}")
@@ -2242,338 +1246,816 @@ class TradingBot:
                 except Exception as telegram_error:
                     logger.error(f"Failed to send error alert: {str(telegram_error)}")
 
-    async def run(self):
-        """Main trading loop."""
+    async def execute_trade_from_signal(self, signal: Dict, is_addition: bool = False) -> None:
+        """Execute a trade based on signal, using existing mt5_handler functionality and storing results in database."""
         try:
-            logger.info("Starting trading bot...")
+            # Extract signal information
+            symbol = signal.get('symbol')
+            direction = signal.get('direction', '').upper()
+            entry_price = signal.get('entry_price')
+            stop_loss = signal.get('stop_loss')
+            take_profit = signal.get('take_profit')
+            position_size = signal.get('position_size')
+            signal_id = signal.get('id')  # Database ID
             
-            # Initialize MT5 connection
-            if not self.mt5.connect():
-                logger.error("Failed to connect to MT5")
+            # Process structured take profit format if present
+            tp_price = signal.get('tp_price')  # This should be set during validation
+            if tp_price is None:
+                # If tp_price wasn't set during validation, extract it now
+                if isinstance(take_profit, dict) and 'price' in take_profit:
+                    tp_price = take_profit['price']
+                else:
+                    tp_price = take_profit
+            
+            # Log full signal data for debugging
+            logger.debug(f"Attempting to execute trade with signal: {json.dumps(signal, default=str, indent=2)}")
+            
+            # Validate required parameters
+            required_params = ['symbol', 'direction', 'entry_price', 'stop_loss', 'position_size']
+            missing_params = [param for param in required_params if signal.get(param) is None]
+            
+            # Check for take_profit separately since it can be in different formats
+            if tp_price is None:
+                missing_params.append('take_profit')
+            
+            if missing_params:
+                error_msg = f"Missing required trade parameters: {', '.join(missing_params)}"
+                logger.error(error_msg)
+                if signal_id:
+                    db.update_signal_status(signal_id, "invalid", False)
+                await self._notify_trade_action(f"❌ Trade Validation Error: {error_msg}")
                 return
             
-            # Initialize components
-            self.running = True
+            # Validate numeric values
+            try:
+                # Check for None values or other invalid types before conversion
+                numeric_params = {
+                    'entry_price': entry_price,
+                    'stop_loss': stop_loss,
+                    'take_profit_price': tp_price,
+                    'position_size': position_size
+                }
+                
+                for param_name, param_value in numeric_params.items():
+                    if param_value is None:
+                        raise TypeError(f"{param_name} is None")
+                    if not isinstance(param_value, (int, float, str)):
+                        raise TypeError(f"{param_name} is not a number or string: {type(param_value)}")
+                
+                # Convert to float after validation
+                entry_price = float(entry_price)
+                stop_loss = float(stop_loss)
+                take_profit_price = float(tp_price)
+                position_size = float(position_size)
+                
+                # Additional validation for zero or negative values
+                if entry_price <= 0:
+                    raise ValueError("Entry price must be positive")
+                if position_size <= 0:
+                    raise ValueError("Position size must be positive")
+                if stop_loss <= 0:
+                    raise ValueError("Stop loss must be positive")
+                if take_profit_price <= 0:
+                    raise ValueError("Take profit must be positive") 
+                    
+                # Additional validation for correct SL/TP placement
+                if direction == 'BUY':
+                    # For BUY, SL should be below entry, TP should be above entry
+                    if stop_loss >= entry_price:
+                        logger.warning(f"Invalid stop loss for BUY trade: {stop_loss} >= {entry_price}, adjusting")
+                        stop_loss = entry_price * 0.995  # Set to 0.5% below entry
+                    if take_profit_price <= entry_price:
+                        logger.warning(f"Invalid take profit for BUY trade: {take_profit_price} <= {entry_price}, adjusting")
+                        take_profit_price = entry_price * 1.01  # Set to 1% above entry
+                else:  # SELL
+                    # For SELL, SL should be above entry, TP should be below entry
+                    if stop_loss <= entry_price:
+                        logger.warning(f"Invalid stop loss for SELL trade: {stop_loss} <= {entry_price}, adjusting")
+                        stop_loss = entry_price * 1.005  # Set to 0.5% above entry
+                    if take_profit_price >= entry_price:
+                        logger.warning(f"Invalid take profit for SELL trade: {take_profit_price} >= {entry_price}, adjusting")
+                        take_profit_price = entry_price * 0.99  # Set to 1% below entry
+            except (ValueError, TypeError) as e:
+                error_msg = f"Invalid numeric values in trade parameters: {str(e)}"
+                logger.error(error_msg)
+                logger.error(f"Signal with invalid parameters: {json.dumps(signal, default=str, indent=2)}")
+                if signal_id:
+                    db.update_signal_status(signal_id, "invalid", False)
+                await self._notify_trade_action(f"❌ Trade Validation Error: {error_msg}")
+                return
             
-            while self.running:
+            # Log trade attempt
+            logger.info(f"Executing {'additional' if is_addition else 'new'} {direction} trade for {symbol}")
+            logger.info(f"Parameters: Entry={entry_price}, SL={stop_loss}, TP={take_profit_price}, Size={position_size}")
+            
+            # Check if MT5 is connected
+            if not self.mt5_handler or not getattr(self.mt5_handler, 'connected', False):
+                error_msg = "MT5 connection not available"
+                logger.error(error_msg)
+                await self._notify_trade_action(f"❌ Trade Execution Error: {error_msg}")
+                return
+            
+            # Check if symbol is available for trading
+            symbol_info = self.mt5_handler.get_symbol_info(symbol)
+            if not symbol_info:
+                error_msg = f"Symbol {symbol} not found or not available for trading"
+                logger.error(error_msg)
+                await self._notify_trade_action(f"❌ Trade Execution Error: {error_msg}")
+                return
+
+            # Get current market prices to handle slippage
+            current_ask = symbol_info.ask  # price for buying
+            current_bid = symbol_info.bid  # price for selling
+            logger.info(f"Current market prices for {symbol} - Ask: {current_ask}, Bid: {current_bid}")
+            
+            # Check current spread and reject trade if it's too high
+            current_spread = current_ask - current_bid
+            # Convert to pips for easier interpretation
+            pip_size = 0.0001  # Default for most forex pairs
+            if symbol.endswith('JPY') or 'JPY' in symbol:
+                pip_size = 0.01
+            elif symbol.startswith('XAU'):
+                pip_size = 0.1
+            elif symbol.startswith('XAG'):
+                pip_size = 0.01
+            # Special handling for cryptocurrency pairs
+            elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
+                # For cryptocurrencies, use 1 point as 1 pip for high-priced assets like BTC
+                pip_size = 1.0
+            
+            # For indices, stocks, etc. - try to get point value from MT5
+            if hasattr(symbol_info, 'point'):
+                point_value = symbol_info.point
+                if symbol.endswith('JPY') or 'JPY' in symbol or symbol.startswith('XAU') or symbol.startswith('XAG') or symbol.endswith('USDm') or symbol.endswith('USDT'):
+                    # These instruments already have correct pip size
+                    pass
+                else:
+                    # For standard forex, a pip is typically 10 points
+                    pip_size = point_value * 10
+            
+            # Calculate spread in pips
+            spread_in_pips = current_spread / pip_size
+            
+            # Get max allowed spread from config or use default
+            max_allowed_spread = 20  # Default max spread in pips
+            try:
+                # Safely check if config exists and has max_spread attribute
+                if hasattr(self, 'config') and isinstance(self.config, dict) and 'max_spread' in self.config:
+                    max_allowed_spread = self.config['max_spread']
+                # Also check if config is a class with max_spread attribute
+                elif hasattr(self, 'config') and hasattr(self.config, 'max_spread'):
+                    max_allowed_spread = self.config.max_spread
+            except Exception as e:
+                logger.warning(f"Error accessing max_spread from config: {str(e)}, using default value: {max_allowed_spread}")
+            
+            logger.info(f"Current spread for {symbol}: {spread_in_pips:.1f} pips (Max allowed: {max_allowed_spread} pips)")
+            
+            # Reject trade if spread is too high
+            if spread_in_pips > max_allowed_spread:
+                error_msg = f"Spread too high for {symbol}: {spread_in_pips:.1f} pips (Max allowed: {max_allowed_spread} pips)"
+                logger.warning(error_msg)
+                if signal_id:
+                    # Remove the reason parameter which is not supported
+                    db.update_signal_status(signal_id, "rejected", False)
+                await self._notify_trade_action(f"⚠️ Trade Rejected: {error_msg}")
+                return
+            
+            # Check for significant price slippage and adjust if necessary
+            adjusted_params = False
+            original_entry = entry_price
+            original_sl = stop_loss
+            original_tp = take_profit_price
+            
+            # Calculate pip size for this instrument
+            pip_size = 0.0001  # Default for most forex pairs
+            if symbol.endswith('JPY') or 'JPY' in symbol:
+                pip_size = 0.01
+            elif symbol.startswith('XAU'):
+                pip_size = 0.1
+            elif symbol.startswith('XAG'):
+                pip_size = 0.01
+            # Special handling for cryptocurrency pairs
+            elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
+                # For cryptocurrencies, use 1 point as 1 pip for high-priced assets like BTC
+                pip_size = 1.0
+            
+            # For indices, stocks, etc. - try to get point value from MT5
+            if hasattr(symbol_info, 'point'):
+                point_value = symbol_info.point
+                if symbol.endswith('JPY') or 'JPY' in symbol or symbol.startswith('XAU') or symbol.startswith('XAG') or symbol.endswith('USDm') or symbol.endswith('USDT'):
+                    # These instruments already have correct pip size
+                    pass
+                else:
+                    # For standard forex, a pip is typically 10 points
+                    pip_size = point_value * 10
+            
+            # Calculate acceptable slippage in price units (20 pips default)
+            slippage_threshold = 20 * pip_size
+            
+            # Define the risk-reward ratio from the original signal
+            if direction == 'BUY':
+                original_risk = entry_price - stop_loss
+                original_reward = take_profit_price - entry_price
+            else:  # SELL
+                original_risk = stop_loss - entry_price
+                original_reward = entry_price - take_profit_price
+                
+            original_rr_ratio = original_reward / original_risk if original_risk > 0 else 1.5
+            logger.info(f"Original risk-reward ratio: {original_rr_ratio:.2f}")
+            
+            # Adjust parameters based on current prices
+            if direction == 'BUY':
+                # For BUY orders, we use Ask price
+                if abs(current_ask - entry_price) > slippage_threshold:
+                    logger.warning(f"Significant price slippage detected for {symbol}: Signal entry: {entry_price}, Current ask: {current_ask}")
+                    
+                    # Adjust entry to current ask
+                    entry_price = current_ask
+                    
+                    # Maintain the same risk-reward ratio and distance relationships
+                    risk_distance = original_risk  # Keep similar risk distance
+                    stop_loss = entry_price - risk_distance
+                    take_profit_price = entry_price + (risk_distance * original_rr_ratio)
+                    
+                    adjusted_params = True
+                    logger.info(f"Adjusted trade parameters - Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit_price}")
+            else:  # SELL
+                # For SELL orders, we use Bid price
+                if abs(current_bid - entry_price) > slippage_threshold:
+                    logger.warning(f"Significant price slippage detected for {symbol}: Signal entry: {entry_price}, Current bid: {current_bid}")
+                    
+                    # Adjust entry to current bid
+                    entry_price = current_bid
+                    
+                    # Maintain the same risk-reward ratio and distance relationships
+                    risk_distance = original_risk  # Keep similar risk distance
+                    stop_loss = entry_price + risk_distance
+                    take_profit_price = entry_price - (risk_distance * original_rr_ratio)
+                    
+                    adjusted_params = True
+                    logger.info(f"Adjusted trade parameters - Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit_price}")
+            
+            # Get minimum stop distance from MT5
+            min_stop_distance = 0
+            if hasattr(symbol_info, 'trade_stops_level') and hasattr(symbol_info, 'point'):
+                min_stop_distance = symbol_info.point * symbol_info.trade_stops_level
+                logger.info(f"Minimum stop distance for {symbol}: {min_stop_distance}")
+            
+            # Final validation and adjustment for stop loss
+            if direction == 'BUY':
+                # For BUY orders, SL must be below entry
+                if stop_loss >= entry_price:
+                    stop_loss = entry_price - (10 * pip_size)  # At least 10 pips below
+                    logger.warning(f"Stop loss above entry for BUY, adjusting to: {stop_loss}")
+                    adjusted_params = True
+                    
+                # Ensure minimum distance
+                if min_stop_distance > 0 and (entry_price - stop_loss) < min_stop_distance:
+                    stop_loss = entry_price - min_stop_distance - (2 * pip_size)  # Add extra 2 pips for safety
+                    logger.warning(f"Stop loss too close to entry, adjusting to: {stop_loss}")
+                    adjusted_params = True
+            else:  # SELL
+                # For SELL orders, SL must be above entry
+                if stop_loss <= entry_price:
+                    stop_loss = entry_price + (10 * pip_size)  # At least 10 pips above
+                    logger.warning(f"Stop loss below entry for SELL, adjusting to: {stop_loss}")
+                    adjusted_params = True
+                    
+                # Ensure minimum distance
+                if min_stop_distance > 0 and (stop_loss - entry_price) < min_stop_distance:
+                    stop_loss = entry_price + min_stop_distance + (2 * pip_size)  # Add extra 2 pips for safety
+                    logger.warning(f"Stop loss too close to entry, adjusting to: {stop_loss}")
+                    adjusted_params = True
+            
+            # Re-adjust take profit to maintain risk-reward if stop loss was adjusted
+            if adjusted_params:
+                if direction == 'BUY':
+                    risk = entry_price - stop_loss
+                    take_profit_price = entry_price + (risk * original_rr_ratio)
+                else:  # SELL
+                    risk = stop_loss - entry_price
+                    take_profit_price = entry_price - (risk * original_rr_ratio)
+                
+                logger.info(f"Final adjusted parameters - Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit_price}")
+                
+                # Notify about the adjustment
+                adjustment_message = (
+                    f"⚠️ Trade parameters adjusted due to price slippage:\n"
+                    f"Original: Entry={original_entry}, SL={original_sl}, TP={original_tp}\n"
+                    f"Adjusted: Entry={entry_price}, SL={stop_loss}, TP={take_profit_price}"
+                )
+                await self._notify_trade_action(adjustment_message)
+            
+            # Use existing MT5Handler to execute the trade
+            ticket = None
+            try:
+                # Check if we have partial take profit settings in the take_profit field
+                has_partial_tp = False
+                
+                # Create a simple comment for the trade
                 try:
-                    signals = []
+                    raw_comment = f"{signal.get('generator', 'Bot')}_{signal.get('strategy', 'Signal')}"
                     
-                    # Process each symbol
-                    for symbol in self.trading_config["symbols"]:
-                        try:
-                            # Process each timeframe
-                            for timeframe in self.trading_config["timeframes"]:
-                                # Perform market analysis
-                                analysis = await self.analyze_market(symbol, timeframe)
-                                if analysis:
-                                    # Generate signals based on analysis
-                                    signals = await self.generate_signals(analysis, symbol, timeframe)
-                                    if signals:
-                                        # Process the signals
-                                        await self.process_signals(signals)
-                            
-                            # Manage open trades for this symbol
-                            await self.manage_open_trades()
-                            
-                        except Exception as e:
-                            error_trace = traceback.format_exc()
-                            logger.error(f"Error processing {symbol}: {str(e)}\nTraceback:\n{error_trace}")
-                            if self.telegram_bot and self.telegram_bot.is_running:
-                                await self.telegram_bot.send_error_alert(
-                                    f"Error analyzing {symbol}: {str(e)}\nTraceback:\n{error_trace}"
-                                )
+                    # Truncate if too long (max 30 chars)
+                    if len(raw_comment) > 30:
+                        raw_comment = raw_comment[:27] + "..."
                     
-                    # Process signals
-                    if signals:
-                        await self.process_signals(signals)
+                    # Remove any invalid characters (only allow alphanumeric, underscore, dash)
+                    valid_chars = string.ascii_letters + string.digits + '_-'
+                    comment = ''.join(c for c in raw_comment if c in valid_chars)
                     
-                    # Update dashboard
-                    if self.dashboard:
-                        current_session = self.analyze_session()
-                        self.dashboard.update_status({
-                            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            'active_symbols': [signal['symbol'] for signal in signals],
-                            'session': current_session,
-                            'signals': signals
-                        })
-                    
-                    # Wait for next iteration
-                    await asyncio.sleep(self.check_interval)
+                    if not comment:
+                        # Fallback to a default comment if everything was invalid
+                        comment = "TradingBot"
                     
                 except Exception as e:
-                    logger.error(f"Error in main loop: {str(e)}")
-                    if self.telegram_bot:
-                        await self.telegram_bot.send_error_alert(
-                            f"Error in main trading loop: {str(e)}"
+                    logger.warning(f"Failed to generate trade comment: {str(e)}, using default comment")
+                    comment = "TradingBot"
+                
+                # Check if take_profit is a dictionary with partial TP information
+                if isinstance(take_profit, dict) and 'price' in take_profit and hasattr(self.mt5_handler, 'execute_trade'):
+                    # It could be a partial take profit configuration
+                    if 'size' in take_profit and 'ratio' in take_profit:
+                        has_partial_tp = True
+                        logger.info(f"Using partial take profit settings from signal: {take_profit}")
+                        
+                        # Calculate risk in price terms
+                        if direction == 'BUY':
+                            risk = entry_price - stop_loss
+                        else:  # SELL
+                            risk = stop_loss - entry_price
+                            
+                        # Define the partial take profit levels
+                        partial_tp_levels = [{
+                            'ratio': float(take_profit['ratio']),
+                            'size': float(take_profit['size'])
+                        }]
+                        
+                        # If size is less than 1.0, add a second level
+                        if float(take_profit['size']) < 1.0:
+                            remaining_size = 1.0 - float(take_profit['size'])
+                            # Second level has higher R multiple 
+                            second_ratio = float(take_profit['ratio']) * 1.5
+                            partial_tp_levels.append({
+                                'ratio': second_ratio,
+                                'size': remaining_size
+                            })
+                            
+                        # Prepare trade parameters
+                        trade_params = {
+                            'symbol': symbol,
+                            'signal_type': direction,
+                            'entry_price': entry_price,
+                            'stop_loss': stop_loss,
+                            'position_size': position_size,
+                            'partial_tp_levels': partial_tp_levels
+                        }
+                        
+                        # Execute trade with partial take profits
+                        tickets = self.mt5_handler.execute_trade(trade_params)
+                        
+                        if tickets:
+                            logger.info(f"Successfully executed trade with {len(tickets)} partial take profit levels")
+                            ticket = tickets[0]  # Use first ticket for tracking
+                        else:
+                            logger.warning("Failed to execute trade with partial take profits, falling back to standard method")
+                            has_partial_tp = False
+                
+                # If not using partial take profits or it failed, use standard execution
+                if not has_partial_tp:
+                    if direction == 'BUY':
+                        ticket = self.mt5_handler.open_buy(
+                            symbol, position_size, stop_loss, take_profit_price, 
+                            comment=comment
                         )
-                    await asyncio.sleep(60)  # Wait longer on error
+                    else:  # SELL
+                        ticket = self.mt5_handler.open_sell(
+                            symbol, position_size, stop_loss, take_profit_price,
+                            comment=comment
+                        )
+            except Exception as e:
+                error_msg = f"MT5 trade execution error: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                await self._notify_trade_action(f"❌ Trade Execution Error: {error_msg}")
+                if signal_id:
+                    db.update_signal_status(signal_id, "failed", False)
+                return
             
-        except Exception as e:
-            logger.error(f"Fatal error in trading bot: {str(e)}")
-            if self.telegram_bot:
-                await self.telegram_bot.send_error_alert(
-                    f"Fatal error in trading bot: {str(e)}"
-                )
-        finally:
-            await self.stop()
-
-    def _combine_timeframe_signals(self, timeframe_signals: List[Dict]) -> Optional[Dict]:
-        """Combine signals from multiple timeframes."""
-        try:
-            if not timeframe_signals:
-                return None
-            
-            # Initialize scores
-            combined_score = 0
-            total_weight = 0
-            
-            # Weights for different timeframes
-            weights = {
-                "M5": 0.15,
-                "M15": 0.20,
-                "H1": 0.25,
-                "H4": 0.25,
-                "D1": 0.15
-            }
-            
-            # Combine scores from different timeframes
-            for signal in timeframe_signals:
-                if signal['signal'] == 'HOLD':
-                    continue
-                
-                # Calculate weighted score
-                score = signal['confidence']
-                if signal['signal'] == 'SELL':
-                    score = -score
-                
-                combined_score += score * weights[signal['timeframe']]
-                total_weight += weights[signal['timeframe']]
-            
-            if total_weight == 0:
-                return None
-            
-            # Normalize combined score
-            final_score = combined_score / total_weight
-            
-            # Determine final signal type and confidence
-            if abs(final_score) < 0.3:
-                signal_type = 'HOLD'
-                confidence = 0
+            # Process the result
+            if ticket:
+                try:
+                    # Get position details
+                    position = self.mt5_handler.get_position_by_ticket(ticket)
+                    if not position:
+                        error_msg = f"Position not found after execution for ticket {ticket}"
+                        logger.error(error_msg)
+                        await self._notify_trade_action(f"⚠️ Trade Warning: {error_msg}")
+                        return
+                    
+                    logger.info(f"Position opened successfully: {json.dumps(position, default=str, indent=2)}")
+                    
+                    # Adjust take profit to maintain the original risk-reward ratio if execution price is different
+                    actual_entry_price = position.get('price_open')
+                    
+                    if actual_entry_price != entry_price:
+                        logger.info(f"Actual execution price {actual_entry_price} differs from intended entry {entry_price}")
+                        
+                        # Recalculate take profit based on actual entry while keeping original stop loss
+                        if direction == 'BUY':
+                            # For BUY: 
+                            # - If entry is higher than intended, we need to move TP higher to maintain RR
+                            actual_risk = actual_entry_price - stop_loss
+                            adjusted_take_profit = actual_entry_price + (actual_risk * original_rr_ratio)
+                            
+                            logger.info(f"Adjusting BUY take profit: Original {take_profit_price:.2f} → New {adjusted_take_profit:.2f}")
+                            logger.info(f"New risk: {actual_risk:.2f} pips, New reward: {(adjusted_take_profit - actual_entry_price):.2f} pips")
+                            
+                        else:  # SELL
+                            # For SELL:
+                            # - If entry is lower than intended, we need to move TP lower to maintain RR
+                            actual_risk = stop_loss - actual_entry_price
+                            adjusted_take_profit = actual_entry_price - (actual_risk * original_rr_ratio)
+                            
+                            logger.info(f"Adjusting SELL take profit: Original {take_profit_price:.2f} → New {adjusted_take_profit:.2f}")
+                            logger.info(f"New risk: {actual_risk:.2f} pips, New reward: {(actual_entry_price - adjusted_take_profit):.2f} pips")
+                        
+                        # Update position with the adjusted take profit
+                        if self.mt5_handler.modify_position(ticket, stop_loss, adjusted_take_profit):
+                            logger.info(f"Successfully adjusted take profit to maintain {original_rr_ratio:.2f} risk-reward ratio")
+                            take_profit_price = adjusted_take_profit  # Update for database record
+                        else:
+                            logger.warning(f"Failed to adjust take profit, using original value")
+                    
+                    # Save position for trailing stop management
+                    if self.trailing_stop_enabled:
+                        activation_price = self._calculate_activation_price(direction, entry_price, stop_loss)
+                        self.trailing_stop_data[ticket] = {
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry_price': entry_price,
+                            'initial_stop': stop_loss,
+                            'current_stop': stop_loss,
+                            'activated': False,
+                            'activation_price': activation_price
+                        }
+                    
+                    # Store in database if position was successfully opened
+                    if position:
+                        # Calculate pip value for the symbol
+                        symbol_info = self.mt5_handler.get_symbol_info(symbol)
+                        pip_value = 0.0001  # Default for forex
+                        if symbol_info and hasattr(symbol_info, 'point'):
+                            pip_value = symbol_info.point * 10
+                        
+                        # Calculate initial profit/loss in pips
+                        current_price = position.get('price_current', entry_price)
+                        profit_loss_pips = abs(current_price - entry_price) / pip_value
+                        if (direction == 'BUY' and current_price < entry_price) or \
+                           (direction == 'SELL' and current_price > entry_price):
+                            profit_loss_pips = -profit_loss_pips
+                        
+                        # Create comprehensive trade data
+                        trade_data = {
+                            'ticket': str(ticket),
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry_price': position.get('price_open', entry_price),
+                            'current_price': current_price,
+                            'stop_loss': position.get('sl', stop_loss),
+                            'take_profit': position.get('tp', take_profit_price),
+                            'position_size': position.get('volume', position_size),
+                            'open_time': datetime.now().isoformat(),
+                            'status': 'open',
+                            'profit_loss': position.get('profit', 0),
+                            'profit_loss_pips': profit_loss_pips,
+                            'pip_value': pip_value,
+                            'strategy': signal.get('strategy', 'unknown'),
+                            'confidence': signal.get('confidence', 0),
+                            'market_condition': signal.get('market_condition', 'normal'),
+                            'volatility_state': signal.get('volatility_state', 'normal'),
+                            'trailing_stop_enabled': self.trailing_stop_enabled,
+                            'trailing_stop_activation_price': activation_price if self.trailing_stop_enabled else None,
+                            'is_addition': is_addition,
+                            'signal_generator': signal.get('generator', 'unknown'),
+                            'comment': position.get('comment', '')
+                        }
+                        
+                        # Store the trade in the database
+                        trade_id = db.insert_trade(trade_data, signal_id)
+                        if trade_id > 0:
+                            logger.info(f"Trade stored in database with ID: {trade_id}")
+                        else:
+                            logger.error("Failed to store trade in database")
+                            await self._notify_trade_action("⚠️ Warning: Trade executed but failed to store in database")
+                    
+                    # Update signal status
+                    if signal_id:
+                        db.update_signal_status(signal_id, "executed", True)
+                    
+                    # Send success notification
+                    notification_message = (
+                        f"✅ {'Additional' if is_addition else 'New'} {direction} position opened\n"
+                        f"Symbol: {symbol}\n"
+                        f"Entry: {position.get('price_open', entry_price)}\n"
+                        f"Stop Loss: {position.get('sl', stop_loss)}\n"
+                        f"Take Profit: {position.get('tp', take_profit_price)}\n"
+                        f"Size: {position_size} lots\n"
+                        f"Strategy: {signal.get('strategy', 'Signal')}\n"
+                        f"Confidence: {signal.get('confidence', 'N/A')}\n"
+                        f"Generator: {signal.get('generator', 'unknown')}"
+                    )
+                    await self._notify_trade_action(notification_message)
+                    
+                    logger.info(f"Trade executed successfully: Ticket {ticket}")
+                    
+                except Exception as e:
+                    error_msg = f"Error processing successful trade: {str(e)}"
+                    logger.error(error_msg)
+                    logger.error(traceback.format_exc())
+                    await self._notify_trade_action(f"⚠️ Trade Warning: {error_msg}")
             else:
-                signal_type = 'BUY' if final_score > 0 else 'SELL'
-                confidence = abs(final_score)
+                # Trade execution failed
+                error_msg = f"Failed to execute {direction} trade for {symbol}"
+                logger.error(error_msg)
+                
+                # Get MT5 error code if available
+                mt5_error = self.mt5_handler.get_last_error() if hasattr(self.mt5_handler, 'get_last_error') else None
+                
+                # Check for margin-related errors specifically
+                if "No margin available" in str(error_msg).lower() or (mt5_error and "margin" in str(mt5_error).lower()):
+                    # Get account info for detailed error message
+                    account_info = self.mt5_handler.get_account_info()
+                    
+                    # Create a detailed margin error message
+                    margin_error = f"❌ Margin Error: Insufficient margin to execute {direction} trade for {symbol}.\n"
+                    
+                    if account_info:
+                        free_margin = account_info.get('free_margin', 'Unknown')
+                        balance = account_info.get('balance', 'Unknown')
+                        margin_error += f"Free Margin: {free_margin}, Balance: {balance}\n"
+                    
+                    margin_error += f"Position size: {position_size} lots\n"
+                    margin_error += "Consider adding funds or reducing position size."
+                    
+                    logger.error(margin_error)
+                    await self._notify_trade_action(margin_error)
+                else:
+                    # General error handling
+                    if mt5_error:
+                        error_msg += f"\nError details: {mt5_error}"
+                        logger.error(f"MT5 Error: {mt5_error}")
+                    
+                    # Send detailed error notification
+                    await self._notify_trade_action(f"❌ Trade Execution Failed:\n{error_msg}")
+                
+                # Update signal status in both cases
+                if signal_id:
+                    db.update_signal_status(signal_id, "failed", False)
+        
+        except Exception as e:
+            error_msg = f"Unexpected error executing trade: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            await self._notify_trade_action(f"❌ Critical Trade Error: {error_msg}")
+
+    async def handle_signal_with_existing_positions(self, signal: Dict, existing_positions: List[Dict]) -> None:
+        """Handle signal when there are existing positions for the symbol."""
+        symbol = signal.get('symbol')
+        signal_direction = signal.get('direction', '').upper()
+        
+        # Check if we have positions in the opposite direction
+        opposite_positions = []
+        same_direction_positions = []
+        
+        for position in existing_positions:
+            position_type = "BUY" if position["type"] == 0 else "SELL"
+            if position_type != signal_direction:
+                opposite_positions.append(position)
+            else:
+                same_direction_positions.append(position)
+        
+        # Handle opposite direction positions based on configuration
+        if opposite_positions:
+            if self.trading_config.get("close_on_reverse_signal", True):
+                logger.info(f"Signal ({signal_direction}) is opposite to existing positions. Closing them.")
+                
+                for position in opposite_positions:
+                    ticket = position["ticket"]
+                    if self.mt5_handler.close_position(ticket):
+                        logger.info(f"Closed opposite position {ticket}")
+                        
+                        # Send notification
+                        if self.telegram_bot and self.telegram_bot.is_running:
+                            await self.telegram_bot.send_trade_update(
+                                order_id=ticket,
+                                symbol=symbol,
+                                action="CLOSED",
+                                price=position["price_current"],
+                                profit=position["profit"],
+                                reason="Reverse signal detected"
+                            )
+                
+                # After closing opposite positions, place the new trade
+                await self.execute_trade_from_signal(signal)
+                
+            elif not self.trading_config.get("allow_hedging", False):
+                logger.info(f"Signal ({signal_direction}) is opposite to existing positions, but hedging is disabled.")
+            else:
+                # Hedging is allowed, place the new trade
+                logger.info(f"Signal ({signal_direction}) is opposite to existing positions. Hedging allowed.")
+                await self.execute_trade_from_signal(signal)
+        
+        # Handle same direction positions
+        elif same_direction_positions:
+            if self.trading_config.get("allow_position_additions", False):
+                current_volume = sum(pos["volume"] for pos in same_direction_positions)
+                max_volume = self.trading_config.get("max_position_size", 1.0)
+                
+                if current_volume < max_volume:
+                    logger.info(f"Adding to existing {signal_direction} position for {symbol}")
+                    await self.execute_trade_from_signal(signal, is_addition=True)
+                else:
+                    logger.info(f"Max position size reached for {symbol}, not adding")
+            else:
+                logger.info(f"Signal matches existing position direction ({signal_direction}), but position additions are disabled.")
+
+    async def manage_open_trades(self) -> None:
+        """Manage open trades using existing functionality from MT5Handler and RiskManager."""
+        try:
+            # Get all open positions
+            positions = self.mt5_handler.get_open_positions()
+            if not positions:
+                return
+                
+            logger.debug(f"Managing {len(positions)} open positions")
             
-            # Get primary timeframe signal for price levels
-            primary_signal = next((signal for signal in timeframe_signals if signal['timeframe'] == 'H1'), None)
-            if not primary_signal:
-                return None
+            for position in positions:
+                ticket = position["ticket"]
+                symbol = position["symbol"]
+                position_type = self._get_position_type(position)
+                current_price = position["price_current"]
+                current_sl = position["sl"]
+                current_tp = position["tp"]
+                
+                # Update trade in database
+                self._update_trade_in_database(position)
+                
+                # Skip trailing stop management if not enabled or not applicable
+                if not self.trailing_stop_enabled or ticket not in self.trailing_stop_data:
+                    continue
+                    
+                # Get trailing stop data
+                ts_data = self.trailing_stop_data[ticket]
+                
+                # Check if trailing stop is already activated
+                if ts_data['activated']:
+                    # Create trade object for risk manager
+                    trade = {
+                        'direction': position_type,
+                        'entry_price': ts_data['entry_price'],
+                        'initial_stop': ts_data['initial_stop'],
+                        'stop_loss': ts_data['current_stop']
+                    }
+                    
+                    # Use risk manager to calculate new stop loss
+                    should_adjust, new_sl = self.risk_manager.calculate_trailing_stop(
+                        trade=trade,
+                        current_price=current_price,
+                        market_condition='normal'
+                    )
+                    
+                    # If we should adjust and it's better than current stop
+                    if should_adjust:
+                        if (position_type == "BUY" and new_sl > ts_data['current_stop']) or \
+                           (position_type == "SELL" and new_sl < ts_data['current_stop']):
+                            logger.info(f"Updating trailing stop for ticket {ticket} from {ts_data['current_stop']} to {new_sl}")
+                            
+                            # Use MT5Handler to modify the position
+                            if self.mt5_handler.modify_position(ticket, new_sl, current_tp):
+                                ts_data['current_stop'] = new_sl
+                                
+                                # Send notification
+                                notification_message = (
+                                    f"Trailing stop updated for {symbol} {position_type}\n"
+                                    f"New stop loss: {new_sl}"
+                                )
+                                await self._notify_trade_action(notification_message)
+                
+                # Check if trailing stop should be activated
+                else:
+                    activation_price = ts_data['activation_price']
+                    
+                    if (position_type == "BUY" and current_price >= activation_price) or \
+                       (position_type == "SELL" and current_price <= activation_price):
+                        ts_data['activated'] = True
+                        logger.info(f"Trailing stop activated for ticket {ticket}")
+                        
+                        # Send notification
+                        notification_message = (
+                            f"Trailing stop activated for {symbol} {position_type}\n"
+                            f"Current price: {current_price}\n"
+                            f"Activation price: {activation_price}"
+                        )
+                        await self._notify_trade_action(notification_message)
+        
+        except Exception as e:
+            logger.error(f"Error managing open trades: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def _update_trade_in_database(self, position: Dict[str, Any]) -> None:
+        """Update trade information in the database."""
+        try:
+            # Find trade in database by ticket
+            trade_id = self._find_trade_id_by_ticket(position["ticket"])
             
-            return {
-                'signal_type': signal_type,
-                'confidence': confidence,
-                'current_price': primary_signal['pois']['current_price'],
-                'support': primary_signal['pois']['support'],
-                'resistance': primary_signal['pois']['resistance'],
-                'trend': primary_signal['trend'],
-                'analysis': {
-                    'timeframes': {signal['timeframe']: signal['analysis'] for signal in timeframe_signals},
-                    'combined_score': final_score
+            if trade_id:
+                # Get current trade info from database
+                current_trades = db.get_active_trades()
+                current_trade = next((t for t in current_trades if t.get('id') == trade_id), None)
+                
+                if not current_trade:
+                    logger.warning(f"Trade {trade_id} not found in active trades")
+                    return
+                    
+                # Calculate pip value for the symbol
+                symbol = position.get('symbol', '')
+                symbol_info = self.mt5_handler.get_symbol_info(symbol)
+                pip_value = 0.0001  # Default for forex
+                if symbol_info and hasattr(symbol_info, 'point'):
+                    pip_value = symbol_info.point * 10
+                
+                # Calculate profit/loss in pips
+                entry_price = current_trade.get('entry_price', 0)
+                current_price = position.get('price_current', 0)
+                direction = self._get_position_type(position)
+                
+                profit_loss_pips = abs(current_price - entry_price) / pip_value
+                if (direction == 'BUY' and current_price < entry_price) or \
+                   (direction == 'SELL' and current_price > entry_price):
+                    profit_loss_pips = -profit_loss_pips
+                
+                # Check if SL/TP was hit
+                stop_loss = position.get('sl', 0)
+                take_profit = position.get('tp', 0)
+                status = 'open'
+                
+                if direction == 'BUY':
+                    if current_price <= stop_loss:
+                        status = 'closed'
+                        logger.info(f"Trade {trade_id} hit stop loss")
+                    elif current_price >= take_profit:
+                        status = 'closed'
+                        logger.info(f"Trade {trade_id} hit take profit")
+                else:  # SELL
+                    if current_price >= stop_loss:
+                        status = 'closed'
+                        logger.info(f"Trade {trade_id} hit stop loss")
+                    elif current_price <= take_profit:
+                        status = 'closed'
+                        logger.info(f"Trade {trade_id} hit take profit")
+                
+                # Update trade with current information
+                trade_data = {
+                    'current_price': current_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'profit_loss': position.get('profit', 0),
+                    'profit_loss_pips': profit_loss_pips,
+                    'status': status
                 }
-            }
+                
+                # Update in database
+                db.update_trade(trade_id, trade_data)
+                
+                # If trade closed, update final stats
+                if status == 'closed':
+                    db.close_trade(
+                        trade_id,
+                        current_price,
+                        position.get('profit', 0),
+                        profit_loss_pips,
+                        datetime.now().isoformat()
+                    )
+                    
+                    # Send notification
+                    close_reason = "stop loss" if (
+                        (direction == 'BUY' and current_price <= stop_loss) or 
+                        (direction == 'SELL' and current_price >= stop_loss)
+                    ) else "take profit"
+                    
+                    notification_message = (
+                        f"Trade closed - Hit {close_reason}\n"
+                        f"Symbol: {symbol}\n"
+                        f"Direction: {direction}\n"
+                        f"Profit/Loss: {position.get('profit', 0)}\n"
+                        f"Pips: {profit_loss_pips:.1f}"
+                    )
+                    asyncio.create_task(self._notify_trade_action(notification_message))
+                
         except Exception as e:
-            logger.error(f"Error combining timeframe signals: {str(e)}")
-            return None
-
-    def _is_symbol_allowed_in_session(self, symbol: str, session: str) -> bool:
-        """Check if symbol is allowed to trade in current session."""
-        try:
-            if session == "no_session":
-                return False
-                
-            session_key = f"{session}_session"
-            if session_key not in self.session_config:
-                return False
-                
-            return symbol in self.session_config[session_key]["pairs"]
-        except Exception as e:
-            logger.error(f"Error checking symbol session allowance: {str(e)}")
-            return False
-
-    def calculate_indicators(self, df: pd.DataFrame) -> Dict:
-        """Calculate technical indicators for momentum analysis with enhanced type safety."""
-        try:
-            indicators = {}
-            
-            # Calculate RSI with NaN handling
-            delta = df['close'].diff().ffill()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean().fillna(0)
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean().fillna(0)
-            rs = np.where(loss != 0, gain / loss, 1)  # Avoid division by zero
-            indicators['rsi'] = float(100 - (100 / (1 + rs[-1])))
-            
-            # Calculate MACD with explicit type conversion
-            exp1 = df['close'].ewm(span=12, adjust=False).mean().astype('float64')
-            exp2 = df['close'].ewm(span=26, adjust=False).mean().astype('float64')
-            macd_line = (exp1 - exp2).astype('float64')
-            signal_line = macd_line.ewm(span=9, adjust=False).mean().astype('float64')
-            
-            indicators['macd'] = {
-                'macd_line': float(macd_line.iloc[-1]),
-                'signal_line': float(signal_line.iloc[-1])
-            }
-            
-            return indicators
-            
-        except Exception as e:
-            logger.error(f"Error calculating indicators: {str(e)}")
-            return {'rsi': 50, 'macd': {'macd_line': 0.0, 'signal_line': 0.0}}
-
-    def check_momentum(self, analysis: Dict) -> bool:
-        """Check momentum confirmation with type tracing"""
-        try:
-            # Add type validation trace
-            logger.debug(f"Momentum check input types - Analysis: {type(analysis)}, "
-                       f"Indicators: {type(analysis.get('indicators'))}")
-            
-            # Existing validation logic
-            if not analysis or 'indicators' not in analysis:
-                logger.error("Invalid analysis data structure")
-                return False
-
-            # Trace individual indicator types
-            indicators = analysis['indicators']
-            logger.debug(f"Indicator types - RSI: {type(indicators.get('rsi'))}, "
-                       f"MACD: {type(indicators.get('macd'))}")
-            
-            # Safely get and validate RSI value
-            rsi = indicators.get('rsi', 50)
-            if not isinstance(rsi, (int, float)):
-                logger.error(f"Invalid RSI type: {type(rsi)}")
-                return False
-            
-            # Safely get and validate MACD values with type conversion
-            macd = indicators.get('macd', {})
-            macd_line = float(macd.get('macd_line', 0))
-            signal_line = float(macd.get('signal_line', 0))
-
-            # Log indicator values with types for debugging
-            logger.debug(f"Momentum Check Types - RSI: {type(rsi)}, MACD: {type(macd_line)}, Signal: {type(signal_line)}")
-            
-            # Validate trend value
-            if 'trend' not in analysis:
-                logger.error("Trend information missing from analysis")
-                return False
-            
-            trend = analysis['trend'].lower()
-            
-            if trend == "bullish":
-                rsi_condition = rsi > 45
-                macd_condition = macd_line > signal_line
-                
-                logger.debug("\nBullish Momentum Check:")
-                logger.debug(f"RSI > 45: {'✅' if rsi_condition else '❌'} ({rsi:.2f})")
-                logger.debug(f"MACD > Signal: {'✅' if macd_condition else '❌'} ({macd_line:.5f} vs {signal_line:.5f})")
-                
-                momentum_confirmed = rsi_condition and macd_condition
-                logger.debug(f"Bullish Momentum Confirmed: {'✅' if momentum_confirmed else '❌'}")
-                return momentum_confirmed
-            
-            elif trend == "bearish":
-                rsi_condition = rsi < 55
-                macd_condition = macd_line < signal_line
-                
-                logger.debug("\nBearish Momentum Check:")
-                logger.debug(f"RSI < 55: {'✅' if rsi_condition else '❌'} ({rsi:.2f})")
-                logger.debug(f"MACD < Signal: {'✅' if macd_condition else '❌'} ({macd_line:.5f} vs {signal_line:.5f})")
-                
-                momentum_confirmed = rsi_condition and macd_condition
-                logger.debug(f"Bearish Momentum Confirmed: {'✅' if momentum_confirmed else '❌'}")
-                return momentum_confirmed
-            
-            logger.debug("No clear trend for momentum check")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error checking momentum: {str(e)}")
-            return False
-
-    def close_trade(self, ticket):
-        """Close a trade by its ticket number."""
-        try:
-            # Close the trade using MT5
-            position = mt5.positions_get(ticket=ticket)
-            if not position:
-                logger.error(f"No position found with ticket {ticket}")
-                return False
-            
-            position = position[0]
-            close_price = mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask
-            
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "position": ticket,
-                "symbol": position.symbol,
-                "volume": position.volume,
-                "type": mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY,
-                "price": close_price,
-                "deviation": 20,
-                "magic": 100,
-                "comment": "Close trade",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
-            
-            result = mt5.order_send(request)
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                logger.error(f"Failed to close trade {ticket}: {result.comment}")
-                return False
-            
-            # Calculate profit
-            profit = position.profit
-            
-            # Update profit history
-            history_file = Path(BASE_DIR) / "data" / "profit_history.json"
-            history_data = []
-            if history_file.exists():
-                with open(history_file, 'r') as f:
-                    history_data = json.load(f)
-            
-            # Calculate cumulative profit correctly
-            cumulative = sum(entry['profit'] for entry in history_data) + profit
-            
-            # Add trade closure entry with current timestamp
-            history_data.append({
-                'timestamp': datetime.now(UTC).isoformat(),
-                'profit': profit,
-                'trade_type': 'BUY' if position.type == mt5.ORDER_TYPE_BUY else 'SELL',
-                'symbol': position.symbol,
-                'cumulative': cumulative
-            })
-            
-            # Save updated history
-            with open(history_file, 'w') as f:
-                json.dump(history_data, f, indent=4)
-            
-            # Update active trades file
-            trades_file = Path(BASE_DIR) / "data" / "active_trades.json"
-            if trades_file.exists():
-                with open(trades_file, 'r') as f:
-                    trades_data = json.load(f)
-                
-                # Remove closed trade
-                trades_data = [t for t in trades_data if t['ticket'] != ticket]
-                
-                # Save updated trades
-                with open(trades_file, 'w') as f:
-                    json.dump(trades_data, f, indent=4)
-            
-            logger.info(f"Trade {ticket} closed successfully with profit: {profit}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error closing trade {ticket}: {str(e)}")
-            return False
+            logger.error(f"Error updating trade in database: {str(e)}")
+            logger.error(traceback.format_exc())
 
     async def enable_trading(self):
         """Enable trading."""
@@ -2600,41 +2082,374 @@ class TradingBot:
             logger.error(f"Failed to disable trading: {str(e)}")
             return False
 
-    def _save_trades_to_file(self, new_trades: List[Dict]) -> None:
-        """Save new trades to the active trades JSON file.
+    async def close_pending_trades(self):
+        """Close all pending trades when the bot is stopping."""
+        try:
+            # Get all open positions
+            open_positions = self.mt5_handler.get_open_positions()
+            if not open_positions:
+                logger.info("No open positions to close")
+                return
+            
+            logger.info(f"Closing {len(open_positions)} open positions...")
+            
+            # Track success/failure counts
+            success_count = 0
+            failed_count = 0
+            
+            # Try to close each position
+            for position in open_positions:
+                ticket = position["ticket"]
+                symbol = position["symbol"]
+                profit = position["profit"]
+                
+                # Use MT5Handler to close the position
+                if self.mt5_handler.close_position(ticket):
+                    success_count += 1
+                    logger.info(f"Closed position {ticket} on {symbol} with P/L: {profit}")
+                    
+                    # Update the database record
+                    trade_id = self._find_trade_id_by_ticket(ticket)
+                    
+                    if trade_id:
+                        # Calculate basic pip values for database record
+                        entry_price = position.get('price_open', 0)
+                        close_price = position.get('price_current', 0)
+                        direction = self._get_position_type(position)
+                        
+                        # Calculate pips using pip_value
+                        symbol_info = self.mt5_handler.get_symbol_info(symbol)
+                        pip_value = 0.0001  # Default for most forex pairs
+                        if symbol_info and hasattr(symbol_info, 'point'):
+                            pip_value = symbol_info.point * 10
+                            
+                        profit_loss_pips = abs(close_price - entry_price) / pip_value
+                        if (direction == 'BUY' and close_price < entry_price) or \
+                           (direction == 'SELL' and close_price > entry_price):
+                            profit_loss_pips = -profit_loss_pips
+                        
+                        # Create comprehensive trade close data
+                        close_data = {
+                            'close_price': close_price,
+                            'profit': profit,
+                            'profit_loss_pips': profit_loss_pips,
+                            'close_time': datetime.now().isoformat(),
+                            'close_reason': 'Bot Shutdown',
+                            'final_status': 'closed',
+                            'final_stop_loss': position.get('sl', 0),
+                            'final_take_profit': position.get('tp', 0),
+                            'close_comment': f"Closed by bot shutdown - P/L: {profit}"
+                        }
+                        
+                        # Update database with complete trade data
+                        db.close_trade(
+                            trade_id,
+                            close_data['close_price'],
+                            close_data['profit'],
+                            close_data['profit_loss_pips'],
+                            close_data['close_time']
+                        )
+                        
+                        # Update trade with additional closing details
+                        db.update_trade(trade_id, close_data)
+                        
+                        # Send notification
+                        if self.telegram_bot and self.telegram_bot.is_running:
+                            try:
+                                position_type = self._get_position_type(position)
+                                await self.telegram_bot.send_trade_update(
+                                    ticket,
+                                    symbol,
+                                    f"{position_type} CLOSED (Bot Shutdown)",
+                                    position["price_current"],
+                                    profit
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to send trade update: {str(e)}")
+                    else:
+                        failed_count += 1
+                        logger.warning(f"Failed to close position {ticket} on {symbol}")
+            
+            logger.info(f"Closed {success_count} positions, {failed_count} failed")
+            
+        except Exception as e:
+            logger.error(f"Error closing pending trades: {str(e)}")
+            logger.error(traceback.format_exc())
 
-        This method appends new trades to the existing file.
+    async def handle_enable_close_on_shutdown_command(self, args):
         """
-        try:
-            trades_file = Path(BASE_DIR) / "data" / "active_trades.json"
-            if trades_file.exists():
-                with open(trades_file, "r") as f:
-                    current_trades = json.load(f)
-            else:
-                current_trades = []
-            current_trades.extend(new_trades)
-            with open(trades_file, "w") as f:
-                json.dump(current_trades, f, indent=4)
-            logger.info(f"Saved {len(new_trades)} new trade(s) to active_trades.json")
-        except Exception as e:
-            logger.error(f"Error saving trades to file: {str(e)}")
+        Handle command to enable closing positions on shutdown.
+        Format: /enablecloseonshutdown
+        """
+        self.close_positions_on_shutdown = True
+        logger.info("Enabled automatic closing of positions on shutdown")
+        return "✅ Automatic closing of positions on shutdown is now ENABLED"
+        
+    async def handle_disable_close_on_shutdown_command(self, args):
+        """
+        Handle command to disable closing positions on shutdown.
+        Format: /disablecloseonshutdown
+        """
+        self.close_positions_on_shutdown = False
+        logger.info("Disabled automatic closing of positions on shutdown")
+        return "✅ Automatic closing of positions on shutdown is now DISABLED"
 
-    def get_min_stop_distance(self, symbol: str) -> Optional[float]:
-        """Calculate and return the minimum stop distance for a symbol based on its current market conditions."""
+    async def update_performance_metrics(self):
+        """Update performance metrics in the database."""
         try:
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info is not None:
-                # If the symbol info has a stops_level, use it multiplied by point
-                if hasattr(symbol_info, "stops_level") and symbol_info.stops_level > 0:
-                    return symbol_info.stops_level * symbol_info.point
-                # Fallback: use 0.1% of the current ask price
-                tick = mt5.symbol_info_tick(symbol)
-                if tick is not None:
-                    return tick.ask * 0.001
+            # Calculate metrics for different timeframes
+            for timeframe in ['1D', '1W', '1M']:
+                metrics = db.calculate_performance_metrics(timeframe)
+                db.update_or_insert_performance_metrics(metrics)
+                
+            logger.info("Performance metrics updated successfully")
+        except Exception as e:
+            logger.error(f"Error updating performance metrics: {str(e)}")
+
+    def _get_position_type(self, position: Dict[str, Any]) -> str:
+        """Get the direction (BUY/SELL) from a position."""
+        return "BUY" if position["type"] == 0 else "SELL"
+        
+    def _find_trade_id_by_ticket(self, ticket: int) -> Optional[int]:
+        """Find a trade ID in the database by its ticket number."""
+        try:
+            trades = db.get_active_trades()
+            for trade in trades:
+                if trade.get('ticket') == str(ticket):
+                    return trade.get('id')
             return None
         except Exception as e:
-            logger.error(f"Error calculating min_stop_distance for {symbol}: {str(e)}")
+            logger.error(f"Error finding trade by ticket: {str(e)}")
             return None
+            
+    def _calculate_activation_price(self, direction: str, entry_price: float, stop_loss: float) -> float:
+        """Calculate trailing stop activation price."""
+        risk = abs(entry_price - stop_loss)
+        activation_factor = self.trading_config.get("trailing_activation_factor", 1.0)
+        return entry_price + (risk * activation_factor if direction == 'BUY' else -risk * activation_factor)
+        
+    async def _notify_trade_action(self, message: str) -> None:
+        """Send notification if telegram bot is available."""
+        if self.telegram_bot and self.telegram_bot.is_running:
+            try:
+                await self.telegram_bot.send_notification(message)
+            except Exception as e:
+                logger.warning(f"Failed to send notification: {str(e)}")
+
+    async def request_shutdown(self):
+        """Request a graceful shutdown of the trading bot."""
+        logger.info("Shutdown requested - will exit after current cycle completes")
+        self.shutdown_requested = True
+        
+        # Send notification if Telegram is available
+        if self.telegram_bot and self.telegram_bot.is_running:
+            await self.telegram_bot.send_notification("⚠️ Trading bot shutdown requested. Will exit soon.")
+        
+        return True
+
+    async def handle_shutdown_command(self, args):
+        """
+        Handle command to gracefully shutdown the trading bot.
+        Format: /shutdown
+        """
+        await self.request_shutdown()
+        return "⚠️ Trading bot shutdown initiated. The bot will exit after completing the current cycle."
+
+    async def reconcile_trades(self):
+        """Reconcile trades that may have closed while the bot was offline."""
+        try:
+            # Get active trades from database
+            active_db_trades = db.get_active_trades()
+            
+            if not active_db_trades:
+                logger.info("No active trades in database to reconcile")
+                return
+            
+            # Get current open positions from MT5
+            mt5_positions = self.mt5_handler.get_open_positions()
+            mt5_tickets = {str(pos['ticket']) for pos in mt5_positions}
+            
+            # Find trades that are active in DB but not in MT5 (likely closed while offline)
+            closed_while_offline = []
+            for trade in active_db_trades:
+                if trade['ticket'] not in mt5_tickets:
+                    closed_while_offline.append(trade)
+            
+            if not closed_while_offline:
+                logger.info("All database trades match MT5 positions, no reconciliation needed")
+                return
+                
+            logger.info(f"Found {len(closed_while_offline)} trades that closed while bot was offline")
+            
+            # Process each trade that closed while offline
+            for trade in closed_while_offline:
+                try:
+                    trade_id = trade['id']
+                    ticket = trade['ticket']
+                    symbol = trade['symbol']
+                    
+                    # Get historical trade data from MT5
+                    history = self.mt5_handler.get_order_history(ticket=int(ticket) if ticket.isdigit() else 0)
+                    
+                    if history:
+                        # Found historical data
+                        closed_order = history[0]  # Use the first matching order
+                        
+                        # Calculate profit/loss in pips
+                        entry_price = trade['entry_price']
+                        # Use price_current if available, otherwise use just price
+                        close_price = closed_order.get('price_current', closed_order.get('price', entry_price))
+                        direction = trade['direction']
+                        
+                        # Calculate pips
+                        symbol_info = self.mt5_handler.get_symbol_info(symbol)
+                        pip_value = 0.0001  # Default for forex
+                        if symbol_info and hasattr(symbol_info, 'point'):
+                            pip_value = symbol_info.point * 10
+                            
+                        profit_loss_pips = abs(close_price - entry_price) / pip_value
+                        if (direction.upper() == 'BUY' and close_price < entry_price) or \
+                           (direction.upper() == 'SELL' and close_price > entry_price):
+                            profit_loss_pips = -profit_loss_pips
+                        
+                        # Get profit from the history data
+                        profit = closed_order.get('profit', 0)
+                        close_time = closed_order.get('time_close', datetime.now().isoformat())
+                        
+                        # Update database record
+                        db.close_trade(
+                            trade_id,
+                            close_price,
+                            profit,
+                            profit_loss_pips,
+                            close_time
+                        )
+                        
+                        logger.info(f"Reconciled trade {ticket} with P/L: {profit}")
+                    else:
+                        # No history found, mark as closed with unknown outcome
+                        logger.warning(f"No history found for ticket {ticket}, marking as closed with unknown outcome")
+                        db.close_trade(
+                            trade_id,
+                            trade['entry_price'],  # Use entry as close if no data
+                            0,  # Assume zero profit/loss
+                            0,  # Assume zero pips
+                            datetime.now().isoformat()
+                        )
+                except Exception as e:
+                    logger.error(f"Error reconciling trade {trade.get('ticket')}: {str(e)}")
+            
+            logger.info(f"Trade reconciliation completed for {len(closed_while_offline)} trades")
+            
+        except Exception as e:
+            logger.error(f"Error during trade reconciliation: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def recover_mt5_connection(self, max_attempts=3):
+        """
+        Attempt to recover the MT5 connection after a failure.
+        
+        Args:
+            max_attempts: Maximum number of reconnection attempts
+            
+        Returns:
+            bool: True if connection was recovered, False otherwise
+        """
+        logger.info("Attempting to recover MT5 connection")
+        
+        # Create a new MT5Handler if needed
+        if not hasattr(self, 'mt5_handler') or self.mt5_handler is None:
+            self.mt5_handler = MT5Handler()
+        
+        # Track if we've made progress
+        connection_established = False
+        
+        for attempt in range(1, max_attempts + 1):
+            logger.info(f"MT5 reconnection attempt {attempt}/{max_attempts}")
+            
+            try:
+                # Try to shut down any existing connections first
+                try:
+                    mt5.shutdown()  # Use the globally imported mt5 module
+                    time.sleep(1)  # Give it time to clean up
+                except Exception as ex:
+                    logger.debug(f"Error during MT5 shutdown in recovery: {str(ex)}")
+                    # Continue despite shutdown errors
+                
+                # Create a new MT5 handler on the second attempt or if first attempt fails
+                if attempt > 1 or not connection_established:
+                    logger.info("Creating a fresh MT5Handler instance for clean reconnection")
+                    self.mt5_handler = MT5Handler()
+                
+                # Attempt to initialize
+                if self.mt5_handler.initialize():
+                    logger.info("MT5 connection recovered successfully")
+                    
+                    # Verify connection by doing a simple query
+                    try:
+                        # Try a simple account query to confirm the connection
+                        account_info = self.mt5_handler.get_account_info()
+                        if account_info:
+                            logger.info(f"MT5 connection verified with account: {account_info.get('login', 'unknown')}")
+                            return True
+                        else:
+                            logger.warning("MT5 initialized but could not verify connection with account query")
+                            if attempt < max_attempts:
+                                connection_established = True  # We made progress
+                                continue
+                    except Exception as e:
+                        logger.warning(f"MT5 initialized but verification failed: {str(e)}")
+                        if attempt < max_attempts:
+                            connection_established = True  # We made progress
+                            continue
+                
+                # Wait before next attempt with increasing backoff
+                wait_time = 2 * attempt
+                logger.info(f"Waiting {wait_time} seconds before next reconnection attempt")
+                time.sleep(wait_time)
+                
+            except Exception as e:
+                logger.error(f"Error during MT5 reconnection attempt {attempt}: {str(e)}")
+                time.sleep(2 * attempt)  # Increasing backoff
+        
+        logger.error(f"Failed to recover MT5 connection after {max_attempts} attempts")
+        return False
+
+    async def handle_enable_trading_command(self, args):
+        """
+        Handle command to enable trading.
+        Format: /enabletrading
+        """
+        await self.enable_trading()
+        logger.info("Trading enabled via Telegram command")
+        return "✅ Trading has been enabled"
+        
+    async def handle_disable_trading_command(self, args):
+        """
+        Handle command to disable trading.
+        Format: /disabletrading
+        """
+        await self.disable_trading()
+        logger.info("Trading disabled via Telegram command")
+        return "✅ Trading has been disabled"
+        
+    async def handle_enable_position_additions_command(self, args):
+        """
+        Handle command to enable position additions.
+        Format: /enablepositionadditions
+        """
+        self.trading_config["allow_position_additions"] = True
+        logger.info("Position additions enabled via Telegram command")
+        return "✅ Position additions have been enabled"
+        
+    async def handle_disable_position_additions_command(self, args):
+        """
+        Handle command to disable position additions.
+        Format: /disablepositionadditions
+        """
+        self.trading_config["allow_position_additions"] = False
+        logger.info("Position additions disabled via Telegram command")
+        return "✅ Position additions have been disabled"
 
 if __name__ == "__main__":
     # Configure logging
@@ -2647,7 +2462,7 @@ if __name__ == "__main__":
     logger.add(
         "logs/trading_bot.log",
         rotation="1 day",
-        retention="1 month",
+        retention="1 day",
         compression="zip",
         level="INFO"
     )

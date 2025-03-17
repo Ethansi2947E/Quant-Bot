@@ -1,7 +1,6 @@
 from src.backtester import Backtester
 from loguru import logger
 import argparse
-from datetime import datetime
 import pandas as pd
 
 def print_detailed_analysis(results, config):
@@ -80,8 +79,8 @@ def print_detailed_analysis(results, config):
             
             # Print individual trade details with corrected metrics
             logger.info("\nDetailed Trade List:")
-            logger.info(f"| {'ID':<4} | {'Dir':<6} | {'Entry Time':<19} | {'Exit Time':<19} | {'Entry':<10} | {'Exit':<10} | {'PnL':<10} | {'R':<6} | {'MAE%':<6} | {'MFE%':<6} | {'Reason':<15} |")
-            logger.info(f"| {'-'*4} | {'-'*6} | {'-'*19} | {'-'*19} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*15} |")
+            logger.info(f"| {'ID':<4} | {'Dir':<6} | {'Entry Time':<19} | {'Exit Time':<19} | {'Entry':<10} | {'Exit':<10} | {'PnL':<10} | {'R':<6} | {'MAE%':<6} | {'MFE%':<6} | {'Reason':<15} | {'Strategy':<15} |")
+            logger.info(f"| {'-'*4} | {'-'*6} | {'-'*19} | {'-'*19} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*15} | {'-'*15} |")
             
             for trade in trades:
                 logger.info(
@@ -95,7 +94,8 @@ def print_detailed_analysis(results, config):
                     f"{trade.get('r_multiple', 0):<6.2f} | "
                     f"{trade.get('mae_pct', 0):<6.2f} | "
                     f"{trade.get('mfe_pct', 0):<6.2f} | "
-                    f"{trade.get('exit_reason', 'Unknown'):<15} |"
+                    f"{trade.get('exit_reason', 'Unknown'):<15} | "
+                    f"{trade.get('strategy', 'Unknown'):<15} |"
                 )
             
             # Time Analysis
@@ -130,6 +130,23 @@ def print_detailed_analysis(results, config):
             logger.info("\nTrades by Session:")
             for session in sorted(trades_by_session.keys()):
                 logger.info(f"{session}: {trades_by_session[session]} trades")
+                
+            # Strategy Analysis
+            trades_by_strategy = {}
+            for trade in trades:
+                strategy = trade.get('strategy', 'Unknown')
+                trades_by_strategy[strategy] = trades_by_strategy.get(strategy, 0) + 1
+            
+            logger.info("\nStrategy Analysis:")
+            logger.info(f"| {'Strategy':<30} | {'Count':<10} | {'Win Rate':<10} | {'Avg Profit':<10} |")
+            logger.info(f"| {'-'*30} | {'-'*10} | {'-'*10} | {'-'*10} |")
+            for strategy in sorted(trades_by_strategy.keys()):
+                strategy_trades = [t for t in trades if t.get('strategy') == strategy]
+                strategy_winners = len([t for t in strategy_trades if t['pnl'] > 0])
+                strategy_win_rate = strategy_winners / len(strategy_trades) if strategy_trades else 0
+                strategy_avg_profit = sum(t['pnl'] for t in strategy_trades) / len(strategy_trades) if strategy_trades else 0
+                strategy_name = str(strategy) if strategy is not None else "Unknown"
+                logger.info(f"| {strategy_name:<30} | {trades_by_strategy[strategy]:<10} | {strategy_win_rate*100:>8.1f}% | ${strategy_avg_profit:>9.2f} |")
                 
             # Analyze each symbol separately
             for symbol, symbol_results in results.items():
@@ -235,6 +252,15 @@ def main():
     parser.add_argument('--timeframes', nargs='+', default=['H1', 'H4'], help='Timeframes to analyze')
     parser.add_argument('--initial-balance', type=float, default=10000, help='Initial balance')
     parser.add_argument('--risk-per-trade', type=float, default=0.01, help='Risk per trade (1% = 0.01)')
+    parser.add_argument('--signal-generator', type=str, default='default', 
+                        choices=['default', 'signal_generator1'], 
+                        help='Signal generator to use (default or signal_generator1)')
+    parser.add_argument('--use-cached-data', action='store_true', 
+                        help='Force using cached data instead of downloading from MT5')
+    parser.add_argument('--download-data-only', action='store_true',
+                        help='Download data without running backtest (to populate cache)')
+    parser.add_argument('--no-fallback', action='store_true',
+                        help='Disable fallback to basic signal generator when custom signal generator returns no signals')
     
     args = parser.parse_args()
     
@@ -248,7 +274,9 @@ def main():
         "commission": 0.00007,  # 0.7 pips commission per trade
         "enable_visualization": True,
         "save_results": True,
-        "results_dir": "backtest_results"
+        "results_dir": "backtest_results",
+        "use_cached_data": args.use_cached_data,  # Add this parameter to control cached data usage
+        "use_signal_fallback": not args.no_fallback  # Control fallback behavior
     }
     
     logger.info("=" * 50)
@@ -261,11 +289,32 @@ def main():
     logger.info(f"| {'Timeframes':<20} | {', '.join(config['timeframes']):<20} |")
     logger.info(f"| {'Initial Balance':<20} | ${config['initial_balance']:.2f} |")
     logger.info(f"| {'Risk per Trade':<20} | {config['risk_per_trade']*100:.1f}% |")
+    logger.info(f"| {'Signal Generator':<20} | {args.signal_generator:<20} |")
+    logger.info(f"| {'Use Cached Data':<20} | {'Yes' if config['use_cached_data'] else 'No':<20} |")
+    logger.info(f"| {'Use Signal Fallback':<20} | {'Yes' if config['use_signal_fallback'] else 'No':<20} |")
+    logger.info(f"| {'Download Only':<20} | {'Yes' if args.download_data_only else 'No':<20} |")
     logger.info("=" * 50 + "\n")
     
     try:
         backtester = Backtester(config)
-        results = backtester.run_backtest()
+        
+        # Special case: Download data only
+        if args.download_data_only:
+            logger.info("Download data only mode - downloading data for all symbols and timeframes to populate cache")
+            for symbol in config['symbols']:
+                for timeframe in config['timeframes']:
+                    logger.info(f"Downloading data for {symbol} {timeframe}")
+                    data = backtester.get_historical_data(symbol, timeframe, config['start_date'], config['end_date'])
+                    if data is not None and not data.empty:
+                        logger.info(f"Successfully downloaded {len(data)} candles for {symbol} {timeframe}")
+                    else:
+                        logger.warning(f"Failed to download data for {symbol} {timeframe}")
+            logger.info("Data download completed")
+            return
+        
+        # Normal backtest mode
+        logger.info(f"Running backtest with signal generator: {args.signal_generator}")
+        results = backtester.run_backtest_with_generator(args.signal_generator)
         
         if not results:
             logger.error("No results generated from backtest")
@@ -289,10 +338,25 @@ def main():
         logger.info("==================================================")
         logger.info(f"| {'Metric':<20} | {'Value':<20} |")
         logger.info("--------------------------------------------------")
+        logger.info(f"| {'Signal Generator':<20} | {args.signal_generator:<20} |")
         logger.info(f"| {'Total Trades':<20} | {total_trades:>20} |")
         logger.info(f"| {'Total PnL':<20} | ${total_pnl:>19.2f} |")
         logger.info(f"| {'Win Rate':<20} | {(winning_trades/total_trades*100):>19.2f}% |" if total_trades > 0 else "| Win Rate              | N/A                  |")
         logger.info(f"| {'Final Balance':<20} | ${(config['initial_balance'] + total_pnl):>19.2f} |")
+        logger.info("==================================================\n")
+        
+        # Analyze strategies used
+        strategies = {}
+        for trade in all_trades:
+            strategy = trade.get('strategy', 'Unknown')
+            if strategy not in strategies:
+                strategies[strategy] = 0
+            strategies[strategy] += 1
+        
+        logger.info("\nStrategies Used:")
+        logger.info("==================================================")
+        for strategy, count in sorted(strategies.items(), key=lambda x: x[1], reverse=True):
+            logger.info(f"| {strategy:<30} | {count:>10} trades |")
         logger.info("==================================================\n")
         
         # Print detailed analysis for each symbol

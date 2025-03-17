@@ -1,12 +1,72 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, time, UTC
-from typing import Dict, List, Tuple, Optional, Any
+from datetime import datetime, time, UTC, timedelta
+from typing import Dict, List, Tuple, Optional, Any, Union
 from loguru import logger
 from config.config import SESSION_CONFIG, MARKET_STRUCTURE_CONFIG
 
+from .mtf_analysis import MTFAnalysis
+from .mt5_handler import MT5Handler
+
 class MarketAnalysis:
-    def __init__(self, ob_threshold=0.0015):
+    def __init__(self, ob_threshold: float = 0.0015):
+        """
+        Initialize MarketAnalysis with configuration parameters.
+        
+        Args:
+            ob_threshold: Threshold for order block detection
+        """
+        # Constants
+        self.SWING_SIZE = 10
+        self.ATR_PERIOD = 14
+        self.RSI_PERIOD = 14
+        self.MIN_SWING_SEQUENCE = 3
+        self.OB_THRESHOLD = ob_threshold
+        
+        # Session configurations
+        self.SESSIONS = {
+            'Asian': {'start': time(0, 0), 'end': time(8, 0)},
+            'London': {'start': time(8, 0), 'end': time(16, 0)},
+            'New York': {'start': time(13, 0), 'end': time(21, 0)}
+        }
+        
+        self.KILLZONES = {
+            'Asian': {'start': time(0, 0), 'end': time(3, 0)},
+            'London': {'start': time(8, 0), 'end': time(11, 0)},
+            'New York': {'start': time(13, 0), 'end': time(16, 0)}
+        }
+
+        # Market schedule for holidays and partial trading days
+        self.market_schedule = {
+            "holidays": {
+                "2024": {
+                    "new_years": "2024-01-01",
+                    "good_friday": "2024-03-29",
+                    "easter_monday": "2024-04-01",
+                    "memorial_day": "2024-05-27",
+                    "independence_day": "2024-07-04",
+                    "labor_day": "2024-09-02",
+                    "thanksgiving": "2024-11-28",
+                    "christmas": "2024-12-25",
+                    "boxing_day": "2024-12-26"
+                }
+            },
+            "partial_trading_days": {
+                "2024": {
+                    "christmas_eve": {
+                        "date": "2024-12-24",
+                        "close_time": "13:00"
+                    },
+                    "new_years_eve": {
+                        "date": "2024-12-31",
+                        "close_time": "13:00"
+                    }
+                }
+            }
+        }
+        
+        self._reset_stats()
+        
         self.session_config = SESSION_CONFIG
         self.structure_config = MARKET_STRUCTURE_CONFIG
         # Timeframe-specific lookback periods
@@ -34,51 +94,47 @@ class MarketAnalysis:
             'order_blocks': {'bullish': 0, 'bearish': 0, 'tested': 0}
         }
         
-    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        self.mtf_analysis = MTFAnalysis()
+        
+        # Constants for market analysis
+        self.SWING_SIZE = 10
+        self.ATR_PERIOD = 14
+        self.RSI_PERIOD = 14
+        self.MIN_SWING_SEQUENCE = 3
+        
+        # Session times (UTC)
+        self.SESSIONS = {
+            'Asian': {'start': time(0, 0), 'end': time(8, 0)},
+            'London': {'start': time(8, 0), 'end': time(16, 0)},
+            'New York': {'start': time(13, 0), 'end': time(21, 0)}
+        }
+        
+        # Killzone times (UTC)
+        self.KILLZONES = {
+            'Asian': {'start': time(0, 0), 'end': time(3, 0)},
+            'London': {'start': time(8, 0), 'end': time(11, 0)},
+            'New York': {'start': time(13, 0), 'end': time(16, 0)}
+        }
+        
+        self.mt5_handler = MT5Handler()
+        
+    def calculate_atr(self, df: pd.DataFrame, period: int = None) -> pd.Series:
         """Calculate Average True Range."""
         try:
-            if len(df) < period:
-                logger.warning(
-                    f"Not enough data for ATR. Required: {period}, Got: {len(df)}"
-                )
-                return pd.Series(np.nan, index=df.index)
-
-            if not all(col in df.columns for col in ['high', 'low', 'close']):
-                logger.error("Missing required columns for ATR calculation")
-                return pd.Series(np.nan, index=df.index)
-
-            high = df['high'].astype(float)
-            low = df['low'].astype(float)
-            close = df['close'].astype(float).shift(1)
-
-            tr1 = high - low
-            tr2 = abs(high - close)
-            tr3 = abs(low - close)
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-            atr = tr.ewm(span=period, adjust=False).mean()
-            atr = atr.bfill().ffill()
-
-            if atr.isnull().any():
-                logger.warning("Some ATR values could not be calculated")
-                atr = atr.fillna(atr.mean())
-
-            typical_price = (df['high'] + df['low'] + df['close']) / 3
-            atr_pct = (atr / typical_price) * 100
-
-            logger.debug(
-                f"ATR Stats - Mean: {atr.mean():.5f}, Max: {atr.max():.5f}, "
-                f"Min: {atr.min():.5f}"
-            )
-            logger.debug(
-                f"ATR% Stats - Mean: {atr_pct.mean():.2f}%, Max: {atr_pct.max():.2f}%, "
-                f"Min: {atr_pct.min():.2f}%"
-            )
-
-            return atr
+            period = period or self.ATR_PERIOD
+            
+            high_low = df['high'] - df['low']
+            high_close = np.abs(df['high'] - df['close'].shift())
+            low_close = np.abs(df['low'] - df['close'].shift())
+            
+            ranges = pd.concat([high_low, high_close, low_close], axis=1)
+            true_range = ranges.max(axis=1)
+            
+            return true_range.rolling(period).mean()
+            
         except Exception as e:
             logger.error(f"Error calculating ATR: {str(e)}")
-            return pd.Series(np.nan, index=df.index)
+            return pd.Series(index=df.index)
         
     def get_current_session(self) -> Tuple[str, Dict]:
         """Determine the current trading session based on UTC time."""
@@ -86,116 +142,198 @@ class MarketAnalysis:
         
         # Define standard session names
         SESSION_NAMES = {
-            'london': 'london',
-            'new_york': 'new_york',
-            'asia': 'asia',
+            'asia_session': 'asia',
+            'london_session': 'london',
+            'new_york_session': 'new_york',
             'no_session': 'no_session'
         }
         
+        # Add buffer time around sessions (15 minutes)
+        buffer_minutes = 15
+        
+        logger.info(f"Checking current session at UTC time: {current_time.strftime('%H:%M:%S')}")
+        
         for session_name, session_data in self.session_config.items():
-            session_start = datetime.strptime(session_data['start'], '%H:%M').time()
-            session_end = datetime.strptime(session_data['end'], '%H:%M').time()
-            
-            if session_start <= current_time <= session_end:
-                return SESSION_NAMES.get(session_name, session_name), session_data
+            if not session_data.get('enabled', True):
+                logger.debug(f"Session {session_name} is disabled, skipping")
+                continue
                 
+            start_time = datetime.strptime(session_data['start'], '%H:%M').time()
+            end_time = datetime.strptime(session_data['end'], '%H:%M').time()
+            
+            logger.debug(f"Evaluating {session_name}: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}")
+            
+            # Adjust times with buffer
+            start_with_buffer = (
+                datetime.combine(datetime.today(), start_time) - 
+                timedelta(minutes=buffer_minutes)
+            ).time()
+            
+            end_with_buffer = (
+                datetime.combine(datetime.today(), end_time) + 
+                timedelta(minutes=buffer_minutes)
+            ).time()
+            
+            # Handle sessions that cross midnight
+            if start_time > end_time:
+                if current_time >= start_with_buffer or current_time <= end_with_buffer:
+                    logger.info(f"In session: {session_name} (crosses midnight)")
+                    return SESSION_NAMES.get(session_name, session_name), session_data
+            else:
+                if start_with_buffer <= current_time <= end_with_buffer:
+                    logger.info(f"In session: {session_name}")
+                    return SESSION_NAMES.get(session_name, session_name), session_data
+        
+        # Check if we're close to the next session
+        for session_name, session_data in self.session_config.items():
+            if not session_data.get('enabled', True):
+                continue
+                
+            start_time = datetime.strptime(session_data['start'], '%H:%M').time()
+            time_to_session = (
+                datetime.combine(datetime.today(), start_time) - 
+                datetime.combine(datetime.today(), current_time)
+            ).total_seconds() / 60
+            
+            if 0 <= time_to_session <= 30:  # Within 30 minutes of next session
+                logger.info(f"Approaching session: {session_name} (within 30 minutes)")
+                return SESSION_NAMES.get(session_name, session_name), session_data
+        
+        logger.info("No active trading session detected")
         return SESSION_NAMES['no_session'], {}
         
-    def detect_swing_points(self, df: pd.DataFrame, window_size: int = 5) -> Dict:
+    def detect_swing_points(
+        self,
+        df: pd.DataFrame,
+        swing_size: int = None
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Detect swing high and low points in the price data.
-        
+        Detect swing highs and lows in price data.
+
         Args:
-            df (pd.DataFrame): Price data
-            window_size (int): Window size for detecting swings
-            
+            df: DataFrame with OHLC data
+            swing_size: Number of bars to look back/forward (default: self.SWING_SIZE)
+
         Returns:
-            Dict: Dictionary containing swing highs and lows
+            Dict with 'highs' and 'lows' containing swing points
         """
         try:
-            highs = []
-            lows = []
+            swing_size = swing_size or self.SWING_SIZE
             
-            for i in range(window_size, len(df) - window_size):
-                # Get the window of data
-                window = df.iloc[i-window_size:i+window_size+1]
-                current_price = df.iloc[i]['close']
+            # Calculate ATR for dynamic thresholds
+            atr = self.calculate_atr(df)
+            
+            swing_highs = []
+            swing_lows = []
+
+            for i in range(swing_size, len(df) - swing_size):
+                # Get price window
+                window = df.iloc[i - swing_size:i + swing_size + 1]
+                current_price = df['high'].iloc[i]
+                
+                # Dynamic threshold based on ATR
+                threshold = atr.iloc[i] * 0.5
                 
                 # Check for swing high
-                if all(current_price >= window.iloc[j]['high'] for j in range(len(window)) if j != window_size):
-                    highs.append({
-                            'index': i,
+                if self._validate_swing_high(df, i, swing_size, threshold):
+                    swing_highs.append({
+                        'index': i,
                         'price': current_price,
-                            'timestamp': df.index[i],
-                        'size': current_price - min(window['low'])
+                        'time': df.index[i]
                     })
                 
                 # Check for swing low
-                if all(current_price <= window.iloc[j]['low'] for j in range(len(window)) if j != window_size):
-                    lows.append({
-                            'index': i,
+                current_price = df['low'].iloc[i]
+                if self._validate_swing_low(df, i, swing_size, threshold):
+                    swing_lows.append({
+                        'index': i,
                         'price': current_price,
-                            'timestamp': df.index[i],
-                        'size': max(window['high']) - current_price
+                        'time': df.index[i]
                     })
-            
+
             return {
-                'highs': highs,
-                'lows': lows
+                'highs': swing_highs,
+                'lows': swing_lows
             }
-            
+
         except Exception as e:
             logger.error(f"Error detecting swing points: {str(e)}")
             return {'highs': [], 'lows': []}
             
-    def _validate_swing_high(self, df: pd.DataFrame, index: int, lookback: int, threshold: float) -> bool:
-        """Validate a potential swing high point."""
+    def _validate_swing_high(
+        self,
+        df: pd.DataFrame,
+        index: int,
+        lookback: int,
+        threshold: float
+    ) -> bool:
+        """
+        Validate if a point is a swing high.
+        
+        Args:
+            df: DataFrame with price data
+            index: Current index to check
+            lookback: Number of bars to look back/forward
+            threshold: Minimum price difference for valid swing
+            
+        Returns:
+            bool: True if valid swing high
+        """
         try:
-            # Check left side (previous bars)
-            left_valid = all(df['high'].iloc[index] > df['high'].iloc[j] 
-                           for j in range(index - lookback, index))
+            current_high = df['high'].iloc[index]
             
-            # Check right side (following bars)
-            right_valid = all(df['high'].iloc[index] > df['high'].iloc[j] 
-                            for j in range(index + 1, min(index + lookback + 1, len(df))))
-            
-            # Check minimum price movement
-            price_valid = (df['high'].iloc[index] - df['low'].iloc[index-lookback:index+lookback+1].min()) >= threshold
-            
-            # Check for clean swing (no noise)
-            noise_ratio = abs(df['close'].iloc[index] - df['open'].iloc[index]) / \
-                         (df['high'].iloc[index] - df['low'].iloc[index])
-            clean_swing = noise_ratio <= 0.5  # Body should not be more than 50% of the range
-            
-            return left_valid and right_valid and price_valid and clean_swing
+            # Check left side
+            left_window = df['high'].iloc[index - lookback:index]
+            if not all(current_high > price + threshold for price in left_window):
+                return False
+                
+            # Check right side
+            right_window = df['high'].iloc[index + 1:index + lookback + 1]
+            if not all(current_high > price + threshold for price in right_window):
+                return False
+                
+            return True
             
         except Exception as e:
-            logger.error(f"Error validating swing high at index {index}: {str(e)}")
+            logger.error(f"Error validating swing high: {str(e)}")
             return False
             
-    def _validate_swing_low(self, df: pd.DataFrame, index: int, lookback: int, threshold: float) -> bool:
-        """Validate a potential swing low point."""
+    def _validate_swing_low(
+        self,
+        df: pd.DataFrame,
+        index: int,
+        lookback: int,
+        threshold: float
+    ) -> bool:
+        """
+        Validate if a point is a swing low.
+        
+        Args:
+            df: DataFrame with price data
+            index: Current index to check
+            lookback: Number of bars to look back/forward
+            threshold: Minimum price difference for valid swing
+            
+        Returns:
+            bool: True if valid swing low
+        """
         try:
-            # Check left side (previous bars)
-            left_valid = all(df['low'].iloc[index] < df['low'].iloc[j] 
-                           for j in range(index - lookback, index))
+            current_low = df['low'].iloc[index]
             
-            # Check right side (following bars)
-            right_valid = all(df['low'].iloc[index] < df['low'].iloc[j] 
-                            for j in range(index + 1, min(index + lookback + 1, len(df))))
-            
-            # Check minimum price movement
-            price_valid = (df['high'].iloc[index-lookback:index+lookback+1].max() - df['low'].iloc[index]) >= threshold
-            
-            # Check for clean swing (no noise)
-            noise_ratio = abs(df['close'].iloc[index] - df['open'].iloc[index]) / \
-                         (df['high'].iloc[index] - df['low'].iloc[index])
-            clean_swing = noise_ratio <= 0.5  # Body should not be more than 50% of the range
-            
-            return left_valid and right_valid and price_valid and clean_swing
+            # Check left side
+            left_window = df['low'].iloc[index - lookback:index]
+            if not all(current_low < price - threshold for price in left_window):
+                return False
+                
+            # Check right side
+            right_window = df['low'].iloc[index + 1:index + lookback + 1]
+            if not all(current_low < price - threshold for price in right_window):
+                return False
+                
+            return True
             
         except Exception as e:
-            logger.error(f"Error validating swing low at index {index}: {str(e)}")
+            logger.error(f"Error validating swing low: {str(e)}")
             return False
         
     def detect_order_blocks(
@@ -233,22 +371,14 @@ class MarketAnalysis:
                 
                 # Bearish order blocks
                 if df['close'].iloc[i-2] > df['open'].iloc[i-2] and \
-                   df['low'].iloc[i] < df['low'].iloc[i-2]:
-                    
-                    # Calculate OB zone
-                    ob_high = max(df['open'].iloc[i-2], df['close'].iloc[i-2])
-                    ob_low = df['low'].iloc[i-2]
-                    ob_size = ob_high - ob_low
-                    
-                    # Check if OB is significant
-                    if ob_size and ob_size >= self.ob_threshold:
-                        bearish_obs.append({
-                            'index': i-2,
-                            'high': ob_high,
-                            'low': ob_low,
-                            'size': ob_size,
-                            'timestamp': df.index[i-2]
-                        })
+                   df['low'].iloc[i] < df['low'].iloc[i-1]:
+                    block = {
+                        'high': max(df['open'].iloc[i-1], df['close'].iloc[i-1]),
+                        'low': df['low'].iloc[i-1],
+                        'index': i-1,
+                        'timestamp': df.index[i-1]
+                    }
+                    bearish_obs.append(block)
             
             return {
                 'bullish': bullish_obs,
@@ -295,6 +425,19 @@ class MarketAnalysis:
                             'timestamp': df.index[i-1]
                         })
             
+            # Check for breaks
+            for fvg in bullish_fvgs:
+                if df['low'].iloc[i] < fvg['bottom']:
+                    fvg['broken_bottom'] = True
+                if df['low'].iloc[i] < fvg['top']:
+                    fvg['broken_top'] = True
+            
+            for fvg in bearish_fvgs:
+                if df['high'].iloc[i] > fvg['top']:
+                    fvg['broken_top'] = True
+                if df['high'].iloc[i] > fvg['bottom']:
+                    fvg['broken_bottom'] = True
+            
             return {
                 'bullish': bullish_fvgs,
                 'bearish': bearish_fvgs
@@ -304,261 +447,632 @@ class MarketAnalysis:
             logger.error(f"Error detecting FVGs: {str(e)}")
             return {'bullish': [], 'bearish': []}
         
-    def detect_structure_breaks(
+        
+        
+    def analyze_market_structure(
         self,
         df: pd.DataFrame,
-        swing_points: Dict
-    ) -> Dict:
+        symbol: str = None,
+        timeframe: str = None
+    ) -> Dict[str, Any]:
         """
-        Detect structure breaks in the market with improved detection logic.
+        Analyze market structure including swing points, breaks, and order blocks.
         
         Args:
-            df (pd.DataFrame): Price data with OHLCV
-            swing_points (Dict): Dictionary containing swing highs and lows
+            df: DataFrame with OHLCV data
+            symbol: Optional trading symbol for logging
+            timeframe: Optional timeframe for logging
             
         Returns:
-            Dict: Dictionary containing structure breaks information
+            Dict containing structure analysis:
+            {
+                'swing_points': Detected swing points,
+                'structure_breaks': Structure break points,
+                'order_blocks': Detected order blocks,
+                'fair_value_gaps': Fair value gaps,
+                'bias': Market bias,
+                'key_levels': Important price levels,
+                'quality': Structure quality metrics
+            }
         """
-        structure_breaks = {
-            'bullish': [],
-            'bearish': [],
-            'strength': [],
-            'timestamps': []
-        }
-        
         try:
-            if not swing_points or 'highs' not in swing_points or 'lows' not in swing_points:
-                logger.warning("No swing points provided for structure break detection")
-                return structure_breaks
-            
-            # Sort swing points by index
-            highs = sorted(swing_points['highs'], key=lambda x: x['index'])
-            lows = sorted(swing_points['lows'], key=lambda x: x['index'])
-            
-            # Need at least 2 swing points of each type
-            if len(highs) < 2 or len(lows) < 2:
-                logger.warning(f"Insufficient swing points for structure break detection. Highs: {len(highs)}, Lows: {len(lows)}")
-                return structure_breaks
-            
-            logger.info(f"Analyzing structure breaks with {len(highs)} highs and {len(lows)} lows")
-            
-            # Analyze recent swing points (last 5)
-            recent_highs = highs[-5:] if len(highs) >= 5 else highs
-            recent_lows = lows[-5:] if len(lows) >= 5 else lows
-            
-            # Detect bullish structure breaks
-            for i in range(1, len(recent_highs)):
-                curr_high = recent_highs[i]
-                prev_high = recent_highs[i-1]
-                
-                # Find any lows between these highs
-                intermediate_lows = [l for l in recent_lows 
-                                   if l['index'] > prev_high['index'] 
-                                   and l['index'] < curr_high['index']]
-                
-                # Bullish break conditions:
-                # 1. Current high is higher than previous high
-                # 2. We have at least one higher low between the highs
-                if curr_high['price'] > prev_high['price'] and intermediate_lows:
-                    # Check if any intermediate low is higher than previous low
-                    prev_low = next((l for l in recent_lows if l['index'] < prev_high['index']), None)
-                    if prev_low and any(l['price'] > prev_low['price'] for l in intermediate_lows):
-                        strength = ((curr_high['price'] - prev_high['price']) / prev_high['price']) * 100
-                        
-                        structure_breaks['bullish'].append({
-                            'price': curr_high['price'],
-                            'timestamp': curr_high['timestamp'],
-                            'strength': strength,
-                            'index': curr_high['index']
-                        })
-                        structure_breaks['strength'].append(strength)
-                        structure_breaks['timestamps'].append(curr_high['timestamp'])
-                        logger.info(f"Detected bullish break at {curr_high['price']:.5f} with strength {strength:.2f}%")
-            
-            # Detect bearish structure breaks
-            for i in range(1, len(recent_lows)):
-                curr_low = recent_lows[i]
-                prev_low = recent_lows[i-1]
-                
-                # Find any highs between these lows
-                intermediate_highs = [h for h in recent_highs 
-                                    if h['index'] > prev_low['index'] 
-                                    and h['index'] < curr_low['index']]
-                
-                # Bearish break conditions:
-                # 1. Current low is lower than previous low
-                # 2. We have at least one lower high between the lows
-                if curr_low['price'] < prev_low['price'] and intermediate_highs:
-                    # Check if any intermediate high is lower than previous high
-                    prev_high = next((h for h in recent_highs if h['index'] < prev_low['index']), None)
-                    if prev_high and any(h['price'] < prev_high['price'] for h in intermediate_highs):
-                        strength = ((prev_low['price'] - curr_low['price']) / prev_low['price']) * 100
-                        
-                        structure_breaks['bearish'].append({
-                            'price': curr_low['price'],
-                            'timestamp': curr_low['timestamp'],
-                            'strength': strength,
-                            'index': curr_low['index']
-                        })
-                        structure_breaks['strength'].append(strength)
-                        structure_breaks['timestamps'].append(curr_low['timestamp'])
-                        logger.info(f"Detected bearish break at {curr_low['price']:.5f} with strength {strength:.2f}%")
-            
-            # Log structure break statistics
-            logger.info(f"Structure Breaks Found - Bullish: {len(structure_breaks['bullish'])}, "
-                       f"Bearish: {len(structure_breaks['bearish'])}")
-            
-            if structure_breaks['strength']:
-                avg_strength = sum(structure_breaks['strength']) / len(structure_breaks['strength'])
-                logger.info(f"Average Break Strength: {avg_strength:.2f}%")
-            
-        except Exception as e:
-            logger.error(f"Error in structure break detection: {str(e)}")
-            logger.exception("Detailed error trace:")
-            
-        return structure_breaks
-        
-    def analyze_session_conditions(
-        self,
-        df: pd.DataFrame,
-        symbol: str
-    ) -> Dict:
-        """Analyze current session-specific trading conditions."""
-        try:
-            session_name, session_data = self.get_current_session()
-            
-            if not session_data:
-                return {
-                    'session': session_name,
-                    'suitable_for_trading': False,
-                    'volatility_factor': 0.0,
-                    'reason': 'Outside main trading sessions'
-                }
-            
-            # Calculate ATR
-            if 'atr' not in df.columns:
-                # Calculate True Range directly without using apply
-                high_low = df['high'] - df['low']
-                high_close = abs(df['high'] - df['close'].shift(1))
-                low_close = abs(df['low'] - df['close'].shift(1))
-                
-                # Combine into TR
-                df['tr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-                df['atr'] = df['tr'].rolling(window=14).mean()
-            
-            # Get current ATR and calculate volatility state
-            current_atr = df['atr'].iloc[-1]
-            atr_mean = df['atr'].mean()
-            atr_std = df['atr'].std()
-            
-            # Calculate volatility factor based on standard deviations from mean
-            if atr_mean > 0 and atr_std > 0:
-                z_score = (current_atr - atr_mean) / atr_std
-                volatility_factor = 1.0 + (z_score * 0.2)  # Scale factor based on z-score
-            else:
-                volatility_factor = 1.0
-            
-            # Ensure volatility factor is within reasonable bounds
-            volatility_factor = max(0.5, min(2.0, volatility_factor))
-            
-            logger.info(f"Volatility Analysis:")
-            logger.info(f"Current ATR: {current_atr:.5f}")
-            logger.info(f"Mean ATR: {atr_mean:.5f}")
-            logger.info(f"ATR Std Dev: {atr_std:.5f}")
-            logger.info(f"Volatility Factor: {volatility_factor:.2f}")
-            
-            return {
-                'session': session_name,
-                'suitable_for_trading': True,
-                'session_range': session_data.get('trading_hours', {}),
-                'volatility_factor': volatility_factor,
-                'reason': 'Conditions suitable for trading'
-            }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing session conditions: {str(e)}")
-            logger.exception("Detailed error trace:")
-            return {
-                'session': 'unknown',
-                'suitable_for_trading': False,
-                'volatility_factor': 1.0,
-                'reason': f'Error in analysis: {str(e)}'
-            }
-        
-    def analyze_market_structure(self, df: pd.DataFrame, symbol: str = None, timeframe: str = None) -> Dict:
-        """Analyze market structure and return key levels and bias."""
-        try:
-            # Use existing swing points if available from previous analysis
-            if hasattr(self, '_current_swing_points'):
-                swing_points = self._current_swing_points
-            else:
-                # Detect swing points
-                swing_points = self.detect_swing_points(df)
-                self._current_swing_points = swing_points
+            # Get swing points
+            swing_points = self.detect_swing_points(df)
             
             # Detect structure breaks
-            logger.info("Starting market structure analysis...")
-            try:
-                structure_breaks = self.detect_structure_breaks(df, swing_points)
-                logger.info(f"Structure breaks detected - Bullish: {len(structure_breaks['bullish'])}, "
-                          f"Bearish: {len(structure_breaks['bearish'])}")
-            except Exception as e:
-                logger.error(f"Error in market structure analysis: {str(e)}")
-                structure_breaks = {'bullish': [], 'bearish': [], 'strength': [], 'timestamps': []}
+            structure_breaks = self.detect_structure_breaks(df, swing_points)
             
-            # Determine structure type
-            structure_type = self._determine_structure_type(swing_points, structure_breaks)
+            # Detect order blocks
+            order_blocks = self.detect_order_blocks(df, (swing_points['highs'], swing_points['lows']))
             
-            # Find key levels
-            key_levels = self._find_key_levels(df, swing_points, structure_type)
+            # Detect fair value gaps
+            fair_value_gaps = self.detect_fair_value_gaps(df)
             
             # Determine market bias
-            market_bias = "neutral"
-            if structure_type in ["Uptrend", "Accumulation"]:
-                market_bias = "bullish"
-            elif structure_type in ["Downtrend", "Distribution"]:
-                market_bias = "bearish"
+            bias = self._determine_market_bias(swing_points)
             
-            # Calculate momentum as percentage change over last 5 bars
-            momentum = 0.0
-            if len(df) >= 6:
-                momentum = ((df['close'].iloc[-1] - df['close'].iloc[-6]) / df['close'].iloc[-6]) * 100
+            # Find key levels
+            key_levels = self._find_key_levels(df, swing_points, bias)
             
             # Assess structure quality
-            quality_assessment = self._assess_structure_quality(df, swing_points.get('highs', []), swing_points.get('lows', []))
-            quality_score = quality_assessment.get('quality_score', 0.0)
-            
-            # Log market structure analysis once
-            logger.info("🏗️ Market Structure Analysis:")
-            logger.info(f"    Structure Type: {structure_type}")
-            logger.info(f"    Market Bias: {market_bias}")
-            logger.info(f"    Key Levels: {[round(level, 3) for level in key_levels[:10]]}")
-            logger.info(f"    Swing Points: {len(swing_points.get('highs', []))} highs, {len(swing_points.get('lows', []))} lows")
-            logger.info(f"    Structure Breaks: {len(structure_breaks.get('bullish', []))} bullish, {len(structure_breaks.get('bearish', []))} bearish")
-            logger.info(f"    Momentum: {momentum:.2f}%")
-            logger.info(f"    Quality Score: {quality_score:.2f}")
+            quality = self._assess_structure_quality(
+                df,
+                swing_points['highs'],
+                swing_points['lows']
+            )
             
             return {
-                'structure_type': structure_type,
-                'market_bias': market_bias,
-                'key_levels': key_levels[:10],  # Store only top 10 levels
                 'swing_points': swing_points,
                 'structure_breaks': structure_breaks,
-                'momentum': momentum,
-                'quality_score': quality_score
+                'order_blocks': order_blocks,
+                'fair_value_gaps': fair_value_gaps,
+                'bias': bias,
+                'key_levels': key_levels,
+                'quality': quality
             }
             
         except Exception as e:
-            logger.error(f"Error in market structure analysis: {str(e)}")
+            logger.error(f"Error analyzing market structure: {str(e)}")
             return {
-                'structure_type': "Unknown",
-                'market_bias': "neutral",
-                'key_levels': [],
                 'swing_points': {'highs': [], 'lows': []},
                 'structure_breaks': {'bullish': [], 'bearish': []},
-                'momentum': 0.0,
-                'quality_score': 0.0
+                'order_blocks': {'bullish': [], 'bearish': []},
+                'fair_value_gaps': {'bullish': [], 'bearish': []},
+                'bias': 'neutral',
+                'key_levels': [],
+                'quality': {'score': 0.0}
             }
+    
+    def _determine_market_bias(self, swing_points: Dict[str, List[Dict[str, Any]]]) -> str:
+        """
+        Determine market bias based on swing points.
+        
+        Args:
+            swing_points: Dict containing swing highs and lows
+            
+        Returns:
+            str: Market bias ('Bullish', 'Bearish', or 'Neutral')
+        """
+        try:
+            # Get recent swings
+            recent_swings = self._get_recent_swings(swing_points)
+            highs = recent_swings['highs']
+            lows = recent_swings['lows']
+            
+            if len(highs) < 2 or len(lows) < 2:
+                return 'Neutral'
+            
+            # Check for higher highs and higher lows (bullish)
+            higher_highs = all(highs[i]['price'] > highs[i-1]['price'] 
+                             for i in range(1, len(highs)))
+            higher_lows = all(lows[i]['price'] > lows[i-1]['price'] 
+                            for i in range(1, len(lows)))
+            
+            # Check for lower highs and lower lows (bearish)
+            lower_highs = all(highs[i]['price'] < highs[i-1]['price'] 
+                            for i in range(1, len(highs)))
+            lower_lows = all(lows[i]['price'] < lows[i-1]['price'] 
+                           for i in range(1, len(lows)))
+            
+            if higher_highs and higher_lows:
+                return 'Bullish'
+            elif lower_highs and lower_lows:
+                return 'Bearish'
+            else:
+                return 'Neutral'
+                
+        except Exception as e:
+            logger.error(f"Error determining market bias: {str(e)}")
+            return 'Neutral'
+    
+    def _find_key_levels(
+        self,
+        df: pd.DataFrame,
+        swing_points: Dict[str, List[Dict[str, Any]]],
+        bias: str
+    ) -> List[float]:
+        """
+        Find key price levels based on swing points and market bias.
+        
+        Args:
+            df: OHLC price data
+            swing_points: Dictionary containing swing highs and lows
+            bias: Current market bias ('bullish' or 'bearish')
+            
+        Returns:
+            List of key price levels
+        """
+        try:
+            key_levels = set()
+            
+            # Add swing high/low levels
+            for high in swing_points['highs'][-5:]:  # Consider last 5 swing highs
+                key_levels.add(round(high['price'], 5))
+            for low in swing_points['lows'][-5:]:    # Consider last 5 swing lows
+                key_levels.add(round(low['price'], 5))
+                
+            # Add psychological levels
+            current_price = df['close'].iloc[-1]
+            psych_levels = self._get_psychological_levels(current_price)
+            key_levels.update(psych_levels)
+            
+            # Add recent session high/low
+            session_high = df['high'].tail(24).max()  # Last 24 candles
+            session_low = df['low'].tail(24).min()
+            key_levels.add(round(session_high, 5))
+            key_levels.add(round(session_low, 5))
+            
+            return sorted(list(key_levels))
+            
+        except Exception as e:
+            logger.error(f"Error finding key levels: {str(e)}")
+            return []
+    
+    def _get_psychological_levels(self, price: float) -> List[float]:
+        """
+        Get psychological price levels around current price.
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            List[float]: Psychological levels
+        """
+        try:
+            levels = []
+            
+            # Round price to determine magnitude
+            magnitude = 10 ** (len(str(int(price))) - 1)
+            
+            # Add levels at 0.0, 0.25, 0.5, 0.75 intervals
+            base = int(price / magnitude) * magnitude
+            for i in range(-2, 3):
+                level = base + (i * magnitude)
+                levels.append(level)
+                levels.append(level + 0.25 * magnitude)
+                levels.append(level + 0.5 * magnitude)
+                levels.append(level + 0.75 * magnitude)
+            
+            return sorted(levels)
+            
+        except Exception as e:
+            logger.error(f"Error getting psychological levels: {str(e)}")
+            return []
+    
+    async def analyze_market(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """
+        Perform comprehensive market analysis including structure, indicators, and session data.
+        
+        Args:
+            symbol: Trading symbol
+            timeframe: Timeframe to analyze
+            
+        Returns:
+            Dict containing complete market analysis or None if error:
+            {
+                'structure': Market structure analysis,
+                'indicators': Technical indicators,
+                'session': Current trading session info,
+                'trend': Trend analysis,
+                'killzones': Trading killzones analysis,
+                'quality': Market quality score
+            }
+        """
+        try:
+            # Get market data
+            df = await self.get_market_data(symbol, timeframe)
+            if df is None or df.empty:
+                logger.error("No market data available for analysis")
+                return None
+                
+            # Analyze market structure
+            structure = self.analyze_market_structure(df)
+            
+            # Calculate indicators
+            indicators = self.calculate_indicators(df)
+            
+            # Get current session
+            session = self.get_current_session()
+            
+            # Analyze trend
+            trend = self.analyze_trend(df)
+            
+            # Check killzones
+            killzones = self.detect_killzones(df)
+            
+            # Calculate market quality
+            quality = self._calculate_market_quality(
+                trend_strength=structure['quality'].get('trend_strength', 0.0),
+                momentum=self._calculate_momentum(df),
+                volume_trend=self._calculate_volume_trend(df).get('strength', 0.0),
+                volatility_state=self.classify_volatility(df['atr']),
+                market_state=trend.get('state', 'neutral')
+            )
+            
+            return {
+                'structure': structure,
+                'indicators': indicators,
+                'session': session,
+                'trend': trend,
+                'killzones': killzones,
+                'quality': quality
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in market analysis: {str(e)}")
+            return None
+                
+    def calculate_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Calculate technical indicators.
+        
+        Args:
+            df: DataFrame with OHLC data
+            
+        Returns:
+            Dict containing calculated indicators
+        """
+        try:
+            # Calculate ATR
+            atr = self.calculate_atr(df)
+            
+            # Calculate RSI
+            rsi = self.calculate_rsi(df['close'])
+            
+            # Calculate volatility state
+            volatility = self.classify_volatility(atr)
+            
+            return {
+                'atr': atr.iloc[-1],
+                'rsi': rsi.iloc[-1],
+                'volatility': volatility
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+        return {}
+    
+    def calculate_rsi(self, prices: pd.Series, period: int = None) -> pd.Series:
+        """
+        Calculate Relative Strength Index.
+        
+        Args:
+            prices: Price series
+            period: RSI period (default: self.RSI_PERIOD)
+            
+        Returns:
+            pd.Series: RSI values
+        """
+        try:
+            period = period or self.RSI_PERIOD
+            
+            # Calculate price changes
+            delta = prices.diff()
+            
+            # Separate gains and losses
+            gains = delta.where(delta > 0, 0)
+            losses = -delta.where(delta < 0, 0)
+            
+            # Calculate average gains and losses
+            avg_gains = gains.rolling(window=period).mean()
+            avg_losses = losses.rolling(window=period).mean()
+            
+            # Calculate RS and RSI
+            rs = avg_gains / avg_losses
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi
+            
+        except Exception as e:
+            logger.error(f"Error calculating RSI: {str(e)}")
+            return pd.Series(index=prices.index)
+    
+    def analyze_trend(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Analyze price trend using multiple indicators and swing points.
+        
+        Args:
+            df: OHLC price data
+            
+        Returns:
+            Dictionary containing trend analysis results including direction,
+            strength, momentum and consistency
+        """
+        try:
+            # Get swing points
+            swing_points = self.detect_swing_points(df)
+            recent_swings = self._get_recent_swings(swing_points)
+            
+            # Initialize trend metrics
+            trend_metrics = {
+                'direction': 'Ranging',
+                'strength': 0.0,
+                'momentum': 0.0,
+                'consistency': 0.0
+            }
+            
+            # Calculate trend direction and strength
+            if len(recent_swings['highs']) >= 2 and len(recent_swings['lows']) >= 2:
+                highs = recent_swings['highs']
+                lows = recent_swings['lows']
+                
+                # Check trend patterns
+                higher_highs = highs[-1]['price'] > highs[-2]['price']
+                higher_lows = lows[-1]['price'] > lows[-2]['price']
+                lower_highs = highs[-1]['price'] < highs[-2]['price']
+                lower_lows = lows[-1]['price'] < lows[-2]['price']
+                
+                if higher_highs and higher_lows:
+                    trend_metrics['direction'] = 'Uptrend'
+                    trend_metrics['strength'] = self._calculate_trend_strength(highs, lows)
+                elif lower_highs and lower_lows:
+                    trend_metrics['direction'] = 'Downtrend'
+                    trend_metrics['strength'] = self._calculate_trend_strength(highs, lows)
+                
+                # Calculate additional metrics
+                trend_metrics['momentum'] = self._calculate_momentum(df)
+                trend_metrics['consistency'] = self._calculate_trend_consistency(df)
+            
+            return trend_metrics
+            
+        except Exception as e:
+            logger.error(f"Error analyzing trend: {str(e)}")
+            return {
+                'direction': 'Ranging',
+                'strength': 0.0,
+                'momentum': 0.0,
+                'consistency': 0.0
+            }
+
+    def _calculate_momentum(self, df: pd.DataFrame) -> float:
+        """Calculate price momentum using RSI and price changes."""
+        try:
+            # Calculate RSI
+            rsi = self.calculate_rsi(df['close'])
+            
+            # Calculate recent price changes
+            price_changes = df['close'].pct_change()
+            recent_momentum = price_changes.tail(5).mean()
+            
+            # Combine RSI and price momentum
+            rsi_score = (rsi.iloc[-1] - 50) / 50  # Normalize RSI to [-1, 1]
+            momentum = (rsi_score + recent_momentum) / 2
+            
+            return float(momentum)
+            
+        except Exception as e:
+            logger.error(f"Error calculating momentum: {str(e)}")
+            return 0.0
+
+    def _calculate_trend_consistency(self, df: pd.DataFrame) -> float:
+        """Calculate consistency of price movements."""
+        try:
+            # Get price changes
+            changes = df['close'].pct_change()
+            
+            # Calculate directional consistency
+            positive_moves = (changes > 0).sum()
+            total_moves = len(changes)
+            
+            if total_moves > 0:
+                consistency = abs((positive_moves / total_moves) - 0.5) * 2
+                return float(consistency)
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating trend consistency: {str(e)}")
+            return 0.0
+
+    def classify_volatility(self, atr: pd.Series) -> str:
+        """
+        Classify market volatility based on ATR values.
+
+        Args:
+            atr (pd.Series): Series of ATR values.
+
+        Returns:
+            str: 'low', 'medium', 'high', or 'unknown'.
+        """
+        try:
+            avg_atr = atr.mean()
+            if avg_atr < 0.001:
+                return "low"
+            elif avg_atr < 0.003:
+                return "medium"
+            else:
+                return "high"
+        except Exception as e:
+            logger.error(f"Error classifying volatility: {str(e)}")
+            return "unknown"
+
+    def detect_killzones(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Detect active trading killzones and their characteristics.
+        
+        Args:
+            df: OHLC price data
+            
+        Returns:
+            Dictionary containing:
+            - active_zones: List of currently active killzones
+            - next_zone: Name of next upcoming killzone
+            - time_to_next: Minutes until next killzone
+            - volatility: Volatility metrics for each zone
+        """
+        try:
+            current_time = datetime.now().time()
+            
+            killzones = {
+                'active_zones': [],
+                'next_zone': None,
+                'time_to_next': None,
+                'volatility': {}
+            }
+            
+            min_time_to_next = float('inf')
+            
+            for zone_name, zone_times in self.KILLZONES.items():
+                # Check if in killzone
+                in_zone = self.timeinrange(
+                    current_time,
+                    zone_times['start'],
+                    zone_times['end']
+                )
+                
+                if in_zone:
+                    zone_data = {
+                        'name': zone_name,
+                        'start': zone_times['start'].strftime('%H:%M'),
+                        'end': zone_times['end'].strftime('%H:%M'),
+                        'volatility': self._calculate_zone_volatility(df, zone_times)
+                    }
+                    killzones['active_zones'].append(zone_data)
+                    killzones['volatility'][zone_name] = zone_data['volatility']
+            else:
+                    # Check if next upcoming zone
+                    time_to_zone = self._calculate_time_to_zone(
+                        current_time,
+                        zone_times['start']
+                    )
+                    if 0 < time_to_zone < min_time_to_next:
+                        min_time_to_next = time_to_zone
+                        killzones['next_zone'] = zone_name
+                        killzones['time_to_next'] = time_to_zone
+            
+            return killzones
+            
+        except Exception as e:
+            logger.error(f"Error detecting killzones: {str(e)}")
+            return {
+                'active_zones': [],
+                'next_zone': None,
+                'time_to_next': None,
+                'volatility': {}
+            }
+
+    def _calculate_zone_volatility(
+        self,
+        df: pd.DataFrame,
+        zone_times: Dict[str, time]
+    ) -> float:
+        """
+        Calculate volatility during a specific trading zone.
+        
+        Args:
+            df: OHLC price data
+            zone_times: Dictionary with zone start and end times
+            
+        Returns:
+            float: Volatility score for the zone
+        """
+        try:
+            # Filter data for zone times
+            zone_data = df[
+                (df.index.time >= zone_times['start']) & 
+                (df.index.time <= zone_times['end'])
+            ]
+            
+            if len(zone_data) > 0:
+                # Calculate normalized ATR
+                atr = self.calculate_atr(zone_data)
+                avg_price = zone_data['close'].mean()
+                return float(atr.mean() / avg_price * 100)  # As percentage
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating zone volatility: {str(e)}")
+            return 0.0
+
+    def _calculate_time_to_zone(
+        self,
+        current_time: time,
+        zone_start: time
+    ) -> float:
+        """
+        Calculate minutes until the start of a trading zone.
+        
+        Args:
+            current_time: Current time
+            zone_start: Zone start time
+            
+        Returns:
+            float: Minutes until zone starts, accounting for day rollover
+        """
+        try:
+            current_minutes = current_time.hour * 60 + current_time.minute
+            zone_minutes = zone_start.hour * 60 + zone_start.minute
+            
+            if zone_minutes > current_minutes:
+                return float(zone_minutes - current_minutes)
+            else:
+                return float((24 * 60) - (current_minutes - zone_minutes))
+                
+        except Exception as e:
+            logger.error(f"Error calculating time to zone: {str(e)}")
+            return float('inf')
+
+    def detect_displacement(self, df: pd.DataFrame) -> Dict[str, bool]:
+        """
+        Detect price displacement from moving averages.
+        
+        Args:
+            df: DataFrame with OHLC data
+            
+        Returns:
+            Dict indicating displacement states
+        """
+        try:
+            # Calculate moving averages
+            ma20 = df['close'].rolling(20).mean()
+            ma50 = df['close'].rolling(50).mean()
+            
+            current_price = df['close'].iloc[-1]
+            current_ma20 = ma20.iloc[-1]
+            current_ma50 = ma50.iloc[-1]
+            
+            # Calculate displacement percentages
+            ma20_displacement = (current_price - current_ma20) / current_ma20 * 100
+            ma50_displacement = (current_price - current_ma50) / current_ma50 * 100
+            
+            return {
+                'ma20_displaced': abs(ma20_displacement) > 1.0,  # More than 1% away
+                'ma50_displaced': abs(ma50_displacement) > 2.0,  # More than 2% away
+                'ma20_displacement': ma20_displacement,
+                'ma50_displacement': ma50_displacement
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting displacement: {str(e)}")
+            return {
+                'ma20_displaced': False,
+                'ma50_displaced': False,
+                'ma20_displacement': 0.0,
+                'ma50_displacement': 0.0
+            }
+    
+    def timeinrange(self, current_time: time, start_time: time, end_time: time) -> bool:
+        """
+        Check if current time is within a given range.
+        
+        Args:
+            current_time: Time to check
+            start_time: Start of range
+            end_time: End of range
+            
+        Returns:
+            bool: True if time is in range
+        """
+        try:
+            if start_time <= end_time:
+                return start_time <= current_time <= end_time
+            else:  # Handle ranges that cross midnight
+                return current_time >= start_time or current_time <= end_time
+            
+        except Exception as e:
+            logger.error(f"Error checking time range: {str(e)}")
+            return False
         
     def _reset_stats(self):
         """Reset statistics tracking."""
@@ -593,74 +1107,86 @@ class MarketAnalysis:
         logger.info(f"- Tested blocks: {self.stats['order_blocks']['tested']}")
         
     def _assess_structure_quality(self, df: pd.DataFrame, swing_highs: List[Dict], swing_lows: List[Dict]) -> Dict:
-        """Assess the quality of detected market structure with stricter criteria."""
+        """Assess the quality of detected market structure with improved criteria."""
         try:
             quality_score = 0.5  # Start with neutral score
             reasons = []
             
-            # Check minimum number of swing points with higher requirement
-            min_points = max(self.min_swing_points * 2, 4)  # Increased minimum points
-            if len(swing_highs) < min_points or len(swing_lows) < min_points:
-                quality_score -= 0.2
-                reasons.append("Insufficient swing points for reliable structure")
+            # 1. Check swing point quantity and distribution (25% weight)
+            min_points = max(self.min_swing_points * 2, 4)
+            if len(swing_highs) >= min_points and len(swing_lows) >= min_points:
+                swing_score = min(1.0, (len(swing_highs) + len(swing_lows)) / (min_points * 2))
+                quality_score += swing_score * 0.25
+                reasons.append(f"Found {len(swing_highs)} highs and {len(swing_lows)} lows")
+            else:
+                quality_score -= 0.25
+                reasons.append("Insufficient swing points")
             
-            # Check swing point distribution
-            if len(swing_highs) > 0 and len(swing_lows) > 0:
-                # Calculate average distances
-                high_distances = [h2['index'] - h1['index'] 
-                                for h1, h2 in zip(swing_highs[:-1], swing_highs[1:])]
-                low_distances = [l2['index'] - l1['index'] 
-                               for l1, l2 in zip(swing_lows[:-1], swing_lows[1:])]
-                
-                if high_distances and low_distances:
-                    avg_distance = (sum(high_distances) + sum(low_distances)) / (len(high_distances) + len(low_distances))
-                    
-                    # Check for clustering
-                    max_cluster_size = avg_distance * 0.4  # Stricter clustering threshold
-                    cluster_penalty = sum(1 for d in high_distances + low_distances if d < max_cluster_size)
-                    quality_score -= 0.1 * cluster_penalty
-                    if cluster_penalty > 0:
-                        reasons.append(f"Found {cluster_penalty} clustered swing points")
-                    
-                    # Check for irregular spacing
-                    std_dev = np.std(high_distances + low_distances)
-                    if std_dev > avg_distance * 0.5:  # Check for irregular spacing
-                        quality_score -= 0.15
-                        reasons.append("Irregular swing point spacing")
-            
-            # Check swing point magnitudes
-            if swing_highs and swing_lows:
-                magnitudes = [p['size'] for p in swing_highs + swing_lows]
-                avg_magnitude = sum(magnitudes) / len(magnitudes)
-                min_magnitude = avg_magnitude * 0.4  # Stricter minimum size
-                
-                small_swings = sum(1 for m in magnitudes if m < min_magnitude)
-                if small_swings > 0:
-                    quality_score -= 0.1 * (small_swings / len(magnitudes))
-                    reasons.append(f"Found {small_swings} undersized swing points")
-            
-            # Check trend consistency
-            if len(df) >= 50:
+            # 2. Check trend consistency (25% weight)
+            if len(df) >= 20:
                 ma20 = df['close'].rolling(window=20).mean()
                 ma50 = df['close'].rolling(window=50).mean()
+                current_price = df['close'].iloc[-1]
                 
-                # Calculate trend consistency
-                trend_changes = sum(1 for i in range(1, len(ma20)) if 
-                                  (ma20.iloc[i] > ma50.iloc[i]) != (ma20.iloc[i-1] > ma50.iloc[i-1]))
+                # Calculate trend direction consistency
+                trend_changes = sum(1 for i in range(1, len(ma20)) 
+                                  if (ma20.iloc[i] > ma50.iloc[i]) != (ma20.iloc[i-1] > ma50.iloc[i-1]))
+                trend_score = max(0, 1 - (trend_changes / 10))  # Penalize frequent trend changes
                 
-                if trend_changes > 3:  # More than 3 trend changes in the period
-                    quality_score -= 0.2
-                    reasons.append("Inconsistent trend direction")
+                # Add trend strength component
+                trend_strength = abs(current_price - ma20.iloc[-1]) / ma20.iloc[-1]
+                trend_score = min(1.0, trend_score + trend_strength)
+                
+                quality_score += trend_score * 0.25
+                reasons.append(f"Trend consistency score: {trend_score:.2f}")
             
-            # Add momentum check
-            if len(df) >= 20:
-                momentum = ((df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20]) * 100
-                if abs(momentum) < 0.1:  # Less than 0.1% price change
-                    quality_score -= 0.15
-                    reasons.append("Low momentum")
+            # 3. Check swing point magnitudes (25% weight)
+            if swing_highs and swing_lows:
+                # Calculate average swing size
+                high_sizes = [abs(h['price'] - min(l['price'] for l in swing_lows if l['index'] < h['index'])) 
+                            for h in swing_highs if any(l['index'] < h['index'] for l in swing_lows)]
+                low_sizes = [abs(max(h['price'] for h in swing_highs if h['index'] < l['index']) - l['price']) 
+                           for l in swing_lows if any(h['index'] < l['index'] for h in swing_highs)]
+                
+                if high_sizes and low_sizes:
+                    avg_size = sum(high_sizes + low_sizes) / len(high_sizes + low_sizes)
+                    size_score = min(1.0, avg_size / (df['atr'].mean() * 2))
+                    quality_score += size_score * 0.25
+                    reasons.append(f"Swing magnitude score: {size_score:.2f}")
+            
+            # 4. Check volume confirmation (25% weight)
+            if 'volume' in df.columns:
+                recent_volume = df['volume'].tail(20).mean()
+                overall_volume = df['volume'].mean()
+                volume_ratio = recent_volume / overall_volume
+                
+                volume_score = min(1.0, volume_ratio)
+                quality_score += volume_score * 0.25
+                reasons.append(f"Volume confirmation score: {volume_score:.2f}")
+            
+            # Additional context-based adjustments
+            # Penalize if price is in a very tight range
+            price_range = (df['high'].tail(20).max() - df['low'].tail(20).min()) / df['close'].iloc[-1]
+            if price_range < 0.001:  # Less than 0.1% range
+                quality_score *= 0.8
+                reasons.append("Price range too tight")
+            
+            # Bonus for clear structure type
+            structure_type = self._determine_structure_type(
+                {'highs': swing_highs, 'lows': swing_lows}, 
+                {'bullish': [], 'bearish': []}
+            )
+            if structure_type in ['Uptrend', 'Downtrend', 'Distribution', 'Accumulation']:
+                quality_score *= 1.2
+                reasons.append(f"Clear {structure_type} structure")
             
             # Ensure score is between 0 and 1
             quality_score = max(0.0, min(1.0, quality_score))
+            
+            logger.debug("Structure Quality Assessment:")
+            logger.debug(f"Base Quality Score: {quality_score:.2f}")
+            for reason in reasons:
+                logger.debug(f"- {reason}")
             
             return {
                 'quality_score': quality_score,
@@ -695,95 +1221,6 @@ class MarketAnalysis:
         except Exception as e:
             logger.error(f"Error validating swing sequence: {str(e)}")
             return False
-
-    def analyze(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict:
-        """Analyze market conditions and structure."""
-        try:
-            logger.info(f"🔍 Starting market analysis for {symbol} on {timeframe}")
-            
-            if df is None or len(df) < 100:
-                logger.error("Insufficient data for market analysis")
-                return {}
-            
-            current_price = df['close'].iloc[-1]
-            daily_range = ((df['high'].max() - df['low'].min()) / df['close'].mean()) * 100
-            
-            logger.info(f"📊 Market Stats for {symbol}:")
-            logger.info(f"    Current Price: {current_price:.5f}")
-            logger.info(f"    Daily Range: {daily_range:.2f}%")
-            logger.info(f"    Analyzing {len(df)} candles ({timeframe} timeframe)")
-            
-            # Reset statistics
-            self._reset_stats()
-            
-            # Detect swing points with enhanced logging
-            logger.info("Starting swing point detection...")
-            swing_points = self.detect_swing_points(df)
-            if not swing_points['highs'] and not swing_points['lows']:
-                logger.warning("No swing points detected in the current market")
-            else:
-                logger.info(f"Detected {len(swing_points['highs'])} swing highs and {len(swing_points['lows'])} swing lows")
-            
-            # Store swing points for reuse
-            self._current_swing_points = swing_points
-            
-            # Detect structure breaks
-            logger.info("Starting market structure analysis...")
-            try:
-                structure_breaks = self.detect_structure_breaks(df, swing_points)
-                logger.info(f"Structure breaks detected - Bullish: {len(structure_breaks['bullish'])}, "
-                          f"Bearish: {len(structure_breaks['bearish'])}")
-            except Exception as e:
-                logger.error(f"Error in market structure analysis: {str(e)}")
-                structure_breaks = {'bullish': [], 'bearish': [], 'strength': [], 'timestamps': []}
-            
-            # Volume Analysis
-            logger.info("Starting volume analysis...")
-            volume_data = self._calculate_volume_trend(df)
-            logger.info("📊 Volume Analysis Details:")
-            logger.info(f"    Average Volume: {volume_data.get('average_volume', 0):.2f}")
-            logger.info(f"    Recent Volume: {volume_data.get('recent_volume', 0):.2f}")
-            logger.info(f"    Volume Trend: {volume_data.get('trend', 'Unknown')}")
-            logger.info(f"    Volume Strength: {volume_data.get('strength', 0):.2f}x average")
-            
-            # Market Structure Analysis
-            market_structure = self.analyze_market_structure(df, symbol, timeframe)
-            logger.info("🏗️ Market Structure:")
-            logger.info(f"    Structure Type: {market_structure.get('structure_type', 'Unknown')}")
-            logger.info(f"    Key Levels: {[round(level, 3) for level in market_structure.get('key_levels', [])[:10]]}")  # Show only top 10 levels
-            
-            # Session Analysis
-            session_conditions = self.analyze_session_conditions(df, symbol)
-            logger.info(f"📈 Session Analysis:")
-            logger.info(f"    Current Session: {session_conditions.get('session', 'Unknown')}")
-            logger.info(f"    Volatility State: {session_conditions.get('volatility_factor', 0.0):.2f}")
-            logger.info(f"    Trading Allowed: {'✅' if session_conditions.get('suitable_for_trading', False) else '❌'}")
-            
-            # Final Analysis Summary
-            analysis_result = {
-                'trend': market_structure.get('market_bias', 'neutral'),
-                'momentum': market_structure.get('momentum', 0.0),
-                'volume_analysis': volume_data,
-                'structure_breaks': structure_breaks,
-                'session_conditions': session_conditions,
-                'key_levels': market_structure.get('key_levels', [])[:10],  # Store only top 10 levels
-                'quality_score': market_structure.get('quality_score', 0.0)
-            }
-            
-            logger.info(f"✅ Market analysis completed for {symbol} on {timeframe}")
-            return analysis_result
-            
-        except Exception as e:
-            logger.error(f"Error in market analysis: {str(e)}")
-            return {
-                'trend': 'neutral',
-                'momentum': 0.0,
-                'volume_analysis': {},
-                'structure_breaks': {'bullish': [], 'bearish': []},
-                'session_conditions': {},
-                'key_levels': [],
-                'quality_score': 0.0
-            }
 
     def _calculate_volume_trend(self, df: pd.DataFrame) -> Dict:
         """Calculate volume trend and related metrics with stricter criteria."""
@@ -1016,146 +1453,38 @@ class MarketAnalysis:
             logger.error(f"Error getting recent swing points: {str(e)}")
             return {'highs': [], 'lows': []}
 
-    def _determine_market_bias(self, recent_swings: Dict) -> str:
-        """Determine market bias based on recent swing points.
-        
-        Args:
-            recent_swings (Dict): Dictionary containing recent swing highs and lows
-            
-        Returns:
-            str: Market bias ('bullish', 'bearish', or 'neutral')
-        """
-        try:
-            highs = recent_swings.get('highs', [])
-            lows = recent_swings.get('lows', [])
-            
-            if not highs or not lows:
-                return 'neutral'
-            
-            # Get the most recent high and low
-            latest_high = highs[0] if highs else None
-            latest_low = lows[0] if lows else None
-            
-            # Get the previous high and low for comparison
-            prev_high = highs[1] if len(highs) > 1 else None
-            prev_low = lows[1] if len(lows) > 1 else None
-            
-            # Determine bias based on swing point sequence
-            if latest_high and prev_high and latest_low and prev_low:
-                # Higher highs and higher lows = bullish
-                if latest_high['price'] > prev_high['price'] and latest_low['price'] > prev_low['price']:
-                    return 'bullish'
-                # Lower highs and lower lows = bearish
-                elif latest_high['price'] < prev_high['price'] and latest_low['price'] < prev_low['price']:
-                    return 'bearish'
-            
-            # If we can't determine a clear bias, return neutral
-            return 'neutral'
-            
-        except Exception as e:
-            logger.error(f"Error determining market bias: {str(e)}")
-            return 'neutral'
-
-    def _find_order_blocks(self, df: pd.DataFrame) -> Dict:
-        """Find bullish and bearish order blocks in price action.
-        
-        Args:
-            df (pd.DataFrame): Price data with OHLC columns
-            
-        Returns:
-            Dict: Dictionary containing bullish and bearish order blocks
-        """
-        try:
-            bullish_blocks = []
-            bearish_blocks = []
-            
-            for i in range(2, len(df)-1):
-                # Bullish order block
-                if df['close'].iloc[i-1] < df['open'].iloc[i-1] and \
-                   df['high'].iloc[i] > df['high'].iloc[i-1]:
-                    block = {
-                        'high': df['high'].iloc[i-1],
-                        'low': min(df['open'].iloc[i-1], df['close'].iloc[i-1]),
-                        'index': i-1,
-                        'timestamp': df.index[i-1]
-                    }
-                    bullish_blocks.append(block)
-                
-                # Bearish order block
-                if df['close'].iloc[i-1] > df['open'].iloc[i-1] and \
-                   df['low'].iloc[i] < df['low'].iloc[i-1]:
-                    block = {
-                        'high': max(df['open'].iloc[i-1], df['close'].iloc[i-1]),
-                        'low': df['low'].iloc[i-1],
-                        'index': i-1,
-                        'timestamp': df.index[i-1]
-                    }
-                    bearish_blocks.append(block)
-            
-            return {
-                'bullish': bullish_blocks,
-                'bearish': bearish_blocks
-            }
-            
-        except Exception as e:
-            logger.error(f"Error finding order blocks: {str(e)}")
-            return {'bullish': [], 'bearish': []}
-    
-    def _find_fair_value_gaps(self, df: pd.DataFrame) -> Dict:
-        """Find fair value gaps in price action.
-        
-        Args:
-            df (pd.DataFrame): Price data with OHLC columns
-            
-        Returns:
-            Dict: Dictionary containing bullish and bearish fair value gaps
-        """
-        try:
-            bullish_fvgs = []
-            bearish_fvgs = []
-            
-            for i in range(2, len(df)-1):
-                # Bullish FVG
-                if df['low'].iloc[i] > df['high'].iloc[i-2]:
-                    fvg = {
-                        'top': df['low'].iloc[i],
-                        'bottom': df['high'].iloc[i-2],
-                        'index': i-1,
-                        'timestamp': df.index[i-1]
-                    }
-                    bullish_fvgs.append(fvg)
-                
-                # Bearish FVG
-                if df['high'].iloc[i] < df['low'].iloc[i-2]:
-                    fvg = {
-                        'top': df['low'].iloc[i-2],
-                        'bottom': df['high'].iloc[i],
-                        'index': i-1,
-                        'timestamp': df.index[i-1]
-                    }
-                    bearish_fvgs.append(fvg)
-            
-            return {
-                'bullish': bullish_fvgs,
-                'bearish': bearish_fvgs
-            }
-            
-        except Exception as e:
-            logger.error(f"Error finding fair value gaps: {str(e)}")
-            return {'bullish': [], 'bearish': []}
-
-    def _determine_structure_type(self, swing_points: Dict, structure_breaks: Dict) -> str:
+    def _determine_structure_type(self, swing_points: Dict, structure_breaks: Dict) -> Dict:
         """Determine market structure type based on swing points and recent breaks."""
         try:
             if not swing_points or 'highs' not in swing_points or 'lows' not in swing_points:
                 logger.warning("Insufficient swing points data.")
-                return "Sideways"  # Changed from "Insufficient Data"
+                return {
+                    "structure_type": "Sideways",
+                    "higher_highs": False,
+                    "higher_lows": False,
+                    "lower_highs": False,
+                    "lower_lows": False,
+                    "bullish_breaks": 0,
+                    "bearish_breaks": 0,
+                    "price_volatility": 0,
+                    "movement_threshold": 0
+                }
 
             highs = swing_points.get('highs') or []
             lows = swing_points.get('lows') or []
 
             if len(highs) < 2 or len(lows) < 2:
-                return "Forming"  # Not enough points to determine structure
+                return {
+                    "structure_type": "Forming",
+                    "higher_highs": False,
+                    "higher_lows": False,
+                    "lower_highs": False,
+                    "lower_lows": False,
+                    "bullish_breaks": 0,
+                    "bearish_breaks": 0,
+                    "price_volatility": 0,
+                    "movement_threshold": 0
+                }
                 
             # Safely sort swing points using .get() to avoid KeyError
             last_highs = sorted(highs, key=lambda x: x.get('index', 0))
@@ -1166,7 +1495,17 @@ class MarketAnalysis:
             last_lows = last_lows[-3:] if len(last_lows) >= 3 else last_lows
             
             if len(last_highs) < 2 or len(last_lows) < 2:
-                return "Forming"
+                return {
+                    "structure_type": "Forming",
+                    "higher_highs": False,
+                    "higher_lows": False,
+                    "lower_highs": False,
+                    "lower_lows": False,
+                    "bullish_breaks": 0,
+                    "bearish_breaks": 0,
+                    "price_volatility": 0,
+                    "movement_threshold": 0
+                }
             
             # Calculate price movements
             high_movement = last_highs[-1]['price'] - last_highs[0]['price']
@@ -1195,8 +1534,8 @@ class MarketAnalysis:
             for break_data in bearish_breaks:
                 all_breaks.append({'type': 'bearish', **break_data})
                 
-            # Sort by index and take last 3
-            recent_breaks = sorted(all_breaks, key=lambda x: x['index'])[-3:] if all_breaks else []
+            # Sort by time instead of index, or fall back to sorting by price if time not available
+            recent_breaks = sorted(all_breaks, key=lambda x: x.get('time', pd.Timestamp.min))[-3:] if all_breaks else []
             
             # Count break types
             bullish_count = sum(1 for b in recent_breaks if b['type'] == 'bullish')
@@ -1258,12 +1597,32 @@ class MarketAnalysis:
                             structure_type = "Ranging"
             
             logger.info(f"Determined Structure Type: {structure_type}")
-            return structure_type
+            return {
+                "structure_type": structure_type,
+                "higher_highs": higher_highs,
+                "higher_lows": higher_lows,
+                "lower_highs": lower_highs,
+                "lower_lows": lower_lows,
+                "bullish_breaks": bullish_count,
+                "bearish_breaks": bearish_count,
+                "price_volatility": price_volatility,
+                "movement_threshold": movement_threshold
+            }
                 
         except Exception as e:
             logger.error(f"Error determining structure type: {str(e)}")
             logger.exception("Detailed error trace:")
-            return "Ranging"  # Changed from "Unknown" to provide a more useful default
+            return {
+                "structure_type": "Ranging",
+                "higher_highs": False,
+                "higher_lows": False,
+                "lower_highs": False,
+                "lower_lows": False,
+                "bullish_breaks": 0,
+                "bearish_breaks": 0,
+                "price_volatility": 0,
+                "movement_threshold": 0
+            }
 
     def _find_key_levels(self, df: pd.DataFrame, swing_points: Dict, structure_type: str) -> List[float]:
         """Find key price levels based on market structure."""
@@ -1349,3 +1708,1206 @@ class MarketAnalysis:
         except Exception as e:
             logger.error(f"Error classifying volatility: {str(e)}")
             return "unknown"
+
+    def detect_bos(self, df: pd.DataFrame, swing_points: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Detect Break of Structure (BOS) with improved validation and error handling.
+        
+        Args:
+            df (pd.DataFrame): Price data
+            swing_points (Dict): Dictionary containing swing highs and lows
+            
+        Returns:
+            Dict: Dictionary containing bullish and bearish BOS points
+        """
+        try:
+            if not swing_points or not swing_points.get('highs') or not swing_points.get('lows'):
+                logger.warning("Insufficient swing points for BOS detection")
+                return {'bullish': [], 'bearish': []}
+                
+            # Sort swing points by index
+            highs = sorted(swing_points['highs'], key=lambda x: x['index'])
+            lows = sorted(swing_points['lows'], key=lambda x: x['index'])
+            
+            if len(highs) < 2 or len(lows) < 2:
+                logger.warning("Need at least 2 swing highs and 2 swing lows for BOS detection")
+                return {'bullish': [], 'bearish': []}
+            
+            bullish_bos = []
+            bearish_bos = []
+            
+            # Calculate ATR for dynamic threshold if not present
+            if 'atr' not in df.columns:
+                df['atr'] = self.calculate_atr(df)
+            avg_atr = df['atr'].mean()
+            bos_threshold = avg_atr * 0.2  # Reduced threshold for more sensitive detection
+            
+            # Detect Bullish BOS
+            for i in range(2, len(highs)):
+                try:
+                    current_high = highs[i]
+                    prev_high = highs[i-1]
+                    prev_prev_high = highs[i-2]
+                    
+                    # Find relevant lows between these highs
+                    relevant_lows = [l for l in lows if prev_prev_high['index'] < l['index'] < current_high['index']]
+                    if not relevant_lows:
+                        continue
+                        
+                    lowest_low = min(relevant_lows, key=lambda x: x['price'])
+                    
+                    # Check for bullish BOS pattern:
+                    # 1. Previous structure was making lower highs
+                    # 2. Current high breaks above the previous high
+                    if (prev_high['price'] < prev_prev_high['price'] and  # Lower high
+                        current_high['price'] > prev_prev_high['price']):  # Breaks above previous structure
+                        
+                        # Calculate strength based on the break size
+                        break_size = current_high['price'] - prev_prev_high['price']
+                        strength = break_size / bos_threshold
+                        
+                        bullish_bos.append({
+                            'index': current_high['index'],
+                            'price': float(current_high['price']),
+                            'timestamp': current_high['timestamp'],
+                            'strength': float(strength),
+                            'prev_high': float(prev_prev_high['price']),
+                            'break_level': float(prev_high['price']),
+                            'low_point': float(lowest_low['price'])
+                        })
+                        logger.debug(f"Bullish BOS detected at index {current_high['index']}, "
+                                   f"price: {current_high['price']:.5f}, strength: {strength:.2f}")
+                
+                except Exception as e:
+                    logger.warning(f"Error processing bullish BOS at index {i}: {str(e)}")
+                    continue
+            
+            # Detect Bearish BOS
+            for i in range(2, len(lows)):
+                try:
+                    current_low = lows[i]
+                    prev_low = lows[i-1]
+                    prev_prev_low = lows[i-2]
+                    
+                    # Find relevant highs between these lows
+                    relevant_highs = [h for h in highs if prev_prev_low['index'] < h['index'] < current_low['index']]
+                    if not relevant_highs:
+                        continue
+                        
+                    highest_high = max(relevant_highs, key=lambda x: x['price'])
+                    
+                    # Check for bearish BOS pattern:
+                    # 1. Previous structure was making higher lows
+                    # 2. Current low breaks below the previous low
+                    if (prev_low['price'] > prev_prev_low['price'] and  # Higher low
+                        current_low['price'] < prev_prev_low['price']):  # Breaks below previous structure
+                        
+                        # Calculate strength based on the break size
+                        break_size = prev_prev_low['price'] - current_low['price']
+                        strength = break_size / bos_threshold
+                        
+                        bearish_bos.append({
+                            'index': current_low['index'],
+                            'price': float(current_low['price']),
+                            'timestamp': current_low['timestamp'],
+                            'strength': float(strength),
+                            'prev_low': float(prev_prev_low['price']),
+                            'break_level': float(prev_low['price']),
+                            'high_point': float(highest_high['price'])
+                        })
+                        logger.debug(f"Bearish BOS detected at index {current_low['index']}, "
+                                   f"price: {current_low['price']:.5f}, strength: {strength:.2f}")
+                
+                except Exception as e:
+                    logger.warning(f"Error processing bearish BOS at index {i}: {str(e)}")
+                    continue
+            
+            logger.info(f"Detected {len(bullish_bos)} bullish and {len(bearish_bos)} bearish BOS points")
+            if bullish_bos:
+                logger.debug(f"Latest bullish BOS: price={bullish_bos[-1]['price']:.5f}, "
+                           f"strength={bullish_bos[-1]['strength']:.2f}")
+            if bearish_bos:
+                logger.debug(f"Latest bearish BOS: price={bearish_bos[-1]['price']:.5f}, "
+                           f"strength={bearish_bos[-1]['strength']:.2f}")
+            
+                return {
+                'bullish': bullish_bos,
+                'bearish': bearish_bos
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in BOS detection: {str(e)}")
+            return {'bullish': [], 'bearish': []}
+
+    def detect_bos_and_choch(self, df: pd.DataFrame, swing_points: Dict[str, List[Dict[str, Any]]], confirmation_type: str = 'Candle Close') -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Detect Break of Structure (BOS) and Change of Character (CHoCH) points.
+
+        Args:
+            df: OHLC price data
+            swing_points: Dictionary containing swing highs and lows
+            confirmation_type: Type of confirmation ('Candle Close' or 'Price Action')
+
+        Returns:
+            Dictionary containing BOS and CHoCH points
+        """
+        try:
+            bos_points = {'bullish': [], 'bearish': []}
+            choch_points = {'bullish': [], 'bearish': []}
+            
+            recent_swings = self._get_recent_swings(swing_points)
+            
+            # Detect BOS points
+            for i in range(len(df) - 1):
+                # BOS detection logic
+                if self._is_bullish_bos(df, i, recent_swings, confirmation_type):
+                    bos_points['bullish'].append({
+                        'index': i,
+                        'price': df['low'].iloc[i],
+                        'type': 'BOS'
+                    })
+                elif self._is_bearish_bos(df, i, recent_swings, confirmation_type):
+                    bos_points['bearish'].append({
+                        'index': i,
+                        'price': df['high'].iloc[i],
+                        'type': 'BOS'
+                    })
+            
+            # Detect CHoCH points based on BOS points
+            if confirmation_type == 'Candle Close':
+                choch_points = self._detect_choch_points(df, bos_points)
+            
+            return {
+                'bos': bos_points,
+                'choch': choch_points
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting BOS and CHoCH: {str(e)}")
+            return {'bos': {'bullish': [], 'bearish': []}, 'choch': {'bullish': [], 'bearish': []}}
+
+    def detect_structure_breaks(
+        self,
+        df: pd.DataFrame,
+        swing_points: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Detect structure breaks in the market.
+        
+        Args:
+            df: DataFrame with OHLC data
+            swing_points: Dict containing swing highs and lows
+            
+        Returns:
+            Dict containing bullish and bearish structure breaks
+        """
+        try:
+            breaks = {
+                'bullish': [],
+                'bearish': []
+            }
+            
+            # Get recent swings
+            recent_swings = self._get_recent_swings(swing_points)
+            highs = recent_swings['highs']
+            lows = recent_swings['lows']
+            
+            # Need at least 2 swings to detect breaks
+            if len(highs) < 2 or len(lows) < 2:
+                return breaks
+            
+            # Check for bullish breaks (breaking above previous structure)
+            for i in range(1, len(highs)):
+                if highs[i]['price'] > highs[i-1]['price']:
+                    breaks['bullish'].append({
+                        'price': highs[i]['price'],
+                        'time': highs[i]['time'],
+                        'index': highs[i].get('index', i),
+                        'prev_price': highs[i-1]['price'],
+                        'prev_time': highs[i-1]['time']
+                    })
+            
+            # Check for bearish breaks (breaking below previous structure)
+            for i in range(1, len(lows)):
+                if lows[i]['price'] < lows[i-1]['price']:
+                    breaks['bearish'].append({
+                        'price': lows[i]['price'],
+                        'time': lows[i]['time'],
+                        'index': lows[i].get('index', i),
+                        'prev_price': lows[i-1]['price'],
+                        'prev_time': lows[i-1]['time']
+                    })
+            
+            return breaks
+            
+        except Exception as e:
+            logger.error(f"Error detecting structure breaks: {str(e)}")
+            return {'bullish': [], 'bearish': []}
+
+    def detect_market_shift(
+        self,
+        df: pd.DataFrame,
+        swing_points: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Detect market structure shifts (combines bullish and bearish MSS detection).
+        
+        Args:
+            df: DataFrame with OHLC data
+            swing_points: Dict containing swing highs and lows
+            
+        Returns:
+            Dict containing bullish and bearish market structure shifts
+        """
+        try:
+            shifts = {
+                    'bullish': [],
+                'bearish': []
+            }
+            
+            # Get recent swings
+            recent_swings = self._get_recent_swings(swing_points)
+            highs = recent_swings['highs']
+            lows = recent_swings['lows']
+            
+            # Need at least 3 swings to detect shifts
+            if len(highs) < 3 or len(lows) < 3:
+                return shifts
+            
+            # Detect bullish shifts (higher lows forming)
+            for i in range(2, len(lows)):
+                if (lows[i]['price'] > lows[i-1]['price'] and 
+                    lows[i-1]['price'] > lows[i-2]['price']):
+                    shifts['bullish'].append({
+                        'price': lows[i]['price'],
+                        'time': lows[i]['time'],
+                        'prev_price': lows[i-1]['price'],
+                        'prev_time': lows[i-1]['time']
+                    })
+            
+            # Detect bearish shifts (lower highs forming)
+            for i in range(2, len(highs)):
+                if (highs[i]['price'] < highs[i-1]['price'] and 
+                    highs[i-1]['price'] < highs[i-2]['price']):
+                    shifts['bearish'].append({
+                        'price': highs[i]['price'],
+                        'time': highs[i]['time'],
+                        'prev_price': highs[i-1]['price'],
+                        'prev_time': highs[i-1]['time']
+                    })
+            
+            return shifts
+            
+        except Exception as e:
+            logger.error(f"Error detecting market shifts: {str(e)}")
+            return {'bullish': [], 'bearish': []}
+    
+    def _get_recent_swings(
+        self,
+        swing_points: Dict[str, List[Dict[str, Any]]],
+        lookback: int = 5
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get the most recent swing points.
+        
+        Args:
+            swing_points: Dict containing all swing points
+            lookback: Number of recent swings to return
+            
+        Returns:
+            Dict containing recent swing highs and lows
+        """
+        try:
+            recent_highs = swing_points['highs'][-lookback:] if swing_points['highs'] else []
+            recent_lows = swing_points['lows'][-lookback:] if swing_points['lows'] else []
+            
+            return {
+                'highs': recent_highs,
+                'lows': recent_lows
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting recent swings: {str(e)}")
+            return {'highs': [], 'lows': []}
+    
+    def _assess_structure_quality(
+        self,
+        df: pd.DataFrame,
+        swing_highs: List[Dict[str, Any]],
+        swing_lows: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Assess the quality of market structure.
+        
+        Args:
+            df: DataFrame with OHLC data
+            swing_highs: List of swing high points
+            swing_lows: List of swing low points
+            
+        Returns:
+            Dict containing structure quality metrics
+        """
+        try:
+            # Need minimum number of swings
+            if len(swing_highs) < self.MIN_SWING_SEQUENCE or len(swing_lows) < self.MIN_SWING_SEQUENCE:
+                return {
+                        'quality': 0.0,
+                        'trend_strength': 0.0,
+                        'swing_regularity': 0.0
+                    }
+            
+            # Calculate trend strength
+            trend_strength = self._calculate_trend_strength(swing_highs, swing_lows)
+            
+            # Calculate swing regularity
+            swing_regularity = self._calculate_swing_regularity(swing_highs, swing_lows)
+            
+            # Overall quality score
+            quality = (trend_strength + swing_regularity) / 2
+            
+            return {
+                'quality': quality,
+                'trend_strength': trend_strength,
+                'swing_regularity': swing_regularity
+            }
+            
+        except Exception as e:
+            logger.error(f"Error assessing structure quality: {str(e)}")
+            return {
+                'quality': 0.0,
+                'trend_strength': 0.0,
+                'swing_regularity': 0.0
+            }
+    
+    def _calculate_trend_strength(
+        self,
+        swing_highs: List[Dict[str, Any]],
+        swing_lows: List[Dict[str, Any]]
+    ) -> float:
+        """
+        Calculate trend strength based on swing point alignment.
+        
+        Args:
+            swing_highs: List of swing high points
+            swing_lows: List of swing low points
+            
+        Returns:
+            float: Trend strength score (0.0 to 1.0)
+        """
+        try:
+            # Check higher highs and higher lows for uptrend
+            higher_highs = all(swing_highs[i]['price'] > swing_highs[i-1]['price'] 
+                             for i in range(1, len(swing_highs)))
+            higher_lows = all(swing_lows[i]['price'] > swing_lows[i-1]['price'] 
+                            for i in range(1, len(swing_lows)))
+            
+            # Check lower highs and lower lows for downtrend
+            lower_highs = all(swing_highs[i]['price'] < swing_highs[i-1]['price'] 
+                            for i in range(1, len(swing_highs)))
+            lower_lows = all(swing_lows[i]['price'] < swing_lows[i-1]['price'] 
+                           for i in range(1, len(swing_lows)))
+            
+            # Calculate strength score
+            if (higher_highs and higher_lows) or (lower_highs and lower_lows):
+                return 1.0
+            elif higher_highs or higher_lows or lower_highs or lower_lows:
+                return 0.5
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"Error calculating trend strength: {str(e)}")
+            return 0.0
+    
+    def _calculate_swing_regularity(
+        self,
+        swing_highs: List[Dict[str, Any]],
+        swing_lows: List[Dict[str, Any]]
+    ) -> float:
+        """
+        Calculate regularity of swing point formation.
+        
+        Args:
+            swing_highs: List of swing high points
+            swing_lows: List of swing low points
+            
+        Returns:
+            float: Swing regularity score (0.0 to 1.0)
+        """
+        try:
+            # Calculate time between swings
+            high_intervals = [swing_highs[i]['time'] - swing_highs[i-1]['time'] 
+                            for i in range(1, len(swing_highs))]
+            low_intervals = [swing_lows[i]['time'] - swing_lows[i-1]['time'] 
+                           for i in range(1, len(swing_lows))]
+            
+            # Convert Timedelta objects to seconds (float values)
+            high_intervals_seconds = [interval.total_seconds() for interval in high_intervals]
+            low_intervals_seconds = [interval.total_seconds() for interval in low_intervals]
+            
+            # Calculate standard deviation of intervals
+            if high_intervals_seconds and low_intervals_seconds:
+                high_std = np.std(high_intervals_seconds)
+                low_std = np.std(low_intervals_seconds)
+                avg_std = (high_std + low_std) / 2
+                
+                # Convert to regularity score (lower std = higher regularity)
+                # Use a scaling factor to normalize the result
+                scaling_factor = 3600.0  # 1 hour in seconds
+                regularity = 1.0 / (1.0 + (avg_std / scaling_factor))
+                return min(regularity, 1.0)
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating swing regularity: {str(e)}")
+            return 0.0
+
+    def detect_mss_bullish(self, df: pd.DataFrame, swing_points: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        Detect bullish Market Structure Shift (MSS) patterns.
+        
+        Args:
+            df (pd.DataFrame): Price data
+            swing_points (Dict): Dictionary containing swing highs and lows
+            
+        Returns:
+            List[Dict[str, Any]]: List of detected bullish MSS points
+        """
+        try:
+            if not swing_points or not swing_points.get('highs') or not swing_points.get('lows'):
+                logger.warning("Insufficient swing points for bullish MSS detection")
+                return []
+            
+            # Sort swing points by index
+            highs = sorted(swing_points['highs'], key=lambda x: x['index'])
+            lows = sorted(swing_points['lows'], key=lambda x: x['index'])
+            
+            if len(highs) < 3 or len(lows) < 3:
+                logger.warning("Need at least 3 swing highs and lows for MSS detection")
+                return []
+            
+            mss_points = []
+            
+            # Calculate ATR for dynamic threshold if not present
+            if 'atr' not in df.columns:
+                df['atr'] = self.calculate_atr(df)
+            avg_atr = df['atr'].mean()
+            mss_threshold = avg_atr * 0.3  # 30% of ATR for MSS confirmation
+            
+            # Look for MSS pattern in recent swing points
+            for i in range(2, len(highs)):
+                try:
+                    current_high = highs[i]
+                    prev_high = highs[i-1]
+                    prev_prev_high = highs[i-2]
+                    
+                    # Find relevant lows between these highs
+                    relevant_lows = [l for l in lows if prev_prev_high['index'] < l['index'] < current_high['index']]
+                    if not relevant_lows:
+                        continue
+                    
+                    lowest_low = min(relevant_lows, key=lambda x: x['price'])
+                    
+                    # Get previous lows for comparison
+                    previous_lows = [l for l in lows if l['index'] < lowest_low['index']]
+                    if not previous_lows:
+                        # No previous lows to compare with, can't confirm higher low
+                        continue
+                    
+                    # Check for bullish MSS pattern:
+                    # 1. Previous structure was making lower highs and lower lows
+                    # 2. Current high breaks above the previous high significantly
+                    # 3. Recent low is higher than the previous low
+                    previous_low_prices = [l['price'] for l in previous_lows]
+                    if not previous_low_prices:
+                        continue
+                        
+                    if (prev_high['price'] < prev_prev_high['price'] and  # Lower high
+                        current_high['price'] > prev_prev_high['price'] and  # Breaks above previous structure
+                        lowest_low['price'] > min(previous_low_prices)):  # Higher low
+                        
+                        # Calculate strength based on the break size
+                        break_size = current_high['price'] - prev_prev_high['price']
+                        if break_size >= mss_threshold:
+                            strength = break_size / mss_threshold
+                            
+                            mss_points.append({
+                                'index': current_high['index'],
+                                'price': float(current_high['price']),
+                                'timestamp': current_high['timestamp'],
+                                'strength': float(strength),
+                                'prev_high': float(prev_prev_high['price']),
+                                'low_point': float(lowest_low['price']),
+                                'confirmation': True if df['close'].iloc[current_high['index']] > prev_prev_high['price'] else False
+                            })
+                            logger.debug(f"Bullish MSS detected at index {current_high['index']}, "
+                                       f"price: {current_high['price']:.5f}, strength: {strength:.2f}")
+                
+                except Exception as e:
+                    logger.warning(f"Error processing bullish MSS at index {i}: {str(e)}")
+                    continue
+            
+            logger.info(f"Detected {len(mss_points)} bullish MSS points")
+            if mss_points:
+                logger.debug(f"Latest bullish MSS: price={mss_points[-1]['price']:.5f}, "
+                           f"strength={mss_points[-1]['strength']:.2f}")
+            
+            return mss_points
+            
+        except Exception as e:
+            logger.error(f"Error in bullish MSS detection: {str(e)}")
+            return []
+
+    def detect_mss_bearish(self, df: pd.DataFrame, swing_points: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        Detect bearish Market Structure Shift (MSS) patterns.
+        
+        Args:
+            df (pd.DataFrame): Price data
+            swing_points (Dict): Dictionary containing swing highs and lows
+            
+        Returns:
+            List[Dict[str, Any]]: List of detected bearish MSS points
+        """
+        try:
+            if not swing_points or not swing_points.get('highs') or not swing_points.get('lows'):
+                logger.warning("Insufficient swing points for bearish MSS detection")
+                return []
+            
+            # Sort swing points by index
+            highs = sorted(swing_points['highs'], key=lambda x: x['index'])
+            lows = sorted(swing_points['lows'], key=lambda x: x['index'])
+            
+            if len(highs) < 3 or len(lows) < 3:
+                logger.warning("Need at least 3 swing highs and lows for MSS detection")
+                return []
+            
+            mss_points = []
+            
+            # Calculate ATR for dynamic threshold if not present
+            if 'atr' not in df.columns:
+                df['atr'] = self.calculate_atr(df)
+            avg_atr = df['atr'].mean()
+            mss_threshold = avg_atr * 0.3  # 30% of ATR for MSS confirmation
+            
+            # Look for MSS pattern in recent swing points
+            for i in range(2, len(lows)):
+                try:
+                    current_low = lows[i]
+                    prev_low = lows[i-1]
+                    prev_prev_low = lows[i-2]
+                    
+                    # Find relevant highs between these lows
+                    relevant_highs = [h for h in highs if prev_prev_low['index'] < h['index'] < current_low['index']]
+                    if not relevant_highs:
+                        continue
+                    
+                    highest_high = max(relevant_highs, key=lambda x: x['price'])
+                    
+                    # Get previous highs for comparison
+                    previous_highs = [h for h in highs if h['index'] < highest_high['index']]
+                    if not previous_highs:
+                        # No previous highs to compare with, can't confirm lower high
+                        continue
+                    
+                    # Check for bearish MSS pattern:
+                    # 1. Previous structure was making higher highs and higher lows
+                    # 2. Current low breaks below the previous low significantly
+                    # 3. Recent high is lower than the previous high
+                    previous_high_prices = [h['price'] for h in previous_highs]
+                    if not previous_high_prices:
+                        continue
+                        
+                    if (prev_low['price'] > prev_prev_low['price'] and  # Higher low
+                        current_low['price'] < prev_prev_low['price'] and  # Breaks below previous structure
+                        highest_high['price'] < max(previous_high_prices)):  # Lower high
+                        
+                        # Calculate strength based on the break size
+                        break_size = prev_prev_low['price'] - current_low['price']
+                        if break_size >= mss_threshold:
+                            strength = break_size / mss_threshold
+                            
+                            mss_points.append({
+                                'index': current_low['index'],
+                                'price': float(current_low['price']),
+                                'timestamp': current_low['timestamp'],
+                                'strength': float(strength),
+                                'prev_low': float(prev_prev_low['price']),
+                                'high_point': float(highest_high['price']),
+                                'confirmation': True if df['close'].iloc[current_low['index']] < prev_prev_low['price'] else False
+                            })
+                            logger.debug(f"Bearish MSS detected at index {current_low['index']}, "
+                                       f"price: {current_low['price']:.5f}, strength: {strength:.2f}")
+                
+                except Exception as e:
+                    logger.warning(f"Error processing bearish MSS at index {i}: {str(e)}")
+                    continue
+            
+            logger.info(f"Detected {len(mss_points)} bearish MSS points")
+            if mss_points:
+                logger.debug(f"Latest bearish MSS: price={mss_points[-1]['price']:.5f}, "
+                           f"strength={mss_points[-1]['strength']:.2f}")
+            
+            return mss_points
+            
+        except Exception as e:
+            logger.error(f"Error in bearish MSS detection: {str(e)}")
+            return []
+
+    def detect_killzones(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Detect active killzones based on current time.
+        Returns a dictionary indicating which killzones are currently active.
+        This function is currently deactivated and will always return False for all killzones.
+        """
+        try:
+            # Killzones are deactivated
+            logger.info("Killzones detection is currently deactivated")
+            
+            # Return all killzones as inactive
+            return {
+                'london_open': False,
+                'london_close': False,
+                'new_york': False,
+                'asian': False
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in deactivated killzones function: {str(e)}")
+            return {name: False for name in ['london_open', 'london_close', 'new_york', 'asian']}
+
+    def timeinrange(self, current_time: time, start_time: time, end_time: time) -> bool:
+        """Check if current time is within a given range, handling midnight crossing correctly."""
+        # Normal range where start time is before end time
+        if start_time <= end_time:
+            return start_time <= current_time <= end_time
+        
+        # Range crosses midnight
+        else:
+            return current_time >= start_time or current_time <= end_time
+    
+    def analyze_trend(self, df: pd.DataFrame) -> str:
+        """Analyze trend using moving averages and multiple confirmations.
+        
+        Returns:
+            str: 'bullish', 'bearish', or 'neutral'
+        """
+        try:
+            # Calculate moving averages
+            df['MA20'] = df['close'].rolling(window=20).mean()
+            df['MA50'] = df['close'].rolling(window=50).mean()
+            df['MA200'] = df['close'].rolling(window=200).mean()
+            
+            # Get current values
+            current_close = df['close'].iloc[-1]
+            current_ma20 = df['MA20'].iloc[-1]
+            current_ma50 = df['MA50'].iloc[-1]
+            current_ma200 = df['MA200'].iloc[-1]
+            
+            # Calculate short-term momentum (last 5 candles)
+            short_term_change = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
+            
+            # Calculate medium-term momentum (last 20 candles)
+            medium_term_change = (df['close'].iloc[-1] - df['close'].iloc[-20]) / df['close'].iloc[-20] * 100
+            
+            # Calculate price position relative to MAs
+            above_ma20 = current_close > current_ma20
+            above_ma50 = current_close > current_ma50
+            above_ma200 = current_close > current_ma200
+            
+            # Calculate MA alignments
+            bullish_alignment = current_ma20 > current_ma50 and current_ma50 > current_ma200
+            bearish_alignment = current_ma20 < current_ma50 and current_ma50 < current_ma200
+            
+            # Define trend thresholds
+            MOMENTUM_THRESHOLD = 0.1  # 0.1% change
+            
+            # Determine trend with multiple confirmations
+            bullish_conditions = [
+                above_ma20,
+                above_ma50,
+                short_term_change > MOMENTUM_THRESHOLD,
+                medium_term_change > 0,
+                bullish_alignment
+            ]
+            
+            bearish_conditions = [
+                not above_ma20,
+                not above_ma50,
+                short_term_change < -MOMENTUM_THRESHOLD,
+                medium_term_change < 0,
+                bearish_alignment
+            ]
+            
+            # Count confirmations
+            bullish_count = sum(bullish_conditions)
+            bearish_count = sum(bearish_conditions)
+            
+            # Require at least 3 confirmations for a trend
+            if bullish_count >= 3:
+                return 'bullish'
+            elif bearish_count >= 3:
+                return 'bearish'
+            else:
+                # Check if price is showing strong momentum in either direction
+                if abs(short_term_change) > MOMENTUM_THRESHOLD * 2:
+                    return 'bullish' if short_term_change > 0 else 'bearish'
+                return 'neutral'
+                
+        except Exception as e:
+            logger.error(f"Error analyzing trend: {str(e)}")
+            return 'neutral'
+        
+    def calculate_rsi(self, prices, period=14):
+        """Calculate RSI indicator."""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    def detect_displacement(self, df: pd.DataFrame) -> Dict[str, bool]:
+        displacement = {'bullish': False, 'bearish': False}
+        
+        if len(df) >= 2:
+            current_candle = df.iloc[-1]
+            prev_candle = df.iloc[-2]
+            
+            body_size = abs(current_candle['close'] - current_candle['open'])
+            upper_wick = current_candle['high'] - max(current_candle['close'], current_candle['open'])
+            lower_wick = min(current_candle['close'], current_candle['open']) - current_candle['low']
+            
+            if body_size > 0:
+                wick_body_ratio = (upper_wick + lower_wick) / body_size
+                
+                if wick_body_ratio < 0.1:
+                    if current_candle['close'] > prev_candle['close']:
+                        displacement['bullish'] = True
+                    elif current_candle['close'] < prev_candle['close']:
+                        displacement['bearish'] = True
+        
+        return displacement
+    
+    def analyze_session(self) -> str:
+        """Analyze the current trading session based on current UTC time.
+        
+        Returns:
+            str: One of 'asian', 'london', 'new_york', 'overlap', 'evening' or 'no_session'
+                indicating the current active trading session.
+        """
+        try:
+            # Get current UTC time
+            current_time = datetime.now(UTC)
+            current_hour = current_time.hour
+            
+            logger.debug(f"Current UTC time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}, Hour: {current_hour}")
+            
+            # Define session hours in UTC
+            asian_session = range(0, 8)      # 00:00-08:00 UTC
+            london_session = range(8, 16)    # 08:00-16:00 UTC  
+            ny_session = range(13, 21)       # 13:00-21:00 UTC
+            evening_session = range(21, 24)  # 21:00-00:00 UTC (NY evening/Asian pre-session)
+            
+            # Check for session overlaps first
+            if current_hour in range(13, 16):  # London-NY overlap
+                return "overlap"
+                
+            # Check individual sessions
+            if current_hour in asian_session:
+                return "asian"
+            elif current_hour in london_session:
+                return "london"
+            elif current_hour in ny_session:
+                return "new_york"
+            elif current_hour in evening_session:
+                return "evening"
+                
+            # Outside of main sessions
+            logger.debug(f"Current hour {current_hour} is outside all defined sessions")
+            return "evening"  # Instead of no_session, consider evening hours as part of trading
+            
+        except Exception as e:
+            logger.error(f"Error analyzing session: {str(e)}")
+            return "no_session"
+    
+    def calculate_indicators(self, df: pd.DataFrame) -> Dict:
+        """Calculate technical indicators for momentum analysis with enhanced type safety."""
+        try:
+            indicators = {}
+            
+            # Calculate RSI with NaN handling
+            delta = df['close'].diff().ffill()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean().fillna(0)
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean().fillna(0)
+            rs = np.where(loss != 0, gain / loss, 1)  # Avoid division by zero
+            indicators['rsi'] = float(100 - (100 / (1 + rs[-1])))
+            
+            # Calculate MACD with explicit type conversion
+            exp1 = df['close'].ewm(span=12, adjust=False).mean().astype('float64')
+            exp2 = df['close'].ewm(span=26, adjust=False).mean().astype('float64')
+            macd_line = (exp1 - exp2).astype('float64')
+            signal_line = macd_line.ewm(span=9, adjust=False).mean().astype('float64')
+            
+            indicators['macd'] = {
+                'macd_line': float(macd_line.iloc[-1]),
+                'signal_line': float(signal_line.iloc[-1])
+            }
+            
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+            return {'rsi': 50, 'macd': {'macd_line': 0.0, 'signal_line': 0.0}}
+        
+
+    def is_market_open(self, symbol: str = None) -> bool:
+        """
+        Check if the market is currently open based on schedule and holidays.
+        Returns True if market is open, False otherwise.
+        
+        Forex market is open 24/5 - from Sunday evening to Friday evening local time,
+        except for holidays.
+        
+        Cryptocurrency markets are open 24/7, so we'll bypass day/time restrictions for crypto symbols.
+        
+        Args:
+            symbol: Optional symbol to check. If provided, used to determine if it's a crypto symbol.
+        """
+        try:
+            # Get current local time
+            local_time = datetime.now()
+            current_date = local_time.date()
+            current_weekday = current_date.weekday()  # 0 = Monday, 6 = Sunday
+            
+            logger.info(f"Market open check for {symbol}: Local time: {local_time.strftime('%Y-%m-%d %H:%M:%S')}, Weekday: {current_weekday}")
+            
+            # Check if it's a cryptocurrency symbol
+            is_crypto = False
+            if symbol is not None:
+                # True cryptocurrency symbols typically contain BTC, ETH, etc.
+                crypto_identifiers = ["BTC", "ETH", "XBT", "LTC", "DOT", "SOL", "ADA", "DOGE", "CRYPTO"]
+                is_crypto = any(identifier in symbol for identifier in crypto_identifiers)
+                
+                # Check for explicit cryptocurrency pairs that might not have the above identifiers
+                crypto_pairs = ["BTCUSD", "ETHUSD"]
+                if any(pair in symbol for pair in crypto_pairs):
+                    is_crypto = True
+            
+            if is_crypto:
+                logger.debug(f"Cryptocurrency symbol {symbol} detected - market is always open")
+                return True
+            
+            # Check if it's a forex or metal symbol (if not crypto)
+            # Default to forex if we can't determine
+            market_type = "forex"
+            logger.debug(f"Symbol {symbol} identified as {market_type}")
+            
+            # Check if it's a holiday
+            current_year = str(current_date.year)
+            if current_year in self.market_schedule["holidays"]:
+                holiday_dates = [
+                    datetime.strptime(date, "%Y-%m-%d").date()
+                    for date in self.market_schedule["holidays"][current_year].values()
+                ]
+                if current_date in holiday_dates:
+                    logger.info(f"Market is closed for holiday on {current_date}")
+                    return False
+            
+            # Check if it's a partial trading day
+            if current_year in self.market_schedule["partial_trading_days"]:
+                for day_info in self.market_schedule["partial_trading_days"][current_year].values():
+                    if datetime.strptime(day_info["date"], "%Y-%m-%d").date() == current_date:
+                        close_time = datetime.strptime(day_info["close_time"], "%H:%M").time()
+                        if local_time.time() >= close_time:
+                            logger.info(f"Market is closed for partial trading day at {close_time} local time")
+                            return False
+            
+            # Market is closed on Saturday for Forex
+            if current_weekday == 5:  # Saturday
+                logger.info(f"Forex market is closed for {symbol} (Saturday)")
+                return False
+            
+            # Market is closed on Sunday until 11 PM local time for Forex
+            if current_weekday == 6:  # Sunday
+                market_open = local_time.replace(hour=23, minute=0, second=0, microsecond=0)
+                if local_time < market_open:
+                    logger.info(f"Forex market is closed for {symbol} (Sunday before 11 PM: {local_time} < {market_open})")
+                    return False
+            
+            # Market is closed Friday after 11 PM local time for Forex
+            if current_weekday == 4:  # Friday
+                market_close = local_time.replace(hour=23, minute=0, second=0, microsecond=0)
+                if local_time >= market_close:
+                    logger.info(f"Forex market is closed for {symbol} (Friday after 11 PM: {local_time} >= {market_close})")
+                    return False
+            
+            # If we got here, market is open
+            logger.info(f"Market is open for {symbol}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking market schedule for {symbol}: {str(e)}")
+            # If there's an error checking the schedule, assume market is closed for safety
+            return False
+
+    def _is_bullish_bos(
+        self,
+        df: pd.DataFrame,
+        index: int,
+        recent_swings: Dict[str, List[Dict[str, Any]]],
+        confirmation_type: str
+    ) -> bool:
+        """
+        Check if a bullish Break of Structure (BOS) occurs at the given index.
+        
+        Args:
+            df: OHLC price data
+            index: Candle index to check
+            recent_swings: Dictionary of recent swing highs and lows
+            confirmation_type: Type of confirmation ('Candle Close' or 'Price Action')
+            
+        Returns:
+            bool: True if bullish BOS is detected, False otherwise
+        """
+        try:
+            if index < 2 or index >= len(df):
+                return False
+                
+            # Get recent swing lows for reference
+            swing_lows = recent_swings['lows']
+            if not swing_lows:
+                return False
+                
+            # Get the most recent swing low
+            recent_low = swing_lows[-1]
+            
+            # Check if price breaks above the recent structure
+            if confirmation_type == 'Candle Close':
+                # Confirm with candle close
+                return (df['close'].iloc[index] > recent_low['price'] and
+                       df['low'].iloc[index-1] <= recent_low['price'])
+            else:
+                # Confirm with price action (wicks)
+                return (df['high'].iloc[index] > recent_low['price'] and
+                       df['low'].iloc[index-1] <= recent_low['price'])
+                       
+        except Exception as e:
+            logger.error(f"Error checking bullish BOS: {str(e)}")
+            return False
+            
+    def _is_bearish_bos(
+        self,
+        df: pd.DataFrame,
+        index: int,
+        recent_swings: Dict[str, List[Dict[str, Any]]],
+        confirmation_type: str
+    ) -> bool:
+        """
+        Check if a bearish Break of Structure (BOS) occurs at the given index.
+        
+        Args:
+            df: OHLC price data
+            index: Candle index to check
+            recent_swings: Dictionary of recent swing highs and lows
+            confirmation_type: Type of confirmation ('Candle Close' or 'Price Action')
+            
+        Returns:
+            bool: True if bearish BOS is detected, False otherwise
+        """
+        try:
+            if index < 2 or index >= len(df):
+                return False
+                
+            # Get recent swing highs for reference
+            swing_highs = recent_swings['highs']
+            if not swing_highs:
+                return False
+                
+            # Get the most recent swing high
+            recent_high = swing_highs[-1]
+            
+            # Check if price breaks below the recent structure
+            if confirmation_type == 'Candle Close':
+                # Confirm with candle close
+                return (df['close'].iloc[index] < recent_high['price'] and
+                       df['high'].iloc[index-1] >= recent_high['price'])
+            else:
+                # Confirm with price action (wicks)
+                return (df['low'].iloc[index] < recent_high['price'] and
+                       df['high'].iloc[index-1] >= recent_high['price'])
+                       
+        except Exception as e:
+            logger.error(f"Error checking bearish BOS: {str(e)}")
+            return False
+            
+    def _detect_choch_points(
+        self,
+        df: pd.DataFrame,
+        bos_points: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Detect Change of Character (CHoCH) points based on BOS points.
+        
+        Args:
+            df: OHLC price data
+            bos_points: Dictionary containing bullish and bearish BOS points
+            
+        Returns:
+            Dictionary containing bullish and bearish CHoCH points
+        """
+        try:
+            choch_points = {'bullish': [], 'bearish': []}
+            
+            # Combine all BOS points and sort by index
+            all_bos = []
+            for point in bos_points['bullish']:
+                all_bos.append(('bullish', point))
+            for point in bos_points['bearish']:
+                all_bos.append(('bearish', point))
+                
+            all_bos.sort(key=lambda x: x[1]['index'])
+            
+            # Find CHoCH points (first counter-trend BOS after a trend)
+            prev_type = None
+            for bos_type, point in all_bos:
+                if prev_type and bos_type != prev_type:
+                    # Counter-trend BOS found - mark as CHoCH
+                    choch_point = point.copy()
+                    choch_point['type'] = 'CHoCH'
+                    choch_points[bos_type].append(choch_point)
+                prev_type = bos_type
+                
+            return choch_points
+            
+        except Exception as e:
+            logger.error(f"Error detecting CHoCH points: {str(e)}")
+            return {'bullish': [], 'bearish': []}
+                
+    async def get_market_data(
+        self,
+        symbol: str,
+        timeframe: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        Get market data for the specified symbol and timeframe using MT5Handler.
+        
+        Args:
+            symbol: Trading symbol
+            timeframe: Timeframe to fetch data for
+            
+        Returns:
+            DataFrame with OHLCV data or None if error
+        """
+        try:
+            # Use MT5Handler to get market data
+            df = await self.mt5_handler.get_rates(symbol, timeframe)
+            if df is None:
+                return None
+                
+            # Calculate basic indicators
+            df['atr'] = self.calculate_atr(df)
+            df['rsi'] = self.calculate_rsi(df['close'])
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting market data: {str(e)}")
+            return None
+
+    def detect_market_structure(
+        self,
+        df: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """
+        Detect and analyze market structure components.
+        
+        Args:
+            df: DataFrame with OHLCV data containing:
+                - time (index)
+                - open, high, low, close
+                - volume
+                
+        Returns:
+            Dict containing structure analysis:
+            {
+                'swing_points': Dict with highs and lows,
+                'structure_breaks': Dict with bullish/bearish breaks,
+                'order_blocks': Dict with bullish/bearish blocks,
+                'fair_value_gaps': Dict with bullish/bearish gaps,
+                'structure_type': Dict with type and confidence,
+                'quality': Dict with quality metrics
+            }
+        """
+        try:
+            # Get swing points
+            swing_points = self.detect_swing_points(df)
+            if not swing_points or not (swing_points.get('highs') and swing_points.get('lows')):
+                logger.warning("No valid swing points detected")
+                return self._get_default_structure_result()
+            
+            # Detect structure breaks
+            structure_breaks = self.detect_structure_breaks(df, swing_points)
+            
+            # Detect order blocks
+            order_blocks = self.detect_order_blocks(
+                df, 
+                (swing_points['highs'], swing_points['lows'])
+            )
+            
+            # Detect fair value gaps
+            fair_value_gaps = self.detect_fair_value_gaps(df)
+            
+            # Determine structure type
+            structure_type = self._determine_structure_type(swing_points, structure_breaks)
+            
+            # Calculate quality metrics
+            quality = self._assess_structure_quality(
+                df,
+                swing_points['highs'],
+                swing_points['lows']
+            )
+            
+            return {
+                'swing_points': swing_points,
+                'structure_breaks': structure_breaks,
+                'order_blocks': order_blocks,
+                'fair_value_gaps': fair_value_gaps,
+                'structure_type': structure_type,
+                'quality': quality
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting market structure: {str(e)}")
+            return {
+                'swing_points': {'highs': [], 'lows': []},
+                'structure_breaks': {'bullish': [], 'bearish': []},
+                'order_blocks': {'bullish': [], 'bearish': []},
+                'fair_value_gaps': {'bullish': [], 'bearish': []},
+                'structure_type': {'type': 'Unknown', 'confidence': 0.0},
+                'quality': {
+                    'score': 0.0,
+                    'trend_strength': 0.0,
+                    'swing_regularity': 0.0,
+                    'volume_confirmation': 0.0
+                }
+            }
+            
+    def _get_default_structure_result(self) -> Dict[str, Any]:
+        """Get default empty structure analysis result."""
+        return {
+            'swing_points': {'highs': [], 'lows': []},
+            'structure_breaks': {'bullish': [], 'bearish': []},
+            'order_blocks': {'bullish': [], 'bearish': []},
+            'fair_value_gaps': {'bullish': [], 'bearish': []},
+            'structure_type': {
+                'type': 'Unknown',
+                'confidence': 0.0
+            },
+            'quality': {
+                'score': 0.0,
+                'trend_strength': 0.0,
+                'swing_regularity': 0.0,
+                'volume_confirmation': 0.0
+            }
+        }

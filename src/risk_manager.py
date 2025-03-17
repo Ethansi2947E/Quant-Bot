@@ -1,15 +1,29 @@
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any, Callable
 from loguru import logger
 import pandas as pd
 from datetime import datetime, timedelta, UTC
 import json
 import MetaTrader5 as mt5
 
-from config.config import TRADING_CONFIG
-from src.models import Trade
+from config.config import TRADING_CONFIG, TELEGRAM_CONFIG
+from src.mt5_handler import MT5Handler
 
 class RiskManager:
-    def __init__(self):
+    def __init__(self, mt5_handler: Optional[MT5Handler] = None):
+        """
+        Initialize the RiskManager with risk parameters.
+        
+        Args:
+            mt5_handler: Optional MT5Handler instance for MT5 operations
+        """
+        # Initialize MT5 handler
+        self.mt5_handler = mt5_handler or MT5Handler()
+        
+        # Load settings from config
+        self.use_fixed_lot_size = TRADING_CONFIG.get("use_fixed_lot_size", False)
+        self.fixed_lot_size = TRADING_CONFIG.get("fixed_lot_size", 0.01)
+        self.max_lot_size = TRADING_CONFIG.get("max_lot_size", 0.3)
+        
         # Core risk parameters
         self.max_risk_per_trade = 0.01  # 1% max risk per trade
         self.max_daily_loss = 0.02  # 2% max daily loss
@@ -33,10 +47,11 @@ class RiskManager:
             0.05: 0.0     # Stop trading at 5% drawdown
         }
         
-        # Enhanced partial profit targets with smaller sizes
+        # Enhanced partial profit targets with more levels and closer targets
         self.partial_tp_levels = [
-            {'size': 0.6, 'ratio': 1.0},  # 60% at 1R
-            {'size': 0.4, 'ratio': 2.0}   # 40% at 2R
+            {'size': 0.4, 'ratio': 0.5},  # 40% at 0.5R
+            {'size': 0.3, 'ratio': 1.0},  # 30% at 1R
+            {'size': 0.3, 'ratio': 1.5}   # 30% at 1.5R
         ]
         
         # Enhanced volatility-based position sizing
@@ -75,7 +90,7 @@ class RiskManager:
             'post_news': 0.5      # Half size after news
         }
 
-        # New: Market condition adjustments
+        # Market condition adjustments
         self.market_condition_adjustments = {
             'trending': 1.0,      # Full size in trending market
             'ranging': 0.75,      # 75% size in ranging market
@@ -83,7 +98,7 @@ class RiskManager:
             'pre_event': 0.0      # No trading before major events
         }
 
-        # New: Dynamic stop loss adjustments
+        # Dynamic stop loss adjustments
         self.stop_loss_adjustments = {
             'atr_multiplier': 1.5,    # Base ATR multiplier
             'volatility_scale': True,  # Scale with volatility
@@ -119,56 +134,254 @@ class RiskManager:
             'total_risk': 0.0,
             'realized_pnl': 0.0,
             'trade_count': 0,
+            'starting_balance': 0.0,
             'last_reset': datetime.now(UTC).date()
         }
 
         self.open_trades: List[Dict] = []
     
-    def calculate_position_size(self, account_balance: float, risk_per_trade: float, 
-                                 entry_price: float, stop_loss_price: float, symbol: str) -> float:
+        # Initialize starting balance
+        self._update_starting_balance()
+    
+    def _update_starting_balance(self) -> None:
+        """Update the starting balance from MT5 account info."""
+        try:
+            account_info = self._get_account_info()
+            if account_info and 'balance' in account_info:
+                self.daily_stats['starting_balance'] = account_info['balance']
+        except Exception as e:
+            logger.error(f"Error updating starting balance: {str(e)}")
+    
+    def _get_account_info(self) -> Dict[str, Any]:
+        """Get account information from MT5."""
+        try:
+            if self.mt5_handler:
+                return self.mt5_handler.get_account_info()
+            
+            # Fallback to direct MT5 call if no handler
+            account_info = mt5.account_info()
+            if account_info is None:
+                logger.error("Failed to get account info")
+                return {}
+            
+            return {
+                "balance": account_info.balance,
+                "equity": account_info.equity,
+                "margin": account_info.margin,
+                "free_margin": account_info.margin_free
+            }
+        except Exception as e:
+            logger.error(f"Error getting account info: {str(e)}")
+            return {}
+
+    def check_daily_limits(self, account_balance: float,
+                           new_trade_risk: float) -> tuple[bool, str]:
+        """
+        Check if adding a new trade's risk will exceed the daily risk limit.
+        Daily risk limit is defined as a percentage of the account balance.
+
+        Args:
+            account_balance (float): The current account balance.
+            new_trade_risk (float): The risk amount for the new trade.
+
+        Returns:
+            tuple: (True, '') if trade is allowed, or (False, reason) if not.
+        """
+        try:
+            # Ensure daily stats are up-to-date
+            current_date = datetime.now(UTC).date()
+            if self.daily_stats['last_reset'] < current_date:
+                self.reset_daily_stats()
+            
+            # Calculate total risk including open positions
+            current_risk = sum(
+                trade.get("risk_amount", 0.0)
+                for trade in self.open_trades
+                if trade.get("entry_time", datetime.now(UTC)).date() == current_date
+            )
+            
+            # Add new trade risk
+            total_risk = current_risk + new_trade_risk
+            allowed_risk = account_balance * self.max_daily_risk
+            
+            if total_risk > allowed_risk:
+                return False, f"Daily risk limit of {allowed_risk:.2f} would be exceeded (Current: {current_risk:.2f}, New: {new_trade_risk:.2f})"
+            
+            return True, ""
+            
+        except Exception as e:
+            logger.error(f"Error checking daily limits: {str(e)}")
+            return False, str(e)
+
+    def calculate_position_size(
+        self,
+        account_balance: float,
+        risk_per_trade: float,
+        entry_price: float,
+        stop_loss_price: float,
+        symbol: str,
+        market_condition: str = 'normal',
+        volatility_state: str = 'normal',
+        session: str = 'normal',
+        correlation: float = 0.0,
+        confidence_score: float = 0.5
+    ) -> float:
+        """
+        Calculate position size based on multiple factors including risk, market conditions, and volatility.
         
-        logger.debug(f"Calculating position size for {symbol}")
-        logger.debug(f"Account balance: {account_balance}, Risk per trade: {risk_per_trade}, Entry price: {entry_price}, Stop loss price: {stop_loss_price}")
+        Args:
+            account_balance: Current account balance
+            risk_per_trade: Risk percentage per trade (0.0 to 1.0)
+            entry_price: Trade entry price
+            stop_loss_price: Stop loss price
+            symbol: Trading symbol
+            market_condition: Market condition ('trending', 'ranging', 'choppy')
+            volatility_state: Volatility state ('low', 'normal', 'high', 'extreme')
+            session: Trading session ('london_open', 'ny_open', etc.)
+            correlation: Correlation with other open positions (0.0 to 1.0)
+            confidence_score: Trade setup confidence score (0.0 to 1.0)
+            
+        Returns:
+            float: Calculated position size in lots
+        """
+        try:
+            logger.debug(f"Calculating position size for {symbol}")
+            
+            # Check if using fixed lot size from config
+            if self.use_fixed_lot_size:
+                logger.info(f"Using fixed lot size from config: {self.fixed_lot_size} lots")
+                
+                # Get symbol info for volume constraints
+                symbol_info = self.mt5_handler.get_symbol_info(symbol)
+                if not symbol_info:
+                    logger.error(f"Failed to get symbol info for {symbol}")
+                    return self.fixed_lot_size
+                
+                # Get symbol-specific volume constraints
+                min_lot = symbol_info.volume_min
+                max_lot = min(symbol_info.volume_max, self.max_lot_size)
+                lot_step = symbol_info.volume_step
+                
+                # Adjust fixed lot size to respect symbol constraints
+                position_size = max(min_lot, min(self.fixed_lot_size, max_lot))
+                position_size = round(position_size / lot_step) * lot_step
+                
+                logger.info(f"Final fixed position size for {symbol}: {position_size:.2f} lots")
+                return position_size
         
-        # Validate inputs
+            # Validate inputs
+            if not self._validate_position_inputs(
+                account_balance, risk_per_trade, entry_price, stop_loss_price):
+                return 0.0
+        
+            # Get symbol info from MT5Handler
+            symbol_info = self.mt5_handler.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                # Fallback calculation
+                if symbol.endswith('JPY') or 'JPY' in symbol:
+                    pip_size = 0.01
+                elif symbol.startswith('XAU'):
+                    pip_size = 0.1
+                elif symbol.startswith('XAG'):
+                    pip_size = 0.01
+                # Special handling for cryptocurrency pairs
+                elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
+                    pip_size = 1.0
+                else:
+                    pip_size = 0.0001  # Default for most forex pairs
+                return 0.1  # Return a default conversion factor
+        
+            # Get symbol-specific volume constraints
+            min_lot = symbol_info.volume_min
+            max_lot = symbol_info.volume_max
+            lot_step = symbol_info.volume_step
+            contract_size = symbol_info.trade_contract_size
+            
+            # Calculate base position size
+            account_risk = account_balance * risk_per_trade
+            trade_risk = abs(entry_price - stop_loss_price)
+            pip_value = self.calculate_pip_value(symbol, entry_price)
+            
+            if trade_risk == 0 or pip_value == 0:
+                logger.error("Invalid trade risk or pip value")
+                return 0.0
+        
+            base_position = (account_risk / trade_risk) * pip_value
+            
+            # Apply scaling factors
+            position_size = base_position
+            
+            # 1. Market condition adjustment
+            position_size *= self.market_condition_adjustments.get(market_condition, 1.0)
+            
+            # 2. Volatility adjustment
+            position_size *= self.volatility_position_scale.get(volatility_state, 1.0)
+            
+            # 3. Session adjustment
+            position_size *= self.session_risk_multipliers.get(session, 1.0)
+            
+            # 4. Correlation adjustment
+            if correlation > self.correlation_limits['max_correlation']:
+                position_size *= self.correlation_limits['high_correlation_scale']
+            
+            # 5. Confidence adjustment
+            for threshold, scale in sorted(self.confidence_position_scale.items(), reverse=True):
+                if confidence_score >= threshold:
+                    position_size *= scale
+                    break
+            
+            # 6. Drawdown adjustment
+            current_drawdown = self.calculate_drawdown()
+            for dd_level, scale in sorted(self.drawdown_position_scale.items()):
+                if current_drawdown >= dd_level:
+                    position_size *= scale
+                    break
+            
+            # 7. Margin check
+            leverage = 100  # Standard leverage 1:100
+            margin_required_per_lot = (entry_price * contract_size) / leverage
+            available_margin = account_balance * 0.5  # Use 50% of balance for margin
+            max_lots_by_margin = available_margin / margin_required_per_lot
+            position_size = min(position_size, max_lots_by_margin)
+            
+            # 8. Final adjustments
+            max_allowed_lot = min(self.max_lot_size, max_lot)  # Use max_lot_size from config
+            position_size = round(position_size / lot_step) * lot_step
+            position_size = max(min_lot, min(position_size, max_allowed_lot))
+            
+            logger.info(f"Final position size for {symbol}: {position_size:.2f} lots")
+            return position_size
+            
+        except Exception as e:
+            logger.error(f"Error calculating position size: {str(e)}")
+            return 0.0
+
+    def _validate_position_inputs(
+        self,
+        account_balance: float,
+        risk_per_trade: float,
+        entry_price: float,
+        stop_loss_price: float
+    ) -> bool:
+        """Validate inputs for position size calculation."""
         if account_balance <= 0:
             logger.error(f"Invalid account balance: {account_balance}")
-            return 0.0
+            return False
         
         if risk_per_trade <= 0 or risk_per_trade > 1:
-            logger.error(f"Invalid risk per trade: {risk_per_trade}. Must be between 0 and 1.")
-            return 0.0
+            logger.error(f"Invalid risk per trade: {risk_per_trade}")
+            return False
         
         if entry_price <= 0:
             logger.error(f"Invalid entry price: {entry_price}")
-            return 0.0
+            return False
         
         if stop_loss_price <= 0:
             logger.error(f"Invalid stop loss price: {stop_loss_price}")
-            return 0.0
+            return False
         
-        # Calculate risk amount
-        account_risk = account_balance * risk_per_trade
-        logger.debug(f"Account risk: {account_risk}")
-        
-        # Calculate trade risk
-        trade_risk = abs(entry_price - stop_loss_price)
-        logger.debug(f"Trade risk: {trade_risk}")
-        
-        # Get pip value for symbol
-        pip_value = self._get_pip_value(symbol)
-        logger.debug(f"Pip value for {symbol}: {pip_value}")
-        
-        if pip_value == 0:
-            logger.error(f"Invalid pip value for {symbol}")
-            return 0.0
-        
-        # Calculate position size
-        position_size = (account_risk / trade_risk) * pip_value
-        
-        logger.info(f"Calculated position size for {symbol}: {position_size:.2f}")
-        
-        return position_size
+        return True
     
     def calculate_risk_amount(
         self,
@@ -178,7 +391,7 @@ class RiskManager:
         """Calculate risk amount based on account balance and risk percentage."""
         try:
             risk_amount = account_balance * risk_percentage
-            max_risk_amount = account_balance * TRADING_CONFIG.get('max_risk_per_trade', 0.03)
+            max_risk_amount = account_balance * self.max_risk_per_trade
             return min(risk_amount, max_risk_amount)
         except Exception as e:
             logger.error(f"Error calculating risk amount: {str(e)}")
@@ -187,8 +400,8 @@ class RiskManager:
     def calculate_daily_risk(
         self,
         account_balance: float,
-        open_trades: List[Trade],
-        pending_trades: List[Trade]
+        open_trades: List[Dict[str, Any]],
+        pending_trades: List[Dict[str,Any]]
     ) -> float:
         """Calculate total daily risk including open and pending trades."""
         try:
@@ -212,7 +425,7 @@ class RiskManager:
             logger.error(f"Error calculating daily risk: {str(e)}")
             return 0.0
     
-    def can_open_new_trade(self, current_trades: List[Trade]) -> bool:
+    def can_open_new_trade(self, current_trades: List[Dict[str, Any]]) -> bool:
         """Check if a new trade can be opened based on maximum concurrent trades limit."""
         try:
             return len(current_trades) < self.max_concurrent_trades
@@ -222,185 +435,400 @@ class RiskManager:
     
     def calculate_trailing_stop(
         self,
+        trade: Dict[str, Any],
         current_price: float,
-        direction: str,
-        entry_price: float,
-        initial_stop: float,
-        current_stop: float,
-        atr: float,
-        profit_level: float = 0.5  # Start trailing after 0.5R profit
-    ) -> float:
+        current_atr: Optional[float] = None,
+        market_condition: str = 'normal'
+    ) -> Tuple[bool, float]:
         """
-        Calculate trailing stop level based on price action and profit.
+        Calculate trailing stop level based on price action, profit, and market conditions.
         
         Args:
+            trade: Dictionary containing trade information:
+                - entry_price: Original entry price
+                - initial_stop: Initial stop loss level
+                - stop_loss: Current stop loss level
+                - direction: Trade direction ('BUY' or 'SELL')
+                - partial_take_profits: Optional list of take profit levels
             current_price: Current market price
-            direction: Trade direction ('BUY' or 'SELL')
-            entry_price: Original entry price
-            initial_stop: Initial stop loss level
-            current_stop: Current stop loss level
-            atr: Current ATR value
-            profit_level: Required profit level to start trailing (in R-multiples)
+            current_atr: Current ATR value (optional)
+            market_condition: Current market condition ('trending', 'ranging', etc.)
         
         Returns:
-            float: New stop loss level
+            Tuple containing:
+            - bool: Whether stop should be adjusted
+            - float: New stop loss level
         """
         try:
+            # Validate inputs
+            if current_price == 0 or not trade.get('entry_price'):
+                logger.error("Invalid price inputs for trailing stop calculation")
+                return False, trade['stop_loss']
+
+            # Get trade parameters
+            entry_price = trade['entry_price']
+            initial_stop = trade.get('initial_stop', trade['stop_loss'])
+            current_stop = trade['stop_loss']
+            direction = trade['direction']
+            
+            # Calculate current profit and R-multiple
             initial_risk = abs(entry_price - initial_stop)
-            current_profit = (current_price - entry_price) if direction == "BUY" else (entry_price - current_price)
+            if initial_risk == 0:
+                logger.warning("Initial risk is zero, cannot calculate R-multiple")
+                return False, current_stop
+            
+            current_profit = (
+                current_price - entry_price if direction == "BUY"
+                else entry_price - current_price
+            )
             r_multiple = current_profit / initial_risk
-
-            # Only trail if we're in sufficient profit
+            
+            # Determine profit level for trailing
+            profit_level = 0.5  # Default to 0.5R for trailing
+            
+            # Check partial take profits for dynamic trailing
+            if 'partial_take_profits' in trade and trade['partial_take_profits']:
+                active_tp = None
+                for tp in trade['partial_take_profits']:
+                    if direction == "BUY" and current_price < tp['price']:
+                        active_tp = tp
+                        break
+                    elif direction == "SELL" and current_price > tp['price']:
+                        active_tp = tp
+                        break
+                
+                if active_tp and r_multiple >= active_tp.get('trail_start', 0.3):
+                    profit_level = active_tp.get('trail_start', 0.3)
+            
+            # Only trail if we have sufficient profit
             if r_multiple < profit_level:
-                return current_stop
-
-            # Calculate trail amounts based on profit level
-            if r_multiple >= 2.0:
-                trail_factor = 1.0  # Tight trail at 2R+
-            elif r_multiple >= 1.5:
-                trail_factor = 1.5  # Medium trail at 1.5R+
-            elif r_multiple >= 1.0:
-                trail_factor = 2.0  # Wider trail at 1R+
-            else:
-                trail_factor = 2.5  # Very wide trail below 1R
-
-            trail_distance = atr * trail_factor
-
+                return False, current_stop
+            
+            # Calculate trail factor based on profit and market condition
+            trail_factor = self.get_trail_factor(r_multiple, market_condition)
+            
+            # Calculate trail distance
+            trail_distance = (
+                current_atr * trail_factor if current_atr is not None
+                else current_price * 0.001 * trail_factor  # Default to 0.1% * factor
+            )
+            
+            # Calculate new stop level
             if direction == "BUY":
                 new_stop = current_price - trail_distance
-                # If trade is in profit and new_stop is below entry, lock stop to breakeven
+                # Lock in profits if beyond breakeven
                 if current_price > entry_price and new_stop < entry_price:
                     new_stop = entry_price
-                return max(current_stop, new_stop)
+                return True, max(current_stop, new_stop)
+            
             else:  # SELL
                 new_stop = current_price + trail_distance
-                # If trade is in profit and new_stop is above entry, lock stop to breakeven
+                # Lock in profits if beyond breakeven
                 if current_price < entry_price and new_stop > entry_price:
                     new_stop = entry_price
-                return min(current_stop, new_stop)
-
+                return True, min(current_stop, new_stop)
+            
         except Exception as e:
             logger.error(f"Error calculating trailing stop: {str(e)}")
-            return current_stop
+            return False, trade['stop_loss']
     
     def calculate_stop_loss(
         self,
         df: pd.DataFrame,
         signal_type: str,
         entry_price: float,
-        atr_multiplier: float = 2.0
-    ) -> float:
-        """Calculate stop loss based on ATR and recent swing levels."""
+        atr_value: Optional[float] = None,
+        swing_low: Optional[float] = None,
+        swing_high: Optional[float] = None,
+        volatility_state: str = 'normal',
+        market_condition: str = 'normal'
+    ) -> Tuple[float, List[Dict[str, float]]]:
+        """
+        Calculate stop loss and take profit levels based on multiple factors.
+        
+        Args:
+            df: DataFrame with OHLC data
+            signal_type: Trade direction ('BUY' or 'SELL')
+            entry_price: Trade entry price
+            atr_value: Current ATR value (optional)
+            swing_low: Recent swing low price (optional)
+            swing_high: Recent swing high price (optional)
+            volatility_state: Current volatility state ('low', 'normal', 'high')
+            market_condition: Current market condition ('trending', 'ranging', etc.)
+            
+        Returns:
+            Tuple containing:
+            - float: Calculated stop loss price
+            - List[Dict]: Take profit levels with size and price
+        """
         try:
-            # Get latest ATR value
-            atr = df['atr'].iloc[-1]
+            # 1. Calculate ATR-based stop distance
+            if atr_value is None and 'atr' in df.columns:
+                atr_value = df['atr'].iloc[-1]
+            elif atr_value is None:
+                atr_value = entry_price * 0.001  # Default to 0.1% of price
             
-            # Calculate ATR-based stop distance
-            stop_distance = atr * atr_multiplier
+            # Base ATR multiplier from settings
+            base_multiplier = self.stop_loss_adjustments['atr_multiplier']
             
-            # Find recent swing levels
-            lookback = 20  # Look back period for swings
+            # 2. Adjust multiplier based on volatility
+            if self.stop_loss_adjustments['volatility_scale']:
+                if volatility_state == 'high':
+                    base_multiplier *= 1.3  # Wider stops in high volatility
+                elif volatility_state == 'low':
+                    base_multiplier *= 0.75  # Tighter stops in low volatility
+            
+            # 3. Adjust for market condition
+            if market_condition == 'trending':
+                base_multiplier *= 1.2  # Wider stops in trends
+            elif market_condition == 'choppy':
+                base_multiplier *= 0.8  # Tighter stops in choppy conditions
+            
+            # Calculate base stop distance
+            base_stop_distance = atr_value * base_multiplier
+            
+            # 4. Consider swing levels for stop placement
             if signal_type == "BUY":
-                # For buy orders, find recent low
-                recent_low = df['low'].rolling(window=lookback).min().iloc[-1]
-                # Use the larger of ATR-based stop or swing-based stop
-                stop_distance_from_swing = entry_price - recent_low
-                stop_distance = max(stop_distance, stop_distance_from_swing)
-                stop_loss = entry_price - stop_distance
+                if swing_low is not None:
+                    swing_based_stop = swing_low
+                    swing_distance = entry_price - swing_based_stop
+                    if self.stop_loss_adjustments['min_distance'] <= swing_distance <= self.stop_loss_adjustments['max_distance']:
+                        stop_loss = swing_based_stop
+                    else:
+                        stop_loss = entry_price - base_stop_distance
+                else:
+                    stop_loss = entry_price - base_stop_distance
             else:  # SELL
-                # For sell orders, find recent high
-                recent_high = df['high'].rolling(window=lookback).max().iloc[-1]
-                # Use the larger of ATR-based stop or swing-based stop
-                stop_distance_from_swing = recent_high - entry_price
-                stop_distance = max(stop_distance, stop_distance_from_swing)
-                stop_loss = entry_price + stop_distance
+                if swing_high is not None:
+                    swing_based_stop = swing_high
+                    swing_distance = swing_based_stop - entry_price
+                    if self.stop_loss_adjustments['min_distance'] <= swing_distance <= self.stop_loss_adjustments['max_distance']:
+                        stop_loss = swing_based_stop
+                    else:
+                        stop_loss = entry_price + base_stop_distance
+                else:
+                    stop_loss = entry_price + base_stop_distance
             
-            # Ensure minimum stop distance
-            min_stop_distance = entry_price * 0.001  # Minimum 0.1% stop
+            # 5. Ensure stop distance is within limits
+            min_distance = max(
+                entry_price * 0.001,  # 0.1% minimum
+                self.stop_loss_adjustments['min_distance']
+            )
+            max_distance = min(
+                entry_price * 0.005,  # 0.5% maximum
+                self.stop_loss_adjustments['max_distance']
+            )
+            
             if signal_type == "BUY":
-                stop_loss = min(entry_price - min_stop_distance, stop_loss)
+                stop_loss = max(
+                    entry_price - max_distance,
+                    min(entry_price - min_distance, stop_loss)
+                )
             else:
-                stop_loss = max(entry_price + min_stop_distance, stop_loss)
+                stop_loss = min(
+                    entry_price + max_distance,
+                    max(entry_price + min_distance, stop_loss)
+                )
             
-            return round(stop_loss, 5)
+            # 6. Calculate take profit levels
+            take_profit_levels = []
+            risk = abs(entry_price - stop_loss)
+            
+            # Use market condition specific TP levels
+            tp_configs = self.dynamic_tp_levels.get(
+                market_condition.lower(),
+                self.dynamic_tp_levels['ranging']  # Default to ranging
+            )
+            
+            for tp_config in tp_configs:
+                if signal_type == "BUY":
+                    tp_price = entry_price + (risk * tp_config["ratio"])
+                else:  # SELL
+                    tp_price = entry_price - (risk * tp_config["ratio"])
+                
+                take_profit_levels.append({
+                    "price": round(tp_price, 5),
+                    "size": tp_config["size"],
+                    "ratio": tp_config["ratio"]
+                })
+            
+            logger.info(f"Stop loss calculation for {signal_type}:")
+            logger.info(f"  Entry: {entry_price:.5f}")
+            logger.info(f"  Stop: {stop_loss:.5f} (Distance: {abs(entry_price - stop_loss):.5f})")
+            logger.info(f"  ATR: {atr_value:.5f}, Multiplier: {base_multiplier:.2f}")
+            
+            return round(stop_loss, 5), take_profit_levels
             
         except Exception as e:
             logger.error(f"Error calculating stop loss: {str(e)}")
-            # Default to 1% stop loss if calculation fails
-            return entry_price * (0.99 if signal_type == "BUY" else 1.01)
+            # Return conservative default values
+            default_stop = entry_price * (0.997 if signal_type == "BUY" else 1.003)
+            default_tp = [
+                {
+                    "price": entry_price * (1.003 if signal_type == "BUY" else 0.997),
+                    "size": 1.0,
+                    "ratio": 1.0
+                }
+            ]
+            return round(default_stop, 5), default_tp
+    
+    def calculate_drawdown(self) -> float:
+        """
+        Calculate current drawdown based on peak balance versus current balance.
+        
+        Returns:
+            float: Current drawdown as a percentage (0.0 to 1.0)
+        """
+        try:
+            account_info = self._get_account_info()
+            if not account_info:
+                logger.error("Failed to get account info for drawdown calculation")
+                return 0.0
+            
+            current_balance = account_info.get('balance', 0.0)
+            equity = account_info.get('equity', current_balance)
+            
+            # Calculate drawdown from peak balance
+            peak_balance = max(current_balance, self.daily_stats.get('starting_balance', current_balance))
+            absolute_drawdown = peak_balance - equity
+            drawdown_percentage = (absolute_drawdown / peak_balance) if peak_balance > 0 else 0.0
+            
+            logger.debug(f"Drawdown calculation: Peak={peak_balance}, Current={equity}, DD%={drawdown_percentage*100:.2f}%")
+            return drawdown_percentage
+            
+        except Exception as e:
+            logger.error(f"Error calculating drawdown: {str(e)}")
+            return 0.0
     
     def calculate_take_profit(
         self,
         entry_price: float,
         stop_loss: float,
-        risk_reward_ratio: float = 2.0
-    ) -> float:
-        """Calculate take profit based on risk-reward ratio and recent price action."""
+        signal_type: str,
+        market_condition: str = 'normal',
+        risk_reward_ratio: Optional[float] = None
+    ) -> Tuple[List[Dict[str, float]], float]:
+        """
+        Calculate take profit levels based on market conditions and risk-reward ratio.
+        
+        Args:
+            entry_price: Trade entry price
+            stop_loss: Stop loss price
+            signal_type: Trade direction ('BUY' or 'SELL')
+            market_condition: Market condition ('trending', 'ranging', etc.)
+            risk_reward_ratio: Optional override for R:R ratio
+            
+        Returns:
+            Tuple containing:
+            - List of take profit levels with size and price
+            - Final take profit price (weighted average)
+        """
         try:
-            # Calculate price difference for stop loss
-            stop_loss_diff = abs(entry_price - stop_loss)
+            # Calculate base risk
+            risk = abs(entry_price - stop_loss)
             
-            # Calculate take profit distance
-            take_profit_diff = stop_loss_diff * risk_reward_ratio
+            # Get appropriate TP levels based on market condition
+            if market_condition in self.dynamic_tp_levels:
+                tp_levels = self.dynamic_tp_levels[market_condition]
+            else:
+                # Default to ranging market TP levels
+                tp_levels = self.dynamic_tp_levels['ranging']
             
-            # Calculate take profit price
-            if entry_price > stop_loss:  # Long position
-                take_profit = entry_price + take_profit_diff
-            else:  # Short position
-                take_profit = entry_price - take_profit_diff
+            # Override with single R:R ratio if provided
+            if risk_reward_ratio is not None:
+                tp_levels = [{
+                    'size': 1.0,
+                    'ratio': risk_reward_ratio
+                }]
             
-            # Ensure minimum reward-risk ratio
-            min_rr = 1.5
-            actual_rr = take_profit_diff / stop_loss_diff
-            if actual_rr < min_rr:
-                take_profit_diff = stop_loss_diff * min_rr
-                if entry_price > stop_loss:  # Long position
-                    take_profit = entry_price + take_profit_diff
-                else:  # Short position
-                    take_profit = entry_price - take_profit_diff
+            # Calculate take profit levels
+            take_profits = []
+            weighted_tp = 0.0
+            total_size = 0.0
             
-            return round(take_profit, 5)
+            for level in tp_levels:
+                tp_distance = risk * level['ratio']
+                tp_price = (
+                    entry_price + tp_distance if signal_type == "BUY"
+                    else entry_price - tp_distance
+                )
+                
+                take_profits.append({
+                    'size': level['size'],
+                    'price': round(tp_price, 5),
+                    'r_multiple': level['ratio']
+                })
+                
+                weighted_tp += tp_price * level['size']
+                total_size += level['size']
+            
+            # Calculate final take profit as weighted average
+            final_tp = weighted_tp / total_size if total_size > 0 else (
+                entry_price + risk if signal_type == "BUY"
+                else entry_price - risk
+            )
+            
+            logger.info(f"Calculated {len(take_profits)} take profit levels for {signal_type}")
+            for tp in take_profits:
+                logger.debug(f"TP Level: {tp['size']*100}% at {tp['price']:.5f} ({tp['r_multiple']}R)")
+            
+            return take_profits, round(final_tp, 5)
             
         except Exception as e:
             logger.error(f"Error calculating take profit: {str(e)}")
-            # Default to 2% take profit if calculation fails
-            return entry_price * (1.02 if entry_price > stop_loss else 0.98)
-    
-    def check_daily_risk(self, account_balance: float) -> bool:
-        """Check if daily risk limit has been reached."""
-        try:
-            # Calculate total risk for open positions
-            current_date = datetime.now(UTC).date()
-            total_risk = sum(
-                trade.get("risk_amount", 0.0)
-                for trade in self.open_trades
-                if trade.get("entry_time", datetime.now(UTC)).date() == current_date
+            # Return default 1.5:1 R:R ratio
+            default_tp = (
+                entry_price + (risk * 1.5) if signal_type == "BUY"
+                else entry_price - (risk * 1.5)
             )
-            
-            # Calculate maximum allowed risk
-            max_risk = account_balance * self.max_daily_risk
-            
-            return total_risk < max_risk
-            
-        except Exception as e:
-            logger.error(f"Error checking daily risk: {str(e)}")
-            return False
+            return ([{'size': 1.0, 'price': round(default_tp, 5), 'r_multiple': 1.5}],
+                    round(default_tp, 5))
     
     def validate_trade(
         self,
-        signal_type: str,
+        account_balance: float,
+        risk_amount: float,
         entry_price: float,
         stop_loss: float,
         take_profit: float,
-        confidence: float
+        signal_type: str,
+        confidence: float,
+        current_daily_risk: float = 0.0,
+        current_weekly_risk: float = 0.0,
+        daily_trades: int = 0,
+        weekly_trades: int = 0,
+        current_drawdown: float = 0.0,
+        consecutive_losses: int = 0,
+        last_trade_time: Optional[datetime] = None,
+        correlations: Optional[Dict[str, float]] = None
     ) -> Tuple[bool, str]:
-        """Validate trade parameters."""
-        try:
-            # Check confidence threshold
-            if confidence < 0.5:
-                return False, "Low confidence signal"
+        """
+        Comprehensive trade validation checking all risk parameters and trade setup.
+        
+        Args:
+            account_balance: Current account balance
+            risk_amount: Proposed risk amount for new trade
+            entry_price: Trade entry price
+            stop_loss: Stop loss price
+            take_profit: Take profit price
+            signal_type: Trade direction ('BUY' or 'SELL')
+            confidence: Trade setup confidence score (0.0 to 1.0)
+            current_daily_risk: Current daily risk exposure
+            current_weekly_risk: Current weekly risk exposure
+            daily_trades: Number of trades taken today
+            weekly_trades: Number of trades taken this week
+            current_drawdown: Current drawdown percentage
+            consecutive_losses: Number of consecutive losing trades
+            last_trade_time: Time of last trade (optional)
+            correlations: Dictionary of correlations with other positions (optional)
             
-            # Check price levels
+        Returns:
+            Tuple containing:
+            - bool: Whether trade is valid
+            - str: Reason for rejection if not valid
+        """
+        try:
+            # 1. Validate price levels
             if signal_type == "BUY":
                 if not (entry_price > stop_loss and take_profit > entry_price):
                     return False, "Invalid price levels for BUY order"
@@ -415,44 +843,56 @@ class RiskManager:
             if abs(entry_price - take_profit) < min_distance:
                 return False, "Take profit too close to entry"
             
+            # 2. Check confidence threshold
+            if confidence < 0.5:
+                return False, f"Low confidence signal: {confidence:.2f}"
+            
+            # 3. Check risk limits
+            if risk_amount > account_balance * self.max_risk_per_trade:
+                return False, f"Risk amount {risk_amount:.2f} exceeds max risk per trade"
+            
+            total_daily_risk = current_daily_risk + risk_amount
+            if total_daily_risk > account_balance * self.max_daily_risk:
+                return False, f"Total daily risk {total_daily_risk:.2f} would exceed limit"
+            
+            total_weekly_risk = current_weekly_risk + risk_amount
+            if total_weekly_risk > account_balance * self.max_weekly_loss:
+                return False, f"Total weekly risk {total_weekly_risk:.2f} would exceed limit"
+            
+            # 4. Check trade frequency limits
+            if daily_trades >= self.max_daily_trades:
+                return False, f"Daily trade limit {self.max_daily_trades} reached"
+            
+            if weekly_trades >= self.max_weekly_trades:
+                return False, f"Weekly trade limit {self.max_weekly_trades} reached"
+            
+            # 5. Check drawdown limits
+            if current_drawdown >= self.max_drawdown_pause:
+                return False, f"Max drawdown {self.max_drawdown_pause*100}% reached"
+            
+            # 6. Check consecutive losses
+            if consecutive_losses >= self.consecutive_loss_limit:
+                return False, f"Consecutive loss limit {self.consecutive_loss_limit} reached"
+            
+            # 7. Check trade spacing
+            if last_trade_time:
+                time_since_last = datetime.now(UTC) - last_trade_time
+                min_spacing = timedelta(hours=self.min_trades_spacing)
+                if time_since_last < min_spacing:
+                    return False, f"Minimum trade spacing {self.min_trades_spacing}h not met"
+            
+            # 8. Check correlations
+            if correlations:
+                for symbol, corr in correlations.items():
+                    if abs(corr) > self.correlation_limits['max_correlation']:
+                        return False, f"Correlation with {symbol} ({corr:.2f}) exceeds limit"
+            
+            # All checks passed
             return True, "Trade validated"
             
         except Exception as e:
             logger.error(f"Error validating trade: {str(e)}")
             return False, f"Validation error: {str(e)}"
-    
-    def adjust_for_news(
-        self,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
-        news_volatility: float = 1.0
-    ) -> Tuple[float, float, float]:
-        """Adjust trade parameters based on news volatility."""
-        try:
-            # Increase distances based on news volatility
-            if news_volatility > 1.0:
-                # Adjust stop loss
-                sl_distance = abs(entry_price - stop_loss)
-                new_sl_distance = sl_distance * news_volatility
-                
-                # Adjust take profit
-                tp_distance = abs(entry_price - take_profit)
-                new_tp_distance = tp_distance * news_volatility
-                
-                # Apply new levels maintaining direction
-                if entry_price > stop_loss:  # Long position
-                    stop_loss = entry_price - new_sl_distance
-                    take_profit = entry_price + new_tp_distance
-                else:  # Short position
-                    stop_loss = entry_price + new_sl_distance
-                    take_profit = entry_price - new_tp_distance
-            
-            return round(entry_price, 5), round(stop_loss, 5), round(take_profit, 5)
-            
-        except Exception as e:
-            logger.error(f"Error adjusting for news: {str(e)}")
-            return entry_price, stop_loss, take_profit
     
     def update_open_trades(self, trades: List[Dict]):
         """Update the list of open trades."""
@@ -490,57 +930,86 @@ class RiskManager:
             logger.error(f"Error checking trade closure: {str(e)}")
             return False, f"Error: {str(e)}" 
 
-    def calculate_position_size(self, account_balance: float, risk_per_trade: float, 
-                              stop_loss_pips: float, current_drawdown: float,
-                              volatility_state: str, session: str) -> float:
-        """Calculate position size based on multiple factors."""
-        # Base position size calculation
-        base_position = (account_balance * self.max_risk_per_trade * risk_per_trade) / stop_loss_pips
+    def validate_trade_risk(
+        self,
+        account_balance: float,
+        risk_amount: float,
+        current_daily_risk: float,
+        current_weekly_risk: float,
+        daily_trades: int,
+        weekly_trades: int,
+        current_drawdown: float,
+        consecutive_losses: int,
+        last_trade_time: Optional[datetime] = None,
+        correlations: Optional[Dict[str, float]] = None
+    ) -> Tuple[bool, str]:
+        """
+        Validate if a trade can be taken based on all risk parameters.
         
-        # Apply drawdown scaling
-        for drawdown_level, scale in sorted(self.drawdown_position_scale.items()):
-            if current_drawdown >= drawdown_level:
-                base_position *= scale
+        Args:
+            account_balance: Current account balance
+            risk_amount: Proposed risk amount for new trade
+            current_daily_risk: Current daily risk exposure
+            current_weekly_risk: Current weekly risk exposure
+            daily_trades: Number of trades taken today
+            weekly_trades: Number of trades taken this week
+            current_drawdown: Current drawdown percentage
+            consecutive_losses: Number of consecutive losing trades
+            last_trade_time: Time of last trade (optional)
+            correlations: Dictionary of correlations with other positions (optional)
+            
+        Returns:
+            Tuple containing:
+            - bool: Whether trade is allowed
+            - str: Reason for rejection if not allowed
+        """
+        try:
+            # 1. Check risk limits
+            if risk_amount > account_balance * self.max_risk_per_trade:
+                return False, f"Risk amount {risk_amount:.2f} exceeds max risk per trade"
+            
+            total_daily_risk = current_daily_risk + risk_amount
+            if total_daily_risk > account_balance * self.max_daily_risk:
+                return False, f"Total daily risk {total_daily_risk:.2f} would exceed limit"
+            
+            total_weekly_risk = current_weekly_risk + risk_amount
+            if total_weekly_risk > account_balance * self.max_weekly_loss:
+                return False, f"Total weekly risk {total_weekly_risk:.2f} would exceed limit"
+    
+            # 2. Check trade frequency limits
+            if daily_trades >= self.max_daily_trades:
+                    return False, f"Daily trade limit {self.max_daily_trades} reached"
                 
-        # Apply volatility scaling
-        base_position *= self.volatility_position_scale.get(volatility_state, 1.0)
-        
-        # Apply session-based scaling
-        base_position *= self.session_risk_multipliers.get(session, 0.0)
-        
-        return base_position
+            if weekly_trades >= self.max_weekly_trades:
+                    return False, f"Weekly trade limit {self.max_weekly_trades} reached"
+                
+                # 3. Check drawdown limits
+            if current_drawdown >= self.max_drawdown_pause:
+                return False, f"Max drawdown {self.max_drawdown_pause*100}% reached"
+                
+                # 4. Check consecutive losses
+            if consecutive_losses >= self.consecutive_loss_limit:
+                    return False, f"Consecutive loss limit {self.consecutive_loss_limit} reached"
 
-    def check_trade_allowed(self, current_positions: int, daily_trades: int, 
-                          weekly_trades: int, daily_loss: float, weekly_loss: float,
-                          last_trade_time: datetime, consecutive_losses: int,
-                          correlations: Dict[str, float]) -> Tuple[bool, str]:
-        """Check if new trade is allowed based on all conditions."""
-        if current_positions >= self.max_concurrent_trades:
-            return False, "Max concurrent trades reached"
-            
-        if daily_trades >= self.max_daily_trades:
-            return False, "Max daily trades reached"
-            
-        if weekly_trades >= self.max_weekly_trades:
-            return False, "Max weekly trades reached"
-            
-        if daily_loss >= self.max_daily_loss:
-            return False, "Daily loss limit reached"
-            
-        if weekly_loss >= self.max_weekly_loss:
-            return False, "Weekly loss limit reached"
-            
-        if consecutive_losses >= self.consecutive_loss_limit:
-            return False, "Consecutive loss limit reached"
-            
-        if any(corr >= self.max_correlation for corr in correlations.values()):
-            return False, "Correlation limit exceeded"
-            
-        # Check trade spacing
-        if last_trade_time and (datetime.now() - last_trade_time).hours < self.min_trades_spacing:
-            return False, "Minimum trade spacing not met"
-            
-        return True, "Trade allowed"
+            # 5. Check trade spacing
+            if last_trade_time:
+                time_since_last = datetime.now(UTC) - last_trade_time
+                min_spacing = timedelta(hours=self.min_trades_spacing)
+                if time_since_last < min_spacing:
+                    return False, f"Minimum trade spacing {self.min_trades_spacing}h not met"
+
+            # 6. Check correlations
+            if correlations:
+                for symbol, corr in correlations.items():
+                    if abs(corr) > self.correlation_limits['max_correlation']:
+                        return False, f"Correlation with {symbol} ({corr:.2f}) exceeds limit"
+
+            # All checks passed
+            return True, "Trade validated"
+
+        except Exception as e:
+            logger.error(f"Error validating trade risk: {str(e)}")
+            return False, f"Validation error: {str(e)}"
 
     def apply_partial_profits(self, position_size: float, entry_price: float, 
                             stop_loss: float, min_lot: float = 0.01) -> List[Dict]:
@@ -578,7 +1047,7 @@ class RiskManager:
         """Calculate position size dynamically based on multiple factors."""
         try:
             # Get symbol info for proper lot sizing
-            symbol_info = mt5.symbol_info(symbol)
+            symbol_info = self.mt5_handler.get_symbol_info(symbol)
             if not symbol_info:
                 logger.error(f"Failed to get symbol info for {symbol}")
                 return 0.0
@@ -602,7 +1071,7 @@ class RiskManager:
                 logger.error("Invalid pip value or stop distance")
                 return 0.0
         
-        # Calculate base position size
+            # Calculate base position size
             base_position = risk_amount / (stop_distance / pip_value)
             
             # Apply scaling factors
@@ -659,216 +1128,119 @@ class RiskManager:
             'total_risk': 0.0,
             'realized_pnl': 0.0,
             'trade_count': 0,
+            'starting_balance': 0.0,
             'last_reset': datetime.now(UTC).date()
         }
 
-    def calculate_dynamic_stops(
-        self,
-        df: pd.DataFrame,
-        direction: str,
-        entry_price: float,
-        volatility_state: str,
-        market_condition: str
-    ) -> Tuple[float, List[Dict]]:
-        """Calculate dynamic stop loss and take profit levels."""
-        
-        # Calculate ATR for dynamic stops
-        atr = df['atr'].iloc[-1]
-        
-        # Adjust ATR multiplier based on volatility
-        atr_multiplier = self.stop_loss_adjustments['atr_multiplier']
-        if volatility_state == 'high':
-            atr_multiplier *= 1.5
-        elif volatility_state == 'low':
-            atr_multiplier *= 0.8
-        
-        # Calculate stop loss
-        stop_distance = max(
-            atr * atr_multiplier,
-            self.stop_loss_adjustments['min_distance']
-        )
-        stop_distance = min(
-            stop_distance,
-            self.stop_loss_adjustments['max_distance']
-        )
-        
-        stop_loss = entry_price - stop_distance if direction == 'buy' else entry_price + stop_distance
-        
-        # Get appropriate TP levels based on market condition
-        tp_levels = self.dynamic_tp_levels.get(market_condition, self.dynamic_tp_levels['ranging'])
-        
-        # Calculate take profit levels
-        take_profits = []
-        for level in tp_levels:
-            tp_distance = stop_distance * level['ratio']
-            tp_price = entry_price + tp_distance if direction == 'buy' else entry_price - tp_distance
-            take_profits.append({
-                'price': tp_price,
-                'size': level['size']
-            })
-        
-        return stop_loss, take_profits
-
-    def _save_trade_details(self, trade: Dict) -> None:
-        """Save trade details with proper handling of take_profit."""
-        try:
-            # Ensure trade has take_profit field
-            if 'take_profit' not in trade:
-                # Calculate take profit based on stop loss and a default R:R ratio
-                stop_distance = abs(trade['entry_price'] - trade['stop_loss'])
-                if trade['direction'] == 'BUY':
-                    trade['take_profit'] = trade['entry_price'] + (stop_distance * 2)  # 1:2 R:R
-                else:
-                    trade['take_profit'] = trade['entry_price'] - (stop_distance * 2)  # 1:2 R:R
-                
-            # Save trade details
-            self.open_trades.append(trade)
-            
-        except Exception as e:
-            logger.error(f"Error saving trade details: {str(e)}")
-
-    def should_adjust_stops(
-        self,
-        trade: Dict,
-        current_price: float,
-        current_atr: float
-    ) -> Tuple[bool, float]:
+    def get_trail_factor(self, r_multiple: float, market_condition: str = 'normal') -> float:
         """
-        Check if stops should be adjusted based on trailing conditions.
+        Calculate trailing stop factor based on R-multiple and market condition.
         
         Args:
-            trade: Current trade information
-            current_price: Current market price
-            current_atr: Current ATR value
-        
+            r_multiple: Current R-multiple (profit / initial risk)
+            market_condition: Current market condition
+            
         Returns:
-            Tuple[bool, float]: (Should adjust, New stop level)
+            float: Trailing stop factor
         """
         try:
-            # Get initial values
-            entry_price = trade['entry_price']
-            initial_stop = trade['initial_stop'] if 'initial_stop' in trade else trade['stop_loss']
-            current_stop = trade['stop_loss']
-            direction = trade['direction']
+            # Adjust trail factor based on R-multiple achieved
+            if r_multiple >= 2.0:
+                base_factor = 1.0  # Tight trail at 2R+
+            elif r_multiple >= 1.5:
+                base_factor = 1.5  # Medium trail at 1.5R+
+            elif r_multiple >= 1.0:
+                base_factor = 2.0  # Wider trail at 1R+
+            else:
+                base_factor = 2.5  # Very wide trail below 1R
             
-            # Calculate current profit
-            initial_risk = abs(entry_price - initial_stop)
-            current_profit = (current_price - entry_price) if direction == "BUY" else (entry_price - current_price)
-            r_multiple = current_profit / initial_risk
+            # Adjust for market condition
+            if market_condition == 'trending':
+                base_factor *= 1.5  # Wider trails in trending market
+            elif market_condition == 'ranging':
+                base_factor *= 0.75  # Tighter trails in ranging market
+            elif market_condition == 'choppy':
+                base_factor *= 0.5  # Even tighter trails in choppy market
             
-            # Get trailing parameters from take profits
-            if 'partial_take_profits' in trade and trade['partial_take_profits']:
-                # Find the next active take profit level
-                active_tp = None
-                for tp in trade['partial_take_profits']:
-                    if direction == "BUY" and current_price < tp['price']:
-                        active_tp = tp
-                        break
-                    elif direction == "SELL" and current_price > tp['price']:
-                        active_tp = tp
-                        break
-                
-                if active_tp and r_multiple >= active_tp.get('trail_start', 1.0):
-                    # Calculate trail amount based on ATR and profit level
-                    if r_multiple >= 2.0:
-                        trail_factor = 1.0  # Tight trail at 2R+
-                    elif r_multiple >= 1.5:
-                        trail_factor = 1.5  # Medium trail at 1.5R+
-                    else:
-                        trail_factor = 2.0  # Wider trail below 1.5R
-
-                    trail_distance = current_atr * trail_factor
-                    
-                    if direction == "BUY":
-                        new_stop = current_price - trail_distance
-                        # Lock in profits if beyond breakeven
-                        if current_price > entry_price and new_stop < entry_price:
-                            new_stop = entry_price
-                        return True, max(current_stop, new_stop)
-                    else:  # SELL
-                        new_stop = current_price + trail_distance
-                        # Lock in profits if beyond breakeven
-                        if current_price < entry_price and new_stop > entry_price:
-                            new_stop = entry_price
-                        return True, min(current_stop, new_stop)
-            
-            # Fallback trailing stop adjustment if no partial_take_profits defined
-            if not trade.get('partial_take_profits') or len(trade.get('partial_take_profits')) == 0:
-                default_trail_start = 0.5  # Start trailing at 0.5R profit
-                if r_multiple >= default_trail_start:
-                    # Calculate trail amount based on ATR and profit level
-                    if r_multiple >= 2.0:
-                        trail_factor = 1.0
-                    elif r_multiple >= 1.5:
-                        trail_factor = 1.5
-                    else:
-                        trail_factor = 2.0
-
-                    trail_distance = current_atr * trail_factor
-                    
-                    if direction == "BUY":
-                        new_stop = current_price - trail_distance
-                        if current_price > entry_price and new_stop < entry_price:
-                            new_stop = entry_price
-                        return True, max(current_stop, new_stop)
-                    else:  # SELL
-                        new_stop = current_price + trail_distance
-                        if current_price < entry_price and new_stop > entry_price:
-                            new_stop = entry_price
-                        return True, min(current_stop, new_stop)
-            
-            return False, current_stop
+            return base_factor
             
         except Exception as e:
-            logger.error(f"Error checking stop adjustment: {str(e)}")
-            return False, current_stop
-
-    def check_daily_limits(self, account_balance: float,
-                           new_trade_risk: float) -> tuple[bool, str]:
-        """
-        Check if adding a new trade's risk will exceed the daily risk limit.
-        Daily risk limit is defined as a percentage of the account balance.
-
-        Args:
-            account_balance (float): The current account balance.
-            new_trade_risk (float): The risk amount for the new trade.
-
-        Returns:
-            tuple: (True, '') if trade is allowed, or (False, reason) if not.
-        """
-        # Ensure daily stats are up-to-date
-        current_date = datetime.now(UTC).date()
-        if self.daily_stats['last_reset'] < current_date:
-            self.reset_daily_stats()
-        allowed_risk = account_balance * self.max_daily_risk
-        if self.daily_stats['total_risk'] + new_trade_risk > allowed_risk:
-            return (False, f"Daily risk limit of {allowed_risk:.2f} exceeded.")
-        return (True, "")
-
+            logger.error(f"Error calculating trail factor: {str(e)}")
+            return 2.0  # Default to conservative trail factor
+    
     def calculate_pip_value(self, symbol: str, price: float) -> float:
         """
-        Calculate the pip monetary value for a given symbol.
+        Calculate the value of one pip for the given symbol at the current price.
         
         Args:
-            symbol: The trading symbol (e.g., 'EURUSD', 'XAUUSD')
-            price: Current market price
+            symbol: The trading symbol
+            price: Current price of the symbol
             
         Returns:
-            float: Pip monetary value for the symbol
+            float: The value of one pip in account currency
         """
         try:
-            symbol = symbol.upper()
-            # Use a different pip for precious metals
-            if symbol in ['XAUUSD', 'XAGUSD']:
-                pip = 0.01  # Adjust as needed for precious metals
-            elif symbol.endswith('JPY'):
-                pip = 0.01
+            # Get symbol information from MT5
+            symbol_info = self.mt5_handler.get_symbol_info(symbol)
+            
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                # Fallback calculation
+                if symbol.endswith('JPY') or 'JPY' in symbol:
+                    pip_size = 0.01
+                elif symbol.startswith('XAU'):
+                    pip_size = 0.1
+                elif symbol.startswith('XAG'):
+                    pip_size = 0.01
+                # Special handling for cryptocurrency pairs
+                elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
+                    pip_size = 1.0
+                else:
+                    pip_size = 0.0001  # Default for most forex pairs
+                return 0.1  # Return a default conversion factor
+            
+            # Determine pip size based on digits
+            digits = symbol_info.digits
+            
+            # Special handling for cryptocurrency pairs regardless of digits
+            if symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
+                pip_size = 1.0  # For cryptocurrencies, define 1 unit as 1 pip
+            elif digits == 3 or digits == 5:
+                pip_size = 0.0001  # 4-digit pricing (standard forex)
+            elif digits == 2:
+                pip_size = 0.01    # 2-digit pricing (JPY pairs)
+            elif digits == 1:
+                pip_size = 0.1     # 1-digit pricing
+            elif digits == 0:
+                pip_size = 1.0     # 0-digit pricing
             else:
-                pip = 0.0001
-
-            contract_size = 100000  # Standard lot size; adjust if needed
-            return contract_size * pip
-
+                pip_size = 0.0001  # Default to standard forex pip size
+            
+            # Get contract size (standard lot is typically 100,000 units)
+            contract_size = symbol_info.trade_contract_size
+            
+            # The pip value calculation depends on the account currency
+            # For simplicity, we're assuming account currency is USD
+            # For USD-based account:
+            
+            # Case 1: USD is the quote currency (e.g., EUR/USD)
+            if symbol.endswith('USD'):
+                pip_value = pip_size * contract_size
+            
+            # Case 2: USD is the base currency (e.g., USD/JPY)
+            elif symbol.startswith('USD'):
+                pip_value = (pip_size * contract_size) / price
+            
+            # Case 3: Neither currency is USD (e.g., EUR/GBP)
+            # For this, we would need to know the USD/quote_currency rate
+            # For simplicity, we'll use a default calculation
+            else:
+                pip_value = pip_size * 10  # Simplified assumption
+            
+            logger.debug(f"Calculated pip value for {symbol}: {pip_value}")
+            return pip_value
+            
         except Exception as e:
-            logger.error(f"Error calculating pip value for {symbol}: {str(e)}")
-            return 0.0001
+            logger.error(f"Error calculating pip value: {str(e)}")
+            # Fallback to a reasonable default if error occurs
+            return 0.1  # Default conversion factor
