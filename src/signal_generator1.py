@@ -174,35 +174,47 @@ class SignalGenerator1:
             return None
 
     def _detect_amd(self, df: pd.DataFrame) -> Optional[Dict]:
-        """Detect AMD patterns based on price action."""
+        """Detect AMD patterns based on price action with dynamic lookback and enhanced reversal detection."""
         try:
-            # Look at last 20 candles for pattern detection
-            recent_data = df.iloc[-20:]
+            # Calculate ATR for volatility-based stops and dynamic window sizing
+            atr_series = self.market_analysis.calculate_atr(df, period=14)
+            atr = atr_series.iloc[-1]
             
-            # Calculate key levels
+            # Determine relative volatility (ATR as a fraction of the average close)
+            relative_volatility = atr / df['close'].mean()
+            # Base window is 20 candles; adjust inversely with volatility:
+            # Higher volatility -> shorter window; lower volatility -> longer window.
+            dynamic_window = int(20 * (0.5 / relative_volatility)) if relative_volatility > 0 else 20
+            # Limit the dynamic window between 15 and 40 candles
+            dynamic_window = max(15, min(dynamic_window, 40))
+            
+            recent_data = df.iloc[-dynamic_window:]
             recent_high = recent_data['high'].max()
             recent_low = recent_data['low'].min()
+            
+            # Retrieve the last three candles
             last_candle = df.iloc[-1]
             prev_candle = df.iloc[-2]
+            prev2_candle = df.iloc[-3] if len(df) >= 3 else None
             
-            # Calculate ATR for volatility-based stops
-            atr = self.market_analysis.calculate_atr(df, period=14).iloc[-1]
-            
-            # Check for distribution (reversal) pattern with better validation
-            if self._detect_reversal(df):
-                # For bearish reversal (distribution)
+            # Only proceed if we have at least three candles and the generic reversal condition is met
+            if prev2_candle is not None and self._detect_reversal(df):
+                # Calculate the average volume of the two preceding candles for a more robust volume confirmation
+                average_prev_volume = (prev_candle['volume'] + prev2_candle['volume']) / 2
+
+                # Bearish reversal (distribution) conditions:
+                # - Last candle is bearish
+                # - The two previous candles were bullish
+                # - Last candle volume exceeds the average of the prior two candles by at least 20%
                 if (last_candle['close'] < last_candle['open'] and
                     prev_candle['close'] > prev_candle['open'] and
-                    last_candle['volume'] > prev_candle['volume'] * 1.2):  # Volume confirmation
+                    prev2_candle['close'] > prev2_candle['open'] and
+                    last_candle['volume'] > average_prev_volume * 1.2):
                     
-                    # Calculate stop loss using recent structure and ATR
                     stop_loss = max(recent_high, last_candle['high'] + 2 * atr)
-                    
-                    # Only valid if potential reward is at least 2x risk
                     risk = stop_loss - last_candle['close']
                     target = last_candle['close'] - (2 * risk)
                     
-                    # Check if price has room to move
                     if target > recent_low:
                         return {
                             'type': 'distribution',
@@ -210,22 +222,22 @@ class SignalGenerator1:
                             'entry': last_candle['close'],
                             'stop_loss': stop_loss,
                             'target': target,
-                            'volume_ratio': last_candle['volume'] / prev_candle['volume']
+                            'volume_ratio': last_candle['volume'] / average_prev_volume
                         }
                 
-                # For bullish reversal (accumulation)
+                # Bullish reversal (accumulation) conditions:
+                # - Last candle is bullish
+                # - The two previous candles were bearish
+                # - Last candle volume exceeds the average of the prior two candles by at least 20%
                 elif (last_candle['close'] > last_candle['open'] and
-                      prev_candle['close'] < prev_candle['open'] and
-                      last_candle['volume'] > prev_candle['volume'] * 1.2):  # Volume confirmation
+                    prev_candle['close'] < prev_candle['open'] and
+                    prev2_candle['close'] < prev2_candle['open'] and
+                    last_candle['volume'] > average_prev_volume * 1.2):
                     
-                    # Calculate stop loss using recent structure and ATR
                     stop_loss = min(recent_low, last_candle['low'] - 2 * atr)
-                    
-                    # Only valid if potential reward is at least 2x risk
                     risk = last_candle['close'] - stop_loss
                     target = last_candle['close'] + (2 * risk)
                     
-                    # Check if price has room to move
                     if target < recent_high:
                         return {
                             'type': 'accumulation',
@@ -233,45 +245,94 @@ class SignalGenerator1:
                             'entry': last_candle['close'],
                             'stop_loss': stop_loss,
                             'target': target,
-                            'volume_ratio': last_candle['volume'] / prev_candle['volume']
+                            'volume_ratio': last_candle['volume'] / average_prev_volume
                         }
             
             return None
-            
+
         except Exception as e:
             logger.error(f"Error detecting AMD: {str(e)}")
             return None
 
     def _detect_reversal(self, df: pd.DataFrame) -> bool:
-        """Detect a reversal pattern with improved validation."""
+        """
+        Detect reversal patterns in price action based on candle patterns and indicators.
+        
+        Args:
+            df: DataFrame with OHLCV data and indicators
+            
+        Returns:
+            bool: True if a reversal pattern is detected, False otherwise
+        """
         try:
-            # Look at last few candles
-            last_candles = df.iloc[-5:]
-            last_candle = last_candles.iloc[-1]
-            prev_candle = last_candles.iloc[-2]
+            # Need at least 5 candles for a reliable reversal pattern
+            if len(df) < 5:
+                return False
             
-            # Calculate trend direction using last 5 candles
-            trend = 'up' if last_candles['close'].mean() > last_candles['open'].mean() else 'down'
+            # Get the most recent candles
+            last_candle = df.iloc[-1]
+            prev_candle = df.iloc[-2]
+            prev2_candle = df.iloc[-3]
             
-            # Bullish reversal conditions
-            if trend == 'down':  # Must be in downtrend
-                if (last_candle['close'] > last_candle['open'] and  # Bullish candle
-                    prev_candle['close'] < prev_candle['open'] and  # After bearish candle
-                    last_candle['close'] > prev_candle['open'] and  # Closes above prev open
-                    last_candle['open'] < prev_candle['close'] and  # Opens below prev close
-                    last_candle['volume'] > last_candles['volume'].mean()):  # Above avg volume
-                    return True
-                    
-            # Bearish reversal conditions
-            elif trend == 'up':  # Must be in uptrend
-                if (last_candle['close'] < last_candle['open'] and  # Bearish candle
-                    prev_candle['close'] > prev_candle['open'] and  # After bullish candle
-                    last_candle['close'] < prev_candle['open'] and  # Closes below prev open
-                    last_candle['open'] > prev_candle['close'] and  # Opens above prev close
-                    last_candle['volume'] > last_candles['volume'].mean()):  # Above avg volume
-                    return True
+            # Calculate ATR for volatility context
+            atr_series = self.market_analysis.calculate_atr(df, period=14)
+            atr = atr_series.iloc[-1]
             
-            return False
+            # Calculate the current momentum
+            momentum = 0
+            if 'rsi' in df.columns:
+                # Use RSI for momentum
+                momentum = df['rsi'].iloc[-1] - df['rsi'].iloc[-2]
+            else:
+                # Simple momentum calculation if RSI is not available
+                momentum = ((df['close'].iloc[-1] / df['close'].iloc[-5]) - 1) * 100
+            
+            # Check for bullish reversal
+            bullish_reversal = (
+                # Bullish engulfing or strong bullish candle
+                (last_candle['close'] > last_candle['open'] and 
+                 prev_candle['close'] < prev_candle['open'] and
+                 last_candle['close'] > prev_candle['open'] and
+                 last_candle['open'] < prev_candle['close']) or
+                
+                # Strong momentum reversal upward
+                (momentum > 5 and 
+                 last_candle['close'] > last_candle['open'] and
+                 last_candle['close'] - last_candle['open'] > 0.5 * atr) or
+                
+                # Price rejection from support (long lower wick)
+                (last_candle['low'] < prev_candle['low'] and
+                 last_candle['close'] > last_candle['open'] and
+                 last_candle['close'] - last_candle['low'] > 2 * (last_candle['high'] - last_candle['close']))
+            )
+            
+            # Check for bearish reversal
+            bearish_reversal = (
+                # Bearish engulfing or strong bearish candle
+                (last_candle['close'] < last_candle['open'] and 
+                 prev_candle['close'] > prev_candle['open'] and
+                 last_candle['close'] < prev_candle['open'] and
+                 last_candle['open'] > prev_candle['close']) or
+                
+                # Strong momentum reversal downward
+                (momentum < -5 and 
+                 last_candle['close'] < last_candle['open'] and
+                 last_candle['open'] - last_candle['close'] > 0.5 * atr) or
+                
+                # Price rejection from resistance (long upper wick)
+                (last_candle['high'] > prev_candle['high'] and
+                 last_candle['close'] < last_candle['open'] and
+                 last_candle['high'] - last_candle['close'] > 2 * (last_candle['close'] - last_candle['low']))
+            )
+            
+            # Check for volume confirmation if available
+            volume_confirmation = True
+            if 'volume' in df.columns:
+                avg_volume = df['volume'].iloc[-5:-1].mean()
+                volume_confirmation = last_candle['volume'] > avg_volume * 1.1
+            
+            # Return true if either type of reversal is detected with volume confirmation
+            return (bullish_reversal or bearish_reversal) and volume_confirmation
             
         except Exception as e:
             logger.error(f"Error in reversal detection: {str(e)}")

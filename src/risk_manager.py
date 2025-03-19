@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, UTC
 import json
 import MetaTrader5 as mt5
+import math
 
 from config.config import TRADING_CONFIG, TELEGRAM_CONFIG
 from src.mt5_handler import MT5Handler
@@ -247,6 +248,9 @@ class RiskManager:
         try:
             logger.debug(f"Calculating position size for {symbol}")
             
+            # Safety limit for risk_per_trade - no more than 2%
+            risk_per_trade = min(risk_per_trade, 0.02)
+            
             # Check if using fixed lot size from config
             if self.use_fixed_lot_size:
                 logger.info(f"Using fixed lot size from config: {self.fixed_lot_size} lots")
@@ -278,19 +282,62 @@ class RiskManager:
             symbol_info = self.mt5_handler.get_symbol_info(symbol)
             if not symbol_info:
                 logger.error(f"Failed to get symbol info for {symbol}")
-                # Fallback calculation
-                if symbol.endswith('JPY') or 'JPY' in symbol:
+                # Fallback calculation with more conservative measures
+                logger.warning("Using fallback calculation with conservative measures")
+                
+                # Determine if this is a JPY pair
+                is_jpy_pair = symbol.endswith('JPY') or 'JPY' in symbol
+                
+                # Calculate pip size and value based on symbol type
+                if is_jpy_pair:
                     pip_size = 0.01
+                    # For JPY pairs, contract size is typically 100,000
+                    contract_size = 100000
+                    # Calculate pip value for JPY pairs
+                    pip_value = (pip_size / entry_price) * contract_size
                 elif symbol.startswith('XAU'):
                     pip_size = 0.1
+                    contract_size = 100
+                    pip_value = pip_size * contract_size
                 elif symbol.startswith('XAG'):
                     pip_size = 0.01
+                    contract_size = 5000
+                    pip_value = pip_size * contract_size
                 # Special handling for cryptocurrency pairs
                 elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
                     pip_size = 1.0
+                    contract_size = 1
+                    pip_value = pip_size
                 else:
                     pip_size = 0.0001  # Default for most forex pairs
-                return 0.1  # Return a default conversion factor
+                    contract_size = 100000
+                    pip_value = pip_size * contract_size
+                
+                # Calculate position size (more conservative approach)
+                risk_amount = account_balance * risk_per_trade
+                stop_distance_in_pips = abs(entry_price - stop_loss_price) / pip_size
+                
+                # Prevent division by zero
+                if stop_distance_in_pips == 0:
+                    logger.error("Stop distance is zero, cannot calculate position size")
+                    return 0.0
+                
+                # Calculate position size in standard lots
+                position_size = risk_amount / (stop_distance_in_pips * pip_value)
+                
+                # Apply a conservative cap (max 0.5% of account balance in lots)
+                max_position = account_balance * 0.005
+                position_size = min(position_size, max_position)
+                
+                # Minimum lot size
+                min_lot = 0.01
+                position_size = max(min_lot, position_size)
+                
+                # Always round down to 2 decimal places for safety
+                position_size = math.floor(position_size * 100) / 100
+                
+                logger.info(f"Fallback position size calculation: {position_size:.2f} lots")
+                return position_size
         
             # Get symbol-specific volume constraints
             min_lot = symbol_info.volume_min
@@ -301,13 +348,23 @@ class RiskManager:
             # Calculate base position size
             account_risk = account_balance * risk_per_trade
             trade_risk = abs(entry_price - stop_loss_price)
+            
+            # Get pip value specifically for the currency pair
             pip_value = self.calculate_pip_value(symbol, entry_price)
             
+            # Calculate position size based on risk amount and stop distance
             if trade_risk == 0 or pip_value == 0:
                 logger.error("Invalid trade risk or pip value")
                 return 0.0
-        
-            base_position = (account_risk / trade_risk) * pip_value
+            
+            # Calculate position size in standard lots
+            pip_size = 0.0001
+            if symbol.endswith('JPY') or 'JPY' in symbol:
+                pip_size = 0.01
+            stop_distance_in_pips = trade_risk / pip_size
+            
+            # Calculate base position size
+            base_position = account_risk / (stop_distance_in_pips * pip_value)
             
             # Apply scaling factors
             position_size = base_position
@@ -338,16 +395,20 @@ class RiskManager:
                     position_size *= scale
                     break
             
-            # 7. Margin check
-            leverage = 100  # Standard leverage 1:100
-            margin_required_per_lot = (entry_price * contract_size) / leverage
-            available_margin = account_balance * 0.5  # Use 50% of balance for margin
+            # 7. Margin check - use a more conservative standard leverage
+            standard_leverage = 100  # Standard leverage 1:100
+            margin_required_per_lot = (entry_price * contract_size) / standard_leverage
+            available_margin = account_balance * 0.3  # Use only 30% of balance for margin
             max_lots_by_margin = available_margin / margin_required_per_lot
             position_size = min(position_size, max_lots_by_margin)
             
-            # 8. Final adjustments
+            # 8. Apply account size-based cap (0.5% of account balance in lots)
+            account_size_cap = account_balance * 0.005  # 0.5% cap
+            position_size = min(position_size, account_size_cap)
+            
+            # 9. Final adjustments
             max_allowed_lot = min(self.max_lot_size, max_lot)  # Use max_lot_size from config
-            position_size = round(position_size / lot_step) * lot_step
+            position_size = math.floor(position_size / lot_step) * lot_step  # Round down to lot step
             position_size = max(min_lot, min(position_size, max_allowed_lot))
             
             logger.info(f"Final position size for {symbol}: {position_size:.2f} lots")

@@ -1335,8 +1335,13 @@ class MT5Handler:
                 logger.error("Failed to get account info")
                 return 0.0
             
+            # Use a realistic leverage instead of potentially glitched values
+            leverage = min(account_info.leverage, 500)
+            if leverage <= 0 or leverage > 500:
+                leverage = 100  # Default to 1:100 leverage if unrealistic value detected
+                
             # Log account details for debugging
-            logger.info(f"Account details - Balance: {account_info.balance:.2f}, Free Margin: {account_info.margin_free:.2f}, Leverage: {account_info.leverage}")
+            logger.info(f"Account details - Balance: {account_info.balance:.2f}, Free Margin: {account_info.margin_free:.2f}, Leverage: {leverage}")
             
             # Ensure symbol is visible in MarketWatch
             if not symbol_info.visible:
@@ -1347,7 +1352,6 @@ class MT5Handler:
             
             # Try to get contract size and calculate basic margin
             contract_size = symbol_info.trade_contract_size
-            leverage = account_info.leverage
             
             # Fallback approach if MT5 margin calculation fails
             try:
@@ -1363,20 +1367,17 @@ class MT5Handler:
                     # MT5 margin calculation failed, use a fallback approach
                     logger.warning(f"MT5 margin calculation failed for {symbol}, using fallback calculation")
                     
-                    # Adjust contract size based on symbol type
-                    adjusted_contract_size = contract_size
-                    
                     # Special handling for JPY pairs which have different pip values
                     if "JPY" in symbol:
-                        # For JPY pairs, adjust the contract size calculation
+                        # For JPY pairs, use standard margin calculation but with proper scaling
                         logger.info(f"Using JPY-specific margin calculation for {symbol}")
-                        # Simple margin calculation with JPY adjustment: (price * contract_size) / (leverage * 100)
-                        margin_1_lot = (price * adjusted_contract_size) / leverage
+                        # For JPY pairs: (price * contract_size) / leverage
+                        margin_1_lot = (price * contract_size) / leverage
                     else:
                         # Standard margin calculation for non-JPY pairs
-                        margin_1_lot = (price * adjusted_contract_size) / leverage
+                        margin_1_lot = (price * contract_size) / leverage
                     
-                    logger.info(f"Fallback margin calculation: Price={price}, ContractSize={adjusted_contract_size}, Leverage={leverage}")
+                    logger.info(f"Fallback margin calculation: Price={price}, ContractSize={contract_size}, Leverage={leverage}")
                 else:
                     logger.info(f"Margin required for 1 lot of {symbol}: {margin_1_lot:.2f}")
             except Exception as e:
@@ -1386,8 +1387,12 @@ class MT5Handler:
             # Calculate maximum lots based on available margin
             available_margin = account_info.margin_free
             
-            # Use only a portion of free margin (90%) as a safety measure
-            max_lots = (available_margin * 0.9) / margin_1_lot
+            # Use only a portion of free margin (50%) as a safety measure - reduced from 90%
+            max_lots = (available_margin * 0.5) / margin_1_lot
+            
+            # Cap max lots to a reasonable amount based on account size
+            reasonable_max = account_info.balance / 1000  # $1000 of account balance = 1 lot max
+            max_lots = min(max_lots, reasonable_max)
             
             # Round down to symbol minimum lot step
             max_lots = math.floor(max_lots / symbol_info.volume_step) * symbol_info.volume_step
