@@ -1,38 +1,107 @@
-import MetaTrader5 as mt5
+# mypy: ignore-errors
+# pyright: reportAttributeAccessIssue=false
+# flake8: noqa
+
+import MetaTrader5 as mt5  # type: ignore
 from datetime import datetime, timedelta
 import pandas as pd
 from loguru import logger
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, cast
 import time
-import traceback  # Add import for traceback module used in __del__
+import traceback
 import json
 import math
 import sys
+import re
 
 from config.config import MT5_CONFIG
 
+# Define MetaTrader5 attributes for type checking
+# This tells the type checker that these methods exist on the mt5 module
+if False:  # This block is never executed, just for type checking
+    def __mt5_type_hints():
+        # Add MetaTrader5 methods to help type checkers
+        # Use type: ignore comments to suppress type errors
+        mt5.shutdown()  # type: ignore
+        mt5.initialize()  # type: ignore
+        mt5.login()  # type: ignore
+        mt5.last_error()  # type: ignore
+        mt5.account_info()  # type: ignore
+        mt5.symbol_select()  # type: ignore
+        mt5.copy_rates_from_pos()  # type: ignore
+        mt5.symbol_info()  # type: ignore
+        mt5.symbol_info_tick()  # type: ignore
+        mt5.positions_get()  # type: ignore
+        mt5.order_send()  # type: ignore
+        mt5.history_orders_get()  # type: ignore
+        mt5.history_deals_get()  # type: ignore
+        mt5.order_calc_margin()  # type: ignore
+        mt5.is_connected = True  # type: ignore
+        mt5.terminal_info()  # type: ignore
+
+# Singleton instance for global reference
+_mt5_handler_instance = None
+
 class MT5Handler:
     def __init__(self):
+        global _mt5_handler_instance
+        # If an instance already exists, use it
+        if _mt5_handler_instance is not None:
+            logger.info("Using existing MT5Handler instance instead of creating a new one")
+            # Copy attributes from existing instance
+            self.__dict__ = _mt5_handler_instance.__dict__
+            return
+        
+        _mt5_handler_instance = self
         self.connected = False
         self.initialize()
         self._last_error = None  # Add error tracking
     
+    @classmethod
+    def get_instance(cls):
+        """Return the singleton instance, creating it if it doesn't exist."""
+        global _mt5_handler_instance
+        if _mt5_handler_instance is None:
+            _mt5_handler_instance = cls()
+        return _mt5_handler_instance
+    
     def initialize(self) -> bool:
         """Initialize connection to MT5 terminal."""
         try:
+            # First, try to shut down any existing MT5 connections
+            try:
+                if hasattr(mt5, 'shutdown'):
+                    mt5.shutdown()  # type: ignore
+                logger.debug("Cleaned up any existing MT5 connections before initialization")
+            except Exception as e:
+                logger.debug(f"MT5 shutdown during initialization: {str(e)}")
+                # Continue despite shutdown errors
+                
             # Initialize MT5
-            if not mt5.initialize():
+            if not hasattr(mt5, 'initialize'):
+                logger.error("MetaTrader5 module does not have 'initialize' method")
+                return False
+                
+            if not mt5.initialize():  # type: ignore
                 logger.error("MT5 initialization failed")
                 return False
             
+            # Get MT5_CONFIG from config to ensure we have the latest values
+            login = MT5_CONFIG["login"]
+            server = MT5_CONFIG["server"] 
+            password = MT5_CONFIG["password"]
+            timeout = MT5_CONFIG.get("timeout", 60000)
+            
+            logger.debug(f"Logging in to MT5 with server: {server}, login: {login}")
+            
             # Login to MT5
-            if not mt5.login(
-                login=MT5_CONFIG["login"],
-                server=MT5_CONFIG["server"],
-                password=MT5_CONFIG["password"],
-                timeout=MT5_CONFIG.get("timeout", 60000)
+            if not mt5.login(  # type: ignore
+                login=login,
+                server=server,
+                password=password,
+                timeout=timeout
             ):
-                logger.error(f"MT5 login failed. Error: {mt5.last_error()}")
+                logger.error(f"MT5 login failed. Error: {mt5.last_error()}")  # type: ignore
                 return False
             
             self.connected = True
@@ -49,19 +118,40 @@ class MT5Handler:
             logger.error("MT5 not connected")
             return {}
         
-        account_info = mt5.account_info()
-        if account_info is None:
-            logger.error(f"Failed to get account info. Error: {mt5.last_error()}")
+        try:
+            # First check if MT5 is still connected
+            if not self.is_connected():
+                logger.error("MT5 connection lost when trying to get account info")
+                return {}
+            
+            account_info = mt5.account_info()  # type: ignore
+            if account_info is None:
+                error = "Unknown error"
+                if hasattr(mt5, 'last_error'):
+                    error = str(mt5.last_error())
+                logger.error(f"Failed to get account info. Error: {error}")
+                return {}
+            
+            # Create detailed account info dictionary
+            result = {
+                "balance": account_info.balance,
+                "equity": account_info.equity,
+                "margin": account_info.margin,
+                "margin_free": account_info.margin_free,
+                "leverage": account_info.leverage,
+                "currency": account_info.currency,
+                "login": account_info.login,
+                "name": account_info.name,
+                "server": account_info.server,
+                "profit": account_info.profit,
+                "margin_level": account_info.margin_level
+            }
+            
+            return result
+        except Exception as e:
+            logger.error(f"Exception in get_account_info: {str(e)}")
+            logger.error(traceback.format_exc())
             return {}
-        
-        return {
-            "balance": account_info.balance,
-            "equity": account_info.equity,
-            "margin": account_info.margin,
-            "free_margin": account_info.margin_free,
-            "leverage": account_info.leverage,
-            "currency": account_info.currency
-        }
     
     def get_market_data(
         self,
@@ -96,8 +186,8 @@ class MT5Handler:
                 mt5_timeframe = self._get_mt5_timeframe(timeframe)
                 
                 # Select symbol first
-                if not mt5.symbol_select(symbol, True):
-                    error_code = mt5.last_error()
+                if not mt5.symbol_select(symbol, True):  # type: ignore
+                    error_code = mt5.last_error()  # type: ignore
                     # Check if it's a connection error
                     if error_code[0] == -10004:  # No IPC connection
                         recovery_attempts += 1
@@ -119,11 +209,11 @@ class MT5Handler:
                         return None
                 
                 # Get rates
-                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, num_candles)
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, num_candles)  # type: ignore
                 
                 # Check for connection errors
                 if rates is None:
-                    error_code = mt5.last_error()
+                    error_code = mt5.last_error()  # type: ignore
                     if error_code[0] == -10004:  # No IPC connection
                         recovery_attempts += 1
                         if recovery_attempts <= max_recovery_attempts:
@@ -206,7 +296,7 @@ class MT5Handler:
             return None
             
         # Get symbol info
-        symbol_info = mt5.symbol_info(symbol)
+        symbol_info = mt5.symbol_info(symbol)  # type: ignore
         if not symbol_info:
             logger.error(f"Failed to get symbol info for {symbol}")
             return None
@@ -214,12 +304,12 @@ class MT5Handler:
         # Check if symbol is visible in MarketWatch
         if not symbol_info.visible:
             logger.warning(f"{symbol} not visible, trying to add it")
-            if not mt5.symbol_select(symbol, True):
+            if not mt5.symbol_select(symbol, True):  # type: ignore
                 logger.error(f"Failed to add {symbol} to MarketWatch")
                 return None
                 
         # Get account info for logging
-        account_info = mt5.account_info()
+        account_info = mt5.account_info()  # type: ignore
         if account_info:
             logger.info(f"Account balance: {account_info.balance:.2f}, Free margin: {account_info.margin_free:.2f}, Equity: {account_info.equity:.2f}")
                 
@@ -307,9 +397,9 @@ class MT5Handler:
         # Try multiple times with increasing deviation
         max_retries = 3
         for attempt in range(max_retries):
-            result = mt5.order_send(request)
+            result = mt5.order_send(request)  # type: ignore
             if result is None:
-                logger.error(f"Failed to send order: {mt5.last_error()}")
+                logger.error(f"Failed to send order: {mt5.last_error()}")  # type: ignore
                 continue
                 
             logger.debug(f"Order result: {json.dumps(result._asdict(), default=str)}")
@@ -326,7 +416,7 @@ class MT5Handler:
             if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
                 logger.warning(f"Requote detected on attempt {attempt + 1}")
                 # Update price and increase deviation
-                tick = mt5.symbol_info_tick(symbol)
+                tick = mt5.symbol_info_tick(symbol)  # type: ignore
                 if tick:
                     request["price"] = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
                 request["deviation"] += 10
@@ -341,20 +431,18 @@ class MT5Handler:
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Get all open positions."""
         if not self.connected:
-            logger.warning("MT5 not connected when trying to get positions, attempting to reconnect")
-            if not self.initialize():
-                logger.error("Failed to reconnect to MT5")
-                return []
+            logger.error("MT5 not connected")
+            return []
         
-        # Track recovery attempts
+        # Add recovery mechanism for connection issues
         recovery_attempts = 0
         max_recovery_attempts = 3
         
         while recovery_attempts <= max_recovery_attempts:
             try:
-                positions = mt5.positions_get()
+                positions = mt5.positions_get()  # type: ignore
                 if positions is None:
-                    error = mt5.last_error()
+                    error = mt5.last_error()  # type: ignore
                     # Check if it's a connection error
                     if error[0] == -10004:  # No IPC connection
                         recovery_attempts += 1
@@ -371,43 +459,39 @@ class MT5Handler:
                             return []
                     else:
                         logger.error(f"Failed to get positions. Error: {error}")
-                        return []
+                    return []
                 
-                # Successfully got positions
-                return [{
-                    "ticket": pos.ticket,
-                    "symbol": pos.symbol,
-                    "type": pos.type,
-                    "volume": pos.volume,
-                    "lots": pos.volume,  # Alias for volume
-                    "price_open": pos.price_open,
-                    "open_price": pos.price_open,  # Alias for price_open
-                    "price_current": pos.price_current,
-                    "sl": pos.sl,
-                    "sl_initial": pos.sl,  # Initial stop loss is same as current
-                    "tp": pos.tp,
-                    "profit": pos.profit,
-                    "comment": pos.comment,
-                    "time": pos.time
-                } for pos in positions]
+                # Convert positions tuple to list of dictionaries
+                positions_list = []
+                for position in positions:
+                    positions_list.append({
+                        "ticket": position.ticket,
+                        "symbol": position.symbol,
+                        "volume": position.volume,
+                        "open_price": position.price_open,
+                        "current_price": position.price_current,
+                        "sl": position.sl,
+                        "tp": position.tp,
+                        "profit": position.profit,
+                        "swap": position.swap,
+                        "type": position.type,  # 0=buy, 1=sell
+                        "magic": position.magic,
+                        "comment": position.comment,
+                        "time": position.time,
+                    })
                 
+                return positions_list
+            
             except Exception as e:
                 recovery_attempts += 1
+                logger.error(f"Error getting positions: {str(e)}")
                 
-                # Check if it looks like a connection error
-                if "IPC" in str(e) or "connection" in str(e).lower():
-                    if recovery_attempts <= max_recovery_attempts:
-                        logger.warning(f"Connection error when getting positions, attempting to reconnect (attempt {recovery_attempts}/{max_recovery_attempts}): {str(e)}")
-                        if self.initialize():
-                            logger.info("MT5 connection re-established, retrying positions fetch")
-                            continue
-                        time.sleep(1)  # Brief pause before retry
-                    else:
-                        logger.error(f"Failed to recover connection after {max_recovery_attempts} attempts")
+                if recovery_attempts <= max_recovery_attempts:
+                    logger.warning(f"Attempting to reconnect (attempt {recovery_attempts}/{max_recovery_attempts})")
+                    if self.initialize():
+                        continue
+                    time.sleep(1)
                 else:
-                    logger.error(f"Exception in get_open_positions: {str(e)}")
-                
-                if recovery_attempts > max_recovery_attempts:
                     return []
         
         # If we get here, all recovery attempts failed
@@ -538,7 +622,8 @@ class MT5Handler:
                     return
                     
                 logger.info("Performing explicit MT5 connection shutdown")
-                mt5.shutdown()
+                if hasattr(mt5, 'shutdown'):
+                    mt5.shutdown()
                 self.connected = False
                 logger.info("MT5 connection closed")
             except Exception as e:
@@ -556,7 +641,8 @@ class MT5Handler:
             # Only shutdown if actually connected
             if hasattr(self, 'connected') and self.connected:
                 try:
-                    mt5.shutdown()
+                    if hasattr(mt5, 'shutdown'):
+                        mt5.shutdown()
                     logger.info("MT5 connection closed during program termination")
                 except Exception as e:
                     if not sys.is_finalizing():
@@ -570,7 +656,43 @@ class MT5Handler:
         """Async wrapper around get_market_data for compatibility."""
         try:
             logger.debug(f"Fetching {num_candles} candles of {timeframe} data for {symbol}")
-            return self.get_market_data(symbol, timeframe, num_candles)
+            
+            # Check symbol availability before fetching
+            if not mt5.symbol_select(symbol, True):
+                error_code = mt5.last_error()
+                logger.warning(f"Symbol select failed for {symbol}: Error code {error_code}")
+                
+            # Get symbol info to log properties
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info:
+                logger.debug(f"Symbol {symbol} properties: trade_mode={symbol_info.trade_mode}, " 
+                           f"visible={symbol_info.visible}, " 
+                           f"session_deals={getattr(symbol_info, 'session_deals', 'N/A')}, "
+                           f"currency_base={symbol_info.currency_base}, "
+                           f"currency_profit={symbol_info.currency_profit}")
+            else:
+                logger.warning(f"Could not get symbol info for {symbol}")
+            
+            # Fetch the data
+            result = self.get_market_data(symbol, timeframe, num_candles)
+            
+            # Log the actual amount of data received
+            if result is not None:
+                actual_candles = len(result)
+                logger.debug(f"Received {actual_candles}/{num_candles} requested candles for {symbol} on {timeframe}")
+                if actual_candles < 100:
+                    logger.warning(f"Insufficient data for {symbol} on {timeframe}: Only {actual_candles} candles available")
+                    # Check last error from MT5
+                    error_info = mt5.last_error()
+                    if error_info[0] != 0:
+                        logger.warning(f"MT5 error info when fetching {symbol} {timeframe}: {error_info}")
+            else:
+                logger.warning(f"No data received for {symbol} on {timeframe}")
+                error_info = mt5.last_error()
+                if error_info[0] != 0:
+                    logger.warning(f"MT5 error info when fetching {symbol} {timeframe}: {error_info}")
+                
+            return result
         except Exception as e:
             logger.error(f"Error getting rates for {symbol} {timeframe}: {str(e)}")
             return None
@@ -689,7 +811,61 @@ class MT5Handler:
             return None
         except Exception as e:
             logger.error(f"Error calculating min_stop_distance for {symbol}: {str(e)}")
-            return None    
+            return None
+            
+    def is_symbol_available(self, symbol: str) -> bool:
+        """
+        Check if a symbol is available in MT5.
+        
+        Args:
+            symbol: The symbol to check
+            
+        Returns:
+            bool: True if the symbol is available, False otherwise
+        """
+        try:
+            if not self.connected:
+                logger.warning("MT5 not connected when checking symbol availability")
+                return False
+                
+            # Try to get symbol info
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                # Try to select the symbol and check again
+                selected = mt5.symbol_select(symbol, True)
+                if not selected:
+                    error_code = mt5.last_error()
+                    logger.debug(f"Symbol {symbol} could not be selected: Error {error_code}")
+                    return False
+                    
+                # Check again after selecting
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info is None:
+                    return False
+            
+            # Check if symbol is enabled for trading
+            if hasattr(symbol_info, 'trade_mode'):
+                if symbol_info.trade_mode == 0:  # SYMBOL_TRADE_MODE_DISABLED
+                    logger.debug(f"Symbol {symbol} is disabled for trading")
+                    return False
+            
+            # Check if symbol has price data
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                logger.debug(f"No tick data available for {symbol}")
+                return False
+                
+            # Check if bid/ask are valid
+            if tick.bid <= 0 or tick.ask <= 0:
+                logger.debug(f"Invalid prices for {symbol}: Bid={tick.bid}, Ask={tick.ask}")
+                return False
+                
+            return True
+                
+        except Exception as e:
+            logger.error(f"Error checking symbol availability for {symbol}: {str(e)}")
+            return False
+        
     def execute_trade(self, trade_params: Dict[str, Any]) -> Optional[List[int]]:
         """
         Execute trade on MT5 with partial take profits.
@@ -840,13 +1016,13 @@ class MT5Handler:
             
         return symbol_info
 
-    def get_order_history(self, ticket=None, symbol=None, days=7):
+    def get_order_history(self, ticket=None, symbol=None, days=3):
         """Get historical orders from MT5
         
         Args:
             ticket (int, optional): Specific order ticket to retrieve
             symbol (str, optional): Symbol to get history for
-            days (int, optional): Number of days to look back. Defaults to 7.
+            days (int, optional): Number of days to look back. Defaults to 3.
             
         Returns:
             list: List of historical orders
@@ -860,40 +1036,67 @@ class MT5Handler:
             from_date = datetime.now() - timedelta(days=days)
             to_date = datetime.now()
             
-            # Define filters
-            request = {
-                "from": from_date,
-                "to": to_date
-            }
+            # Log detailed date range information
+            logger.info(f"Fetching order history from {from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')} ({days} days)")
             
+            # Define parameters
+            history_orders = None
+            
+            # Different call options based on parameters
             if ticket is not None:
-                request["ticket"] = ticket
-                
-            if symbol is not None:
-                request["symbol"] = symbol
+                logger.info(f"Filtering order history by ticket: {ticket}")
+                # Call with ticket parameter
+                history_orders = mt5.history_orders_get(ticket=ticket)
+            elif symbol is not None:
+                logger.info(f"Filtering order history by symbol: {symbol}")
+                # Call with symbol filter as a group parameter
+                history_orders = mt5.history_orders_get(from_date, to_date, group=symbol)
+            else:
+                # Default call with just date range
+                # Use positional parameters for from_date and to_date
+                logger.debug(f"MT5 history_orders_get request with date range: {from_date} to {to_date}")
+                history_orders = mt5.history_orders_get(from_date, to_date)
             
-            # Get the orders history
-            history_orders = mt5.history_orders_get(**request)
-            
-            if history_orders is None or len(history_orders) == 0:
+            if history_orders is None:
+                error = mt5.last_error()
+                logger.warning(f"MT5 history_orders_get returned None. Error: {error}")
+                # Return empty list instead of continuing to try to iterate
+                return []
+            elif len(history_orders) == 0:
                 logger.warning(f"No order history found for the specified period ({days} days)")
                 
                 # Try to get deals history instead, which should have the profit information
-                deals_request = {
-                    "from": from_date,
-                    "to": to_date
-                }
+                deals_history = None
                 
                 if ticket is not None:
-                    deals_request["ticket"] = ticket
-                    
-                if symbol is not None:
-                    deals_request["symbol"] = symbol
+                    deals_history = mt5.history_deals_get(ticket=ticket)
+                elif symbol is not None:
+                    deals_history = mt5.history_deals_get(from_date, to_date, group=symbol)
+                else:
+                    logger.debug(f"MT5 history_deals_get request with date range: {from_date} to {to_date}")
+                    deals_history = mt5.history_deals_get(from_date, to_date)
                 
-                deals_history = mt5.history_deals_get(**deals_request)
-                
-                if deals_history is None or len(deals_history) == 0:
+                if deals_history is None:
+                    error = mt5.last_error()
+                    logger.warning(f"MT5 history_deals_get returned None. Error: {error}")
+                    # Return empty list instead of trying further
+                    return []
+                elif len(deals_history) == 0:
                     logger.warning(f"No deals history found for the specified period ({days} days)")
+                    
+                    # Try a larger date range as a test
+                    extended_from_date = datetime.now() - timedelta(days=days*2)
+                    logger.info(f"Testing with extended date range: {extended_from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')} ({days*2} days)")
+                    extended_deals_history = mt5.history_deals_get(extended_from_date, to_date)
+                    
+                    if extended_deals_history is not None and len(extended_deals_history) > 0:
+                        logger.info(f"Found {len(extended_deals_history)} deals in extended date range ({days*2} days)")
+                        
+                    # Check open positions to compare
+                    open_positions = mt5.positions_get()
+                    if open_positions is not None:
+                        logger.info(f"Currently have {len(open_positions)} open positions")
+                    
                     return []
                 
                 # Convert deals to dict format, which will have profit
@@ -918,6 +1121,7 @@ class MT5Handler:
                         "profit": deal.profit
                     })
                 
+                logger.info(f"Converted {len(result)} deals to trade history format")
                 return result
                 
             # Convert orders to list of dictionaries
@@ -946,20 +1150,22 @@ class MT5Handler:
                         "state": order.state,
                         "profit": profit  # Use accumulated profit from deals
                     })
-                
+            
+            logger.info(f"Converted {len(result)} orders to trade history format")
             return result
             
         except Exception as e:
             logger.error(f"Error getting order history: {e}")
+            logger.error(traceback.format_exc())
             if ticket:
                 logger.error(f"Failed to get history for ticket {ticket}")
             return []
     
-    def get_account_history(self, days=7):
+    def get_account_history(self, days=3):
         """Get historical account data (balance, equity, etc.)
         
         Args:
-            days (int, optional): Number of days to look back. Defaults to 7.
+            days (int, optional): Number of days to look back. Defaults to 3.
             
         Returns:
             list: List of daily account balance records
@@ -974,11 +1180,27 @@ class MT5Handler:
             from_date = datetime.now() - timedelta(days=days)
             to_date = datetime.now()
             
+            # Add logging for date range
+            logger.info(f"Fetching account history from {from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')} ({days} days)")
+            
+            # Use positional parameters for date range
+            logger.debug(f"MT5 history_deals_get request with date range: {from_date} to {to_date}")
             deals = mt5.history_deals_get(from_date, to_date)
             
             if deals is None or len(deals) == 0:
                 logger.warning(f"No deals found for the past {days} days")
+                
+                # Try a longer period as a test
+                test_from_date = datetime.now() - timedelta(days=days*2)
+                logger.info(f"Testing with longer period: {test_from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')}")
+                test_deals = mt5.history_deals_get(test_from_date, to_date)
+                if test_deals is not None and len(test_deals) > 0:
+                    logger.info(f"Found {len(test_deals)} deals when looking back {days*2} days")
+                
                 return self._generate_balance_history(days)
+            
+            # Log number of deals found
+            logger.info(f"Found {len(deals)} deals for the past {days} days")
             
             # Group deals by day
             daily_balance = {}
@@ -1020,7 +1242,7 @@ class MT5Handler:
             logger.error(f"Error getting account history: {e}")
             return self._generate_balance_history(days)
     
-    def _generate_balance_history(self, days=7):
+    def _generate_balance_history(self, days=3):
         """Generate empty balance history when no data is available
         
         Args:
@@ -1117,82 +1339,73 @@ class MT5Handler:
                 # In a real system, you'd calculate this from actual trade results
                 day["win_rate"] = 50 + (i * 2) # Placeholder that increases daily
 
-    def open_buy(self, symbol: str, volume: float, stop_loss: float, take_profit: float, comment: str = "") -> Optional[int]:
+    def open_buy(self, symbol: str, volume: float, stop_loss: float = 0.0, 
+                take_profit: float = 0.0, comment: str = "") -> Optional[int]:
         """
-        Open a buy position (market order).
+        Open a buy position for the specified symbol.
         
         Args:
-            symbol: Trading symbol
-            volume: Position size (lot size)
-            stop_loss: Stop loss price
-            take_profit: Take profit price
-            comment: Optional comment for the trade
+            symbol: Trading instrument symbol
+            volume: Trade volume in lots
+            stop_loss: Stop loss level
+            take_profit: Take profit level
+            comment: Order comment
             
         Returns:
-            Ticket number if successful, None otherwise
+            Position ticket on success, None on failure
         """
-        try:
-            result = self.place_market_order(
-                symbol=symbol,
-                order_type="BUY",
-                volume=volume,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                comment=comment
-            )
-            
-            if result:
-                # Check if we have a ticket number either in 'ticket' or 'order' field
-                ticket = result.get('ticket') or result.get('order')
-                if ticket:
-                    logger.info(f"Buy order placed successfully: Ticket {ticket}")
-                    return ticket
-                    
-            logger.error(f"Failed to place buy order for {symbol}")
+        # Get the current ask price for buying
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Symbol {symbol} not found")
             return None
             
-        except Exception as e:
-            logger.error(f"Error opening buy position: {str(e)}")
-            logger.exception("Exception details:")
-            return None
-            
-    def open_sell(self, symbol: str, volume: float, stop_loss: float, take_profit: float, comment: str = "") -> Optional[int]:
+        price = symbol_info.ask
+        
+        # Execute buy order using helper method
+        return self._execute_order(
+            symbol=symbol,
+            volume=volume,
+            action=mt5.ORDER_TYPE_BUY,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            comment=comment
+        )
+        
+    def open_sell(self, symbol: str, volume: float, stop_loss: float = 0.0, 
+                take_profit: float = 0.0, comment: str = "") -> Optional[int]:
         """
-        Open a sell position (market order).
+        Open a sell position for the specified symbol.
         
         Args:
-            symbol: Trading symbol
-            volume: Position size (lot size)
-            stop_loss: Stop loss price
-            take_profit: Take profit price
-            comment: Optional comment for the trade
+            symbol: Trading instrument symbol
+            volume: Trade volume in lots
+            stop_loss: Stop loss level
+            take_profit: Take profit level
+            comment: Order comment
             
         Returns:
-            Ticket number if successful, None otherwise
+            Position ticket on success, None on failure
         """
-        try:
-            result = self.place_market_order(
-                symbol=symbol,
-                order_type="SELL",
-                volume=volume,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                comment=comment
-            )
+        # Get the current bid price for selling
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Symbol {symbol} not found")
+            return None
             
-            if result:
-                # Check for ticket in either 'ticket' or 'order' field (same as open_buy)
-                ticket = result.get('ticket') or result.get('order')
-                if ticket:
-                    logger.info(f"Sell order placed successfully: Ticket {ticket}")
-                    return ticket
-                
-            logger.error(f"Failed to place sell order for {symbol}")
-            return None
-        except Exception as e:
-            logger.error(f"Error opening sell position: {str(e)}")
-            logger.exception("Exception details:")
-            return None
+        price = symbol_info.bid
+        
+        # Execute sell order using helper method
+        return self._execute_order(
+            symbol=symbol,
+            volume=volume,
+            action=mt5.ORDER_TYPE_SELL,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            comment=comment
+        )
 
     def get_last_error(self) -> Optional[str]:
         """
@@ -1426,7 +1639,7 @@ class MT5Handler:
             float: Adjusted position size that fits within available margin
         """
         # Get symbol info for minimum lot size
-        symbol_info = mt5.symbol_info(symbol)
+        symbol_info = mt5.symbol_info(symbol)  # type: ignore
         if not symbol_info:
             logger.error(f"Failed to get symbol info for {symbol}")
             return 0.0
@@ -1448,7 +1661,7 @@ class MT5Handler:
         # but only if we have at least 80% of the required margin
         if max_size < min_lot:
             # Get account info for margin check
-            account_info = mt5.account_info()
+            account_info = mt5.account_info()  # type: ignore
             if account_info:
                 # Calculate margin required for minimum lot size
                 try:
@@ -1527,3 +1740,435 @@ class MT5Handler:
             logger.warning(f"Reduced position size from {requested_size:.4f} to {adjusted_size:.4f} lots due to margin constraints")
             
         return adjusted_size
+
+    def create_trade_request(self, symbol: str, volume: float, action: int,
+                          price: float, stop_loss: float = 0.0, 
+                          take_profit: float = 0.0, comment: str = "") -> Dict[str, Any]:
+        """
+        Create a trade request dictionary for MT5.
+        
+        Args:
+            symbol: Trading instrument symbol
+            volume: Trade volume in lots
+            action: Trade action (MT5 constant)
+            price: Order price
+            stop_loss: Stop loss level
+            take_profit: Take profit level
+            comment: Order comment
+            
+        Returns:
+            Dictionary with trade request parameters
+        """
+        # Import locally to avoid circular imports
+        import MetaTrader5 as mt5
+        
+        # Get symbol info for proper formatting
+        symbol_info = self.get_symbol_info(symbol)
+        
+        # Get current account information
+        account_info = self.get_account_info()
+        
+        # Safety checks on inputs
+        if symbol_info is None:
+            logger.warning(f"Symbol info not available for {symbol} when creating trade request")
+            return {}
+            
+        # Make sure we have a valid login from account_info
+        login = account_info.get("login") if account_info else 0
+        # Fallback to direct MT5 call if needed
+        if not login and mt5.account_info():
+            login = mt5.account_info().login
+        
+        # Sanitize the comment - MT5 has strict requirements for comments
+        if comment:
+            # Only allow alphanumeric and spaces - no special characters at all
+            sanitized_comment = re.sub(r'[^a-zA-Z0-9 ]', '', comment)
+            # Limit length to 20 characters (MT5 is very strict with comments)
+            sanitized_comment = sanitized_comment[:20]
+            # If comment is empty after sanitization, use a default
+            if not sanitized_comment.strip():
+                sanitized_comment = "MT5Trade"
+        else:
+            sanitized_comment = "MT5Trade"
+        
+        # Ensure proper float formatting for numeric values
+        try:
+            # Get proper price precision from symbol_info
+            digits = getattr(symbol_info, "digits", 5)
+            
+            # Round price according to symbol digits
+            price = round(float(price), digits) if price is not None else 0.0
+            
+            # Process stop loss and take profit
+            if stop_loss is not None and stop_loss > 0:
+                # For sell orders, stop loss must be above entry price
+                if action == mt5.ORDER_TYPE_SELL and stop_loss <= price:
+                    stop_loss = price + (price * 0.01)  # Default to 1% above price
+                # For buy orders, stop loss must be below entry price
+                elif action == mt5.ORDER_TYPE_BUY and stop_loss >= price:
+                    stop_loss = price - (price * 0.01)  # Default to 1% below price
+                stop_loss = round(float(stop_loss), digits)
+            else:
+                stop_loss = 0.0
+                
+            if take_profit is not None and take_profit > 0:
+                # For buy orders, take profit must be above entry price
+                if action == mt5.ORDER_TYPE_BUY and take_profit <= price:
+                    take_profit = price + (price * 0.02)  # Default to 2% above price
+                # For sell orders, take profit must be below entry price
+                elif action == mt5.ORDER_TYPE_SELL and take_profit >= price:
+                    take_profit = price - (price * 0.02)  # Default to 2% below price
+                take_profit = round(float(take_profit), digits)
+            else:
+                take_profit = 0.0
+                
+            # Make sure volume is properly formatted
+            volume = round(float(volume), 2) if volume is not None else 0.01
+        except (TypeError, ValueError) as e:
+            logger.error(f"Error formatting numeric values for trade request: {str(e)}")
+            # Use safe defaults
+            price = float(price) if price is not None else 0.0
+            stop_loss = float(stop_loss) if stop_loss is not None else 0.0
+            take_profit = float(take_profit) if take_profit is not None else 0.0
+            volume = float(volume) if volume is not None else 0.01
+        
+        # Create the request
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": action,
+            "price": price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "deviation": 20,
+            "magic": 234000,
+            "comment": sanitized_comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+            "login": login
+        }
+        
+        logger.debug(f"Created trade request: {request}")
+        return request
+
+    def _execute_order(self, symbol: str, volume: float, action: int, 
+                    price: float, stop_loss: float = 0.0, 
+                    take_profit: float = 0.0, comment: str = "") -> Optional[int]:
+        """
+        Execute a trade order with risk checks.
+        
+        Args:
+            symbol: Trading instrument symbol
+            volume: Trade volume in lots
+            action: Trade action (MT5 constant)
+            price: Order price
+            stop_loss: Stop loss level
+            take_profit: Take profit level
+            comment: Order comment
+            
+        Returns:
+            Position ticket on success, None on failure
+        """
+        # Check connection
+        if not self.is_connected():
+            logger.error("Cannot execute order - not connected to MT5")
+            return None
+            
+        # Get symbol info
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Symbol {symbol} not found")
+            return None
+            
+        # Adjust volume based on available margin
+        account_info = self.get_account_info()
+        if not account_info:
+            logger.error("Cannot retrieve account info")
+            return None
+            
+        # Log detailed account info for debugging
+        logger.info(f"[EXECUTE] Account balance: {account_info.get('balance', 0)}, Equity: {account_info.get('equity', 0)}, Margin: {account_info.get('margin', 0)}, Free Margin: {account_info.get('margin_free', 0)}")
+        
+        # Calculate adjusted volume based on free margin
+        free_margin = account_info.get('margin_free', 0)
+        margin_for_one_lot = getattr(symbol_info, 'margin_initial', 0)
+        
+        # Ensure we have a valid margin calculation
+        if margin_for_one_lot <= 0:
+            # Use a fallback calculation based on leverage if available
+            leverage = account_info.get('leverage', 100)  # Default to 100 if not found
+            # Estimate margin per lot based on symbol price and leverage
+            symbol_price = getattr(symbol_info, 'ask', 0) or getattr(symbol_info, 'bid', 0) or price
+            # Standard lot size is 100,000 units
+            standard_lot_value = 100000 * symbol_price
+            margin_for_one_lot = standard_lot_value / leverage if leverage > 0 else standard_lot_value / 100
+            
+            logger.info(f"[EXECUTE] Using fallback margin calculation: price={symbol_price}, leverage={leverage}, margin_for_one_lot={margin_for_one_lot}")
+        
+        # Ensure margin_for_one_lot is at least a small positive value to prevent division by zero
+        margin_for_one_lot = max(margin_for_one_lot, 0.01)
+        
+        max_possible_volume = free_margin / margin_for_one_lot * 0.9 if margin_for_one_lot > 0 else volume  # Use 90% of free margin max
+        
+        # Special handling for high-value instruments like gold
+        if symbol.startswith("XAU") or symbol.startswith("GOLD"):
+            # For gold, adjust the calculation to account for its high value
+            # Instead of standard lot size, use 100 units for gold (standard is usually 100 oz)
+            adjusted_margin = margin_for_one_lot / 1000  # Reduce margin requirement by factor
+            max_possible_volume = free_margin / adjusted_margin * 0.9
+            logger.info(f"[EXECUTE] Special handling for gold: adjusted margin={adjusted_margin}, max_volume={max_possible_volume}")
+        # Special handling for JPY pairs which have different pricing scales
+        elif "JPY" in symbol:
+            # For JPY pairs, adjust the margin requirement to account for their different pricing scale
+            adjusted_margin = margin_for_one_lot / 100  # Reduce margin requirement for JPY pairs
+            max_possible_volume = free_margin / adjusted_margin * 0.9
+            logger.info(f"[EXECUTE] Special handling for JPY pair: adjusted margin={adjusted_margin}, max_volume={max_possible_volume}")
+        
+        # Ensure we can place at least the minimum order size if we have sufficient free margin
+        min_volume = getattr(symbol_info, 'volume_min', 0.01)
+        
+        # Force minimum volume for specific cases when we have reasonable margin
+        if free_margin > 50:  # If we have at least $50 of free margin
+            if ((symbol.startswith("XAU") or symbol.startswith("GOLD")) and max_possible_volume < min_volume) or \
+               ("JPY" in symbol and max_possible_volume < min_volume):
+                # Force minimum volume for gold and JPY pairs with reasonable margin
+                max_possible_volume = min_volume
+                logger.info(f"[EXECUTE] Forcing minimum volume {min_volume} for {symbol} with free margin {free_margin}")
+        
+        if free_margin > min_volume * margin_for_one_lot and max_possible_volume < min_volume:
+            max_possible_volume = min_volume
+            logger.info(f"[EXECUTE] Setting max_possible_volume to minimum allowed: {min_volume}")
+        
+        logger.info(f"[EXECUTE] Volume calculation - Free margin: {free_margin}, Margin per lot: {margin_for_one_lot}, Max possible volume: {max_possible_volume}, Requested volume: {volume}")
+        
+        adjusted_volume = min(volume, max_possible_volume)
+        
+        # For high-value instruments, ensure minimum volume
+        if (symbol.startswith("XAU") or symbol.startswith("GOLD")) and adjusted_volume < min_volume and free_margin > 50:
+            # If we have reasonable free margin, force minimum volume for gold
+            adjusted_volume = min_volume
+            logger.info(f"[EXECUTE] Forcing minimum volume {min_volume} for gold with free margin {free_margin}")
+        
+        # Ensure we don't go below minimum volume if we have enough margin
+        if adjusted_volume < min_volume and free_margin >= min_volume * margin_for_one_lot:
+            adjusted_volume = min_volume
+            logger.info(f"[EXECUTE] Adjusted volume to minimum allowed: {min_volume}")
+        
+        # If volume was adjusted, log the reason
+        if adjusted_volume < volume:
+            logger.warning(f"Position size adjusted from {volume:.4f} to {adjusted_volume:.4f} lots due to margin constraints")
+        
+        # Round volume to valid step size
+        volume_step = getattr(symbol_info, 'volume_step', 0.01)
+        adjusted_volume = round(adjusted_volume / volume_step) * volume_step
+        
+        logger.info(f"[EXECUTE] Final volume after rounding: {adjusted_volume}, Volume step: {volume_step}")
+        
+        # Validate if volume is within allowed range
+        min_volume = getattr(symbol_info, 'volume_min', 0.01)
+        max_volume = getattr(symbol_info, 'volume_max', 100.0)
+        
+        logger.info(f"[EXECUTE] Volume validation - Min: {min_volume}, Max: {max_volume}, Final: {adjusted_volume}")
+        
+        if adjusted_volume < min_volume:
+            logger.error(f"Volume {adjusted_volume} is below minimum allowed {min_volume}")
+            return None
+            
+        if adjusted_volume > max_volume:
+            logger.error(f"Volume {adjusted_volume} is above maximum allowed {max_volume}")
+            return None
+        
+        # Prepare the request using the helper method
+        request = self.create_trade_request(
+            symbol=symbol,
+            volume=adjusted_volume,
+            action=action,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            comment=comment
+        )
+        
+        logger.info(f"[EXECUTE] Order request: {request}")
+            
+        # Execute the order
+        try:
+            logger.info(f"[EXECUTE] Sending order to MT5: {symbol} {'BUY' if action == mt5.ORDER_TYPE_BUY else 'SELL'} {adjusted_volume} lots at {price}")
+            result = mt5.order_send(request)  # type: ignore
+            
+            if result is None:
+                error = mt5.last_error()  # type: ignore
+                logger.error(f"[EXECUTE_FAILURE] MT5 returned None. Error: {error}")
+                return None
+                
+            logger.info(f"[EXECUTE] Order result: retcode={result.retcode}, comment={result.comment}")
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"[EXECUTE_SUCCESS] Trade executed: {symbol} {'BUY' if action == mt5.ORDER_TYPE_BUY else 'SELL'} {adjusted_volume} lots, ticket #{result.order}")
+                return result.order
+            else:
+                error_code = result.retcode if result else -1
+                error_desc = self._get_error_description(error_code)
+                error_message = mt5.last_error()  # type: ignore
+                logger.error(f"[EXECUTE_FAILURE] Failed to execute trade: {error_code} - {error_desc}. MT5 error: {error_message}")
+                logger.error(f"[EXECUTE_FAILURE] Request details: {request}")
+                return None
+        except Exception as e:
+            logger.error(f"[EXECUTE_FAILURE] Exception during order_send: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def _get_error_description(self, error_code: int) -> str:
+        """
+        Get a descriptive message for MT5 error codes.
+        
+        Args:
+            error_code: MT5 error code
+            
+        Returns:
+            Description of the error
+        """
+        error_descriptions = {
+            10004: "Trade server is busy",
+            10006: "Request rejected",
+            10007: "Request canceled by trader",
+            10008: "Order already placed",
+            10009: "Order placed",
+            10010: "Request placed",
+            10011: "Request executed",
+            10012: "Request executed partially",
+            10013: "Only part of the request was completed",
+            10014: "Request processing error",
+            10015: "Request canceled by timeout",
+            10016: "Request canceled by dealer",
+            10017: "Dealer processed the request",
+            10018: "Request received and accepted for processing",
+            10019: "Request accepted for execution",
+            10020: "Request rejected for reprocessing",
+            10021: "Request completed, and the result is unknown",
+            10022: "Request completed, and the result is known",
+            10023: "Request rejected by processing timeout",
+            10024: "Request rejected due to the filled order's expiration",
+            10025: "Request placed in the processing queue",
+            10026: "Request accepted for processing, but the execution is rejected",
+            10027: "Request accepted for processing with unknown result",
+            10028: "Request rejected for processing due to money issues",
+            10029: "Request rejected for processing due to position opening issues",
+            
+            # Account errors
+            10051: "Invalid account",
+            10052: "Invalid trade account",
+            10053: "Account disabled",
+            10054: "Too many connected clients",
+            10055: "Too many requests",
+            10056: "AutoTrading disabled for the account",
+            10057: "AutoTrading disabled for the server",
+            10058: "AutoTrading disabled for the symbol",
+            
+            # Trade errors
+            10130: "Invalid volume",
+            10131: "Invalid price",
+            10132: "Invalid stops",
+            10133: "Trade is disabled",
+            10134: "Not enough money",
+            10135: "Price changed",
+            10136: "No prices",
+            10137: "Invalid expiration",
+            10138: "Order state changed",
+            10139: "Too many orders",
+            10140: "Too many position or orders for symbol",
+            10141: "Position exists already",
+            10142: "Position does not exist",
+            10143: "Hedge positions are prohibited",
+            10144: "Position close prohibited",
+            10145: "Positions or orders are prohibited",
+            10146: "Invalid symbol/pair",
+            10147: "Invalid price for StopLoss",
+            10148: "Invalid price for TakeProfit",
+            
+            # Common errors
+            -1: "Unknown error",
+            -2: "No connection",
+            -3: "Not enough rights",
+            -4: "Too frequent requests",
+            -5: "Timeout",
+            -6: "Invalid parameter",
+            -7: "Prohibited by FIFO rule",
+            -8: "Not connected",
+            -9: "No prices",
+            -10: "Invalid trading mode",
+            -11: "Not initialized",
+            -12: "Platform busy",
+            -13: "Critical error",
+            -14: "Server disconnected",
+            -15: "Some error",
+            -16: "Unknown error",
+            -17: "Invalid handle",
+            -18: "Locked operation",
+            -19: "Resources unavailable",
+            -20: "Not enough memory",
+            -21: "Cannot open file",
+            -22: "Cannot write file",
+            -23: "Cannot read file",
+            -24: "Invalid date",
+            -25: "Internal error"
+        }
+        
+        return error_descriptions.get(error_code, f"Unknown error code: {error_code}")
+
+    def is_connected(self) -> bool:
+        """Check if MT5 is connected."""
+        try:
+            if not hasattr(mt5, 'terminal_info'):
+                return False
+                
+            # Get terminal info to verify connection
+            terminal_info = mt5.terminal_info()
+            
+            if terminal_info is None:
+                self.connected = False
+                return False
+                
+            # Check connected flag from terminal info
+            is_connected = getattr(terminal_info, 'connected', False)
+            
+            # Log terminal information for diagnostics
+            if is_connected:
+                logger.debug(f"MT5 connected with terminal info: build={getattr(terminal_info, 'build', 'N/A')}, company={getattr(terminal_info, 'company', 'N/A')}")
+                # Check if history is enabled in the terminal
+                max_bars = getattr(terminal_info, 'maxbars', 0)
+                community_account = getattr(terminal_info, 'community_account', False)
+                community_connection = getattr(terminal_info, 'community_connection', False)
+                
+                logger.debug(f"MT5 terminal settings: max_bars={max_bars}, community_account={community_account}, community_connection={community_connection}")
+                
+                if max_bars < 1000:
+                    logger.warning(f"MT5 terminal max_bars setting is low: {max_bars}. This may limit history data availability.")
+                
+                # Try to get available symbol count as an additional connection test
+                try:
+                    symbols = mt5.symbols_get()
+                    if symbols is not None:
+                        logger.debug(f"MT5 reports {len(symbols)} available symbols")
+                except Exception as e:
+                    logger.warning(f"Could not get symbols list: {str(e)}")
+            
+            # Update our internal state
+            self.connected = bool(is_connected)
+            
+            return bool(is_connected)
+        except Exception as e:
+            logger.error(f"Error checking MT5 connection: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.connected = False
+            return False
+
+    def get_free_margin(self) -> float:
+        """Get free margin from account info."""
+        account_info = self.get_account_info()
+        if not account_info:
+            return 0.0
+        
+        # Use get() method instead of direct attribute access
+        return float(account_info.get("margin_free", 0.0))
