@@ -1,0 +1,17 @@
+[tool.python]
+no-bytecode = true
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Prevent bytecode generation while testing
+addopts = "-p no:cacheprovider"
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Setting this to true will prevent __pycache__ directories from being created
+[tool.python.dont-write-bytecode]
+enable = true 

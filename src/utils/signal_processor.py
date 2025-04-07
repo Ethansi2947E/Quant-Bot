@@ -3,11 +3,12 @@ from typing import Dict, List, Any, Optional
 from loguru import logger
 import asyncio
 import json
+import time
 
 from src.risk_manager import RiskManager
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
-from config.config import TELEGRAM_CONFIG
+from config.config import TELEGRAM_CONFIG, TRADING_CONFIG
 
 class SignalProcessor:
     """
@@ -17,6 +18,7 @@ class SignalProcessor:
     - Processing trading signals
     - Executing trades based on signals
     - Handling signals with existing positions
+    - Validating signals against real-time MT5 data before execution
     """
     
     def __init__(self, mt5_handler=None, risk_manager=None, telegram_bot=None, config=None):
@@ -31,13 +33,19 @@ class SignalProcessor:
         """
         self.mt5_handler = mt5_handler if mt5_handler is not None else MT5Handler()
         self.risk_manager = risk_manager if risk_manager is not None else RiskManager()
-        self.telegram_bot = telegram_bot if telegram_bot is not None else TelegramBot.get_instance()
+        self.telegram_bot = telegram_bot if telegram_bot else TelegramBot.get_instance()
         self.config = config or {}
         
         # State tracking
         self.active_trades = {}
         self.min_confidence = self.config.get("min_confidence", 0.5)  # Default to 50% confidence
         self.allow_position_additions = self.config.get("allow_position_additions", True)  # Default to allowing position additions
+        self.trading_enabled = self.config.get("trading_enabled", True)  # Default to enabled
+        
+        # Real-time validation settings
+        self.validate_before_execution = self.config.get("validate_before_execution", True)
+        self.price_validation_tolerance = self.config.get("price_validation_tolerance", 0.0003)  # Default 0.03% tolerance
+        self.tick_delay_tolerance = self.config.get("tick_delay_tolerance", 2.0)  # Maximum 2 seconds delay for ticks
         
     async def initialize(self, config=None):
         """Initialize the SignalProcessor with the given configuration."""
@@ -46,6 +54,7 @@ class SignalProcessor:
             # Update derived values
             self.min_confidence = self.config.get("min_confidence", 0.5)
             self.allow_position_additions = self.config.get("allow_position_additions", True)
+            self.trading_enabled = self.config.get("trading_enabled", True)
             
         # Initialize TelegramBot if needed
         if self.telegram_bot and hasattr(self.telegram_bot, 'initialize') and not getattr(self.telegram_bot, 'is_running', False):
@@ -150,19 +159,23 @@ class SignalProcessor:
             
         return result
     
-    async def process_signals(self, signals: List[Dict]) -> None:
+    async def process_signals(self, signals: List[Dict]) -> List[Dict]:
         """
         Process trading signals and execute trades if appropriate.
         
         Args:
             signals: List of signal dictionaries
+            
+        Returns:
+            List[Dict]: Execution results for each processed signal
         """
         if not signals:
-            return
+            logger.debug("No signals to process")
+            return []
             
-        if not self.mt5_handler:
-            logger.warning("MT5Handler not set, cannot process signals")
-            return
+        if not self.trading_enabled:
+            logger.info("Trading is disabled in SignalProcessor, skipping signal processing")
+            return []
             
         logger.info(f"Processing {len(signals)} signals")
         
@@ -170,6 +183,11 @@ class SignalProcessor:
         
         for signal in signals:
             try:
+                # Skip if trading is disabled
+                if not self.trading_enabled:
+                    logger.info("Trading disabled, skipping remaining signals")
+                    break
+                    
                 # Basic validation
                 if not isinstance(signal, dict):
                     logger.warning(f"Invalid signal format: {signal}")
@@ -198,6 +216,18 @@ class SignalProcessor:
                 if not symbol_info or not hasattr(symbol_info, 'trade_mode') or symbol_info.trade_mode == 0:
                     logger.warning(f"Symbol {symbol} is not tradable, skipping signal")
                     continue
+                    
+                # Real-time validation against MT5 price data
+                if self.validate_before_execution:
+                    is_valid = await self._validate_signal_with_real_time_data(signal)
+                    if not is_valid:
+                        logger.warning(f"Signal for {symbol} rejected: failed real-time MT5 data validation")
+                        execution_results.append({
+                            "symbol": symbol, 
+                            "direction": direction, 
+                            "result": {"success": False, "error": "Failed real-time data validation"}
+                        })
+                        continue
                     
                 # Get existing positions for this symbol by filtering from all open positions
                 all_positions = self.mt5_handler.get_open_positions()
@@ -279,36 +309,24 @@ class SignalProcessor:
                 lot_size = validation_result["adjusted_position_size"]
                 logger.info(f"Position size adjusted to {lot_size} based on risk validation")
             
-            # # Calculate lot size if not already provided
-            # if lot_size <= 0:
-            #     # Get account info for position sizing calculation
-            #     account_info = self.mt5_handler.get_account_info()
-            #     account_balance = account_info.get('balance', 0)
-                
-            #     # Get necessary parameters from signal
-            #     symbol = signal.get("symbol", "")
-            #     direction = signal.get("direction", "").lower()
-            #     entry_price = signal.get("entry_price") or signal.get("entry", 0.0)
-            #     stop_loss = signal.get("stop_loss", 0.0)
-            #     risk_percent = self.config.get("risk_per_trade", 1.0)
-                
-            #     lot_size = self.risk_manager.calculate_position_size(
-            #         account_balance=account_balance,
-            #         risk_per_trade=risk_percent,
-            #         entry_price=entry_price,
-            #         stop_loss_price=stop_loss,
-            #         symbol=symbol
-            #     )
+            # Use settings from config
+            from config.config import TRADING_CONFIG
             
-            # if lot_size <= 0:
-            #     logger.warning(f"Invalid lot size {lot_size} calculated for {symbol}, skipping trade")
-            #     return {"success": False, "error": f"Invalid lot size {lot_size}"}
-                
-
-
-            # OVERRIDE: Use fixed lot size of 0.01 for all trades
-            lot_size = 0.01
-            logger.info(f"Using fixed lot size of {lot_size} as requested")
+            # If config specifies to use fixed lot size, use that value
+            if TRADING_CONFIG.get("use_fixed_lot_size", True):
+                lot_size = TRADING_CONFIG.get("fixed_lot_size", 0.01)
+                logger.info(f"Using fixed lot size of {lot_size} from config")
+            else:
+                # If we reach here and lot_size is still 0, set a safe default
+                if lot_size <= 0:
+                    lot_size = 0.01
+                    logger.warning(f"No valid lot size, using minimum default: {lot_size}")
+                    
+            # Ensure lot size doesn't exceed max from config
+            max_lot_size = TRADING_CONFIG.get("max_lot_size", 0.3)
+            if lot_size > max_lot_size:
+                logger.info(f"Lot size {lot_size} exceeds maximum {max_lot_size}, reducing")
+                lot_size = max_lot_size
             
             # Use open_buy or open_sell instead of open_position
             result = None
@@ -373,7 +391,6 @@ class SignalProcessor:
                 if self.telegram_bot:
                     # Use TELEGRAM_CONFIG from imported module instead of trying to access it as a local variable
                     # Get chat_id from config or use None as default
-                    from config.config import TELEGRAM_CONFIG
                     default_chat_id = TELEGRAM_CONFIG.get("chat_id", None)
                     
                     # Check if telegram_bot is properly initialized, but don't try to initialize it again
@@ -510,4 +527,73 @@ class SignalProcessor:
             String indicating position type ("buy" or "sell")
         """
         position_type = position.get("type", 0)
-        return "buy" if position_type == 0 else "sell" 
+        return "buy" if position_type == 0 else "sell"
+
+    async def _validate_signal_with_real_time_data(self, signal: Dict) -> bool:
+        """
+        Validate the signal against real-time MT5 tick data before execution.
+        
+        Args:
+            signal: The signal dictionary to validate
+            
+        Returns:
+            bool: True if the signal is valid when compared to real-time data
+        """
+        try:
+            symbol = signal.get("symbol")
+            direction = signal.get("direction")
+            entry_price = signal.get("entry_price")
+            
+            if not symbol or not direction or not entry_price:
+                logger.warning(f"Cannot validate signal missing essential data: {signal}")
+                return False
+                
+            # Get the latest tick from MT5
+            latest_tick = self.mt5_handler.get_last_tick(symbol)
+            if not latest_tick:
+                logger.warning(f"Cannot get latest tick for {symbol}, skipping validation")
+                return True  # Don't fail validation if we can't get tick data
+                
+            # Check tick freshness - ensure tick is recent
+            now = time.time()
+            tick_time = latest_tick.time if hasattr(latest_tick, 'time') else now
+            time_diff = now - tick_time
+            
+            if time_diff > self.tick_delay_tolerance:
+                logger.warning(f"Tick data for {symbol} is too old ({time_diff:.2f}s), skipping validation")
+                return True  # Don't fail validation on old ticks, just warn
+                
+            # Get current bid/ask prices
+            current_bid = latest_tick.bid if hasattr(latest_tick, 'bid') else 0
+            current_ask = latest_tick.ask if hasattr(latest_tick, 'ask') else 0
+            
+            if current_bid == 0 or current_ask == 0:
+                logger.warning(f"Invalid bid/ask prices for {symbol}: bid={current_bid}, ask={current_ask}")
+                return True  # Don't fail validation on missing prices, just warn
+                
+            # Calculate price difference based on signal direction
+            price_to_compare = current_bid if direction.lower() == "sell" else current_ask
+            price_diff_percent = abs(entry_price - price_to_compare) / price_to_compare
+            
+            # Log the validation check
+            logger.debug(f"Validating {direction} signal for {symbol}. "
+                        f"Signal price: {entry_price:.5f}, Current {direction} price: {price_to_compare:.5f}, "
+                        f"Difference: {price_diff_percent:.5%}")
+            
+            # Validate the price is within tolerance
+            if price_diff_percent <= self.price_validation_tolerance:
+                logger.info(f"Signal for {symbol} {direction} validated: "
+                          f"Signal price {entry_price:.5f} matches current price {price_to_compare:.5f} "
+                          f"(diff: {price_diff_percent:.5%})")
+                return True
+            else:
+                logger.warning(f"Signal for {symbol} {direction} rejected: "
+                             f"Price discrepancy too large. Signal: {entry_price:.5f}, "
+                             f"Current: {price_to_compare:.5f}, Diff: {price_diff_percent:.5%}, "
+                             f"Max allowed: {self.price_validation_tolerance:.5%}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error validating signal against real-time data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return True  # Don't fail validation on error, just warn 

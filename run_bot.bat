@@ -1,0 +1,3 @@
+@echo off
+echo Running Trading Bot with bytecode generation disabled...
+python -B main.py %* 
