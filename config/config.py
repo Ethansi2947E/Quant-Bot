@@ -20,24 +20,34 @@ MT5_CONFIG = {
 # Trading Configuration
 TRADING_CONFIG = {
     "symbols": [
-        {"symbol": "AUDCADm", "timeframe": "M1"},
-        {"symbol": "BTCUSDm", "timeframe": "M1"},
-        {"symbol": "AUDJPYm", "timeframe": "M1"},
-        {"symbol": "CADJPYm", "timeframe": "M1"},
-        {"symbol": "EURCADm", "timeframe": "M1"},
-        {"symbol": "XAUUSDm", "timeframe": "M1"},
-        {"symbol": "EURCHFm", "timeframe": "M1"},
-        {"symbol": "EURGBPm", "timeframe": "M1"},
-        {"symbol": "EURJPYm", "timeframe": "M1"},
-        {"symbol": "AUDUSDm", "timeframe": "M1"},
-        {"symbol": "GBPUSDm", "timeframe": "M1"},
-        {"symbol": "NZDUSDm", "timeframe": "M1"},
-        {"symbol": "USDCADm", "timeframe": "M1"},
-        {"symbol": "USDJPYm", "timeframe": "M1"},
-        {"symbol": "USDCHFm", "timeframe": "M1"},
-        {"symbol": "XAGUSDm", "timeframe": "M1"},
+        # "AUDCADm",  "AUDJPYm", "CADJPYm", "EURCADm", "XAUUSDm", 
+        # "EURCHFm", "EURGBPm", "EURJPYm", "AUDUSDm", "GBPUSDm", "NZDUSDm", 
+        # "USDCADm", "USDJPYm", "USDCHFm", "XAGUSDm", "BTCUSDm", "ETHUSDm"
+        "V75",
+        "V100",
+        "V10",
+        "V25",
+        "V75",
+        "V100",
+        "Boom 300",
+        "Boom 500",
+        "Boom 1000",
+        "Crash 300",
+        "Crash 500",
+        "Crash 1000",
+        "Jump 10",
+        "Jump 25",
+        "Jump 50",
+        "Jump 75",  
+        "Jump 100",
+        "DS10",
+        "DS30",
+        # The following symbols appear to be unavailable in your MT5 account:
+        # "DS50",
+        # "DEX 600",
+        # "DEX 900",
+        # "DEX 1500",
     ],
-    "timeframes": ['M1', 'H1'],  # Updated timeframes for the breakout_reversal strategy
     "fixed_lot_size": 0.01,  # Fixed lot size to use if use_fixed_lot_size is true
     "use_fixed_lot_size": True,  # When true, use fixed lot size instead of risk-based calculation
     "max_lot_size": 0.3,  # Maximum lot size even when using risk-based calculation
@@ -45,7 +55,7 @@ TRADING_CONFIG = {
     "spread_factor": 1.5,
 
     # Position addition settings
-    "allow_position_additions": True,  # Disable adding to existing positions
+    "allow_position_additions": False,  # Disable adding to existing positions
     "max_position_size": 2.0,         # Maximum total position size after additions
     "position_addition_threshold": 0.5,  # Minimum distance in ATR for adding positions
 
@@ -116,73 +126,28 @@ SESSION_CONFIG: Dict[str, Dict[str, Any]] = {
    
 # Risk Management Configuration
 def get_risk_config(timeframe="M15"):
-    # Default values based on timeframe
-    if timeframe == "M1":
-        return {
-            'max_daily_trades': 15,
-            'max_concurrent_trades': 3,
-            'min_trades_spacing': 1,
-            'max_daily_loss': 0.02,
-            'max_weekly_loss': 0.05,
-            'max_monthly_loss': 0.10,
-            'max_drawdown_pause': 0.05,
-            'max_weekly_trades': 60,
-            'min_win_rate_continue': 0.30,
-            'max_risk_per_trade': 0.004,
-            'consecutive_loss_limit': 4,
-            'volatility_scaling': True,
-            'partial_tp_enabled': True,
-            'recovery_mode': {
-                'enabled': True,
-                'drawdown_trigger': 0.05,
-                'position_size_reduction': 0.5,
-                'min_wins_to_exit': 2
-            }
+    # Return the same configuration regardless of timeframe
+    return {
+        'max_daily_trades': 15,
+        'max_concurrent_trades': 1000,
+        'min_trades_spacing': 1,
+        'max_daily_loss': 0.015,
+        'max_weekly_loss': 0.04,
+        'max_monthly_loss': 0.08,
+        'max_drawdown_pause': 0.05,
+        'max_weekly_trades': 40,
+        'min_win_rate_continue': 0.30,
+        'max_risk_per_trade': 0.008,
+        'consecutive_loss_limit': 4,
+        'volatility_scaling': True,
+        'partial_tp_enabled': True,
+        'recovery_mode': {
+            'enabled': True,
+            'drawdown_trigger': 0.05,
+            'position_size_reduction': 0.5,
+            'min_wins_to_exit': 2
         }
-    elif timeframe == "M5":
-        return {
-            'max_daily_trades': 10,
-            'max_concurrent_trades': 2,
-            'min_trades_spacing': 1,
-            'max_daily_loss': 0.015,
-            'max_weekly_loss': 0.04,
-            'max_monthly_loss': 0.08,
-            'max_drawdown_pause': 0.05,
-            'max_weekly_trades': 40,
-            'min_win_rate_continue': 0.30,
-            'max_risk_per_trade': 0.006,
-            'consecutive_loss_limit': 4,
-            'volatility_scaling': True,
-            'partial_tp_enabled': True,
-            'recovery_mode': {
-                'enabled': True,
-                'drawdown_trigger': 0.05,
-                'position_size_reduction': 0.5,
-                'min_wins_to_exit': 2
-            }
-        }
-    else:  # Default M15 and higher
-        return {
-            'max_daily_trades': 8,
-            'max_concurrent_trades': 2,
-            'min_trades_spacing': 1,
-            'max_daily_loss': 0.015,
-            'max_weekly_loss': 0.03,
-            'max_monthly_loss': 0.06,
-            'max_drawdown_pause': 0.05,
-            'max_weekly_trades': 32,
-            'min_win_rate_continue': 0.30,
-            'max_risk_per_trade': 0.008,
-            'consecutive_loss_limit': 4,
-            'volatility_scaling': True,
-            'partial_tp_enabled': True,
-            'recovery_mode': {
-                'enabled': True,
-                'drawdown_trigger': 0.05,
-                'position_size_reduction': 0.5,
-                'min_wins_to_exit': 2
-            }
-        }
+    }
 
 # Position Sizing Configuration
 POSITION_CONFIG = {
@@ -199,35 +164,18 @@ POSITION_CONFIG = {
 
 # Market Condition Filters
 def get_market_filters(timeframe="M15"):
-    # Default values based on timeframe
-    if timeframe == "M1":
-        max_spread = 10.0
-        correlation_threshold = 0.70
-        min_confirmations = 3
-    elif timeframe == "M5":
-        max_spread = 15.0
-        correlation_threshold = 0.65
-        min_confirmations = 2
-    elif timeframe == "H1":
-        max_spread = 40.0
-        correlation_threshold = 0.45
-        min_confirmations = 2
-    else:  # Default M15 and other timeframes
-        max_spread = 30.0
-        correlation_threshold = 0.50
-        min_confirmations = 2
-    
+    # Return standardized filters regardless of timeframe
     return {
         'min_daily_range': 0.0008,
         'max_daily_range': 0.0150,
         'min_volume_threshold': 400,
-        'max_spread_threshold': max_spread,
-        'correlation_threshold': correlation_threshold,
+        'max_spread_threshold': 20.0,
+        'correlation_threshold': 0.60,
         'trend_strength_min': 0.40,
         'volatility_percentile': 0.10,
         'momentum_threshold': 0.008,
         'structure_quality_min': 0.60,
-        'min_confirmations': min_confirmations
+        'min_confirmations': 2
     }
 
 # Trade Exit Configuration
@@ -240,42 +188,25 @@ TRADE_EXIT_CONFIG = {
     ],
     'trailing_stop': {
         'enabled': True,
-        'activation_ratio': 0.5,
-        'trail_points': 0.5
+        'activation_ratio': 0.5,  # Activate at 0.5R profit (50% to original TP)
+        'trail_points': 10.0,     # Trail by 10 pips (adjusted based on symbol digits)
+        'trailing_activation_factor': 0.5,  # Alternative way to specify activation (50% of risk)
+        'min_profit_activation': 0.2,  # Minimum profit ratio to activate (20% to TP)
+        'buffer_pips': 2,         # Buffer in pips to avoid unnecessary updates
+        'auto_sl_setup': True,    # Auto-setup a stop loss if none exists
+        'auto_sl_percent': 0.02,  # Auto-setup stop loss at 2% from entry if none exists
     }
 }
 
 # Volatility Thresholds
 def get_volatility_config(timeframe="M15"):
-    # Default values based on timeframe
-    if timeframe == "M1":
-        return 0.9
-    elif timeframe == "M5":
-        return 1.0
-    elif timeframe == "M15":
-        return 1.2
-    elif timeframe == "H1":
-        return 1.5
-    elif timeframe == "H4":
-        return 1.8
-    else:  # D1 and others
-        return 2.0
+    # Return standard volatility setting regardless of timeframe
+    return 1.2
 
 # Pattern Detector Configuration
 def get_pattern_detector_config(timeframe="M15"):
-    # Adjust parameters based on timeframe
+    # Return standard pattern detection settings regardless of timeframe
     min_sweep_factor = 1.0
-    if timeframe == "M1":
-        min_sweep_factor = 0.6
-    elif timeframe == "M5":
-        min_sweep_factor = 0.8
-    elif timeframe == "H1":
-        min_sweep_factor = 1.2
-    elif timeframe == "H4":
-        min_sweep_factor = 1.5
-    elif timeframe == "D1":
-        min_sweep_factor = 2.0
-        
     min_sweep_pips = 3.0 * min_sweep_factor
     max_sweep_pips = 30.0 * min_sweep_factor
     
@@ -311,52 +242,21 @@ def get_pattern_detector_config(timeframe="M15"):
 
 # Risk Manager Configuration
 def get_risk_manager_config(timeframe="M15"):
-    # Default values based on timeframe
-    if timeframe == "M1":
-        max_risk_per_trade = 0.004
-        max_daily_loss = 0.02
-        max_concurrent_trades = 3
-        max_daily_trades = 15
-        min_trades_spacing = 1
-    elif timeframe == "M5":
-        max_risk_per_trade = 0.006
-        max_daily_loss = 0.015
-        max_concurrent_trades = 2
-        max_daily_trades = 10
-        min_trades_spacing = 1
-    elif timeframe == "H1":
-        max_risk_per_trade = 0.01
-        max_daily_loss = 0.02
-        max_concurrent_trades = 2
-        max_daily_trades = 4
-        min_trades_spacing = 2
-    elif timeframe == "H4":
-        max_risk_per_trade = 0.015
-        max_daily_loss = 0.025
-        max_concurrent_trades = 1
-        max_daily_trades = 2
-        min_trades_spacing = 4
-    else:  # M15 is default
-        max_risk_per_trade = 0.008
-        max_daily_loss = 0.015
-        max_concurrent_trades = 2
-        max_daily_trades = 8
-        min_trades_spacing = 1
-    
+    # Return the same configuration regardless of timeframe
     return {
         # Core risk parameters
-        'max_risk_per_trade': max_risk_per_trade,
-        'max_daily_loss': max_daily_loss,
+        'max_risk_per_trade': 0.008,
+        'max_daily_loss': 0.015,
         'max_daily_risk': 0.03,
         'max_weekly_loss': 10,
         'max_monthly_loss': 10,
         'max_drawdown_pause': 0.05,
         
         # Position management
-        'max_concurrent_trades': max_concurrent_trades,
-        'max_daily_trades': max_daily_trades,
+        'max_concurrent_trades': 1000,
+        'max_daily_trades': 8,
         'max_weekly_trades': 8,
-        'min_trades_spacing': min_trades_spacing,
+        'min_trades_spacing': 1,
         'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
         'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
         'max_lot_size': TRADING_CONFIG['max_lot_size'],
