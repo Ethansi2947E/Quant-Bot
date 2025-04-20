@@ -17,6 +17,10 @@ import asyncio
 import numpy as np
 
 from config.config import MT5_CONFIG, TRADING_CONFIG
+# Remove the import for RiskManager - will use type hints instead
+import typing
+if typing.TYPE_CHECKING:
+    from src.risk_manager import RiskManager  # For type hints only, no circular import
 
 # Define MetaTrader5 attributes for type checking
 # This tells the type checker that these methods exist on the mt5 module
@@ -41,82 +45,8 @@ if False:  # This block is never executed, just for type checking
         mt5.is_connected = True  # type: ignore
         mt5.terminal_info()  # type: ignore
 
-# Real-time market data monitoring
-class RealTimeDataCallback:
-    """Callback class for real-time data from MT5"""
-    
-    def __init__(self, symbol, timeframe, callback_function):
-        """
-        Initialize a real-time data callback for MT5.
-        
-        Args:
-            symbol: Trading symbol to monitor
-            timeframe: Timeframe to monitor
-            callback_function: Function to call with processed data
-        """
-        self.symbol = symbol
-        self.timeframe = timeframe
-        self.callback_function = callback_function
-        
-    async def on_tick(self, tick_data):
-        """
-        Process tick data from MT5 and pass it to the callback function.
-        
-        Args:
-            tick_data: Raw tick data from MT5
-        """
-        try:
-            # Access MT5Handler to process the tick
-            mt5_handler = MT5Handler.get_instance()
-            if not mt5_handler:
-                logger.error("MT5Handler instance not available for tick processing")
-                return
-            
-            # Create an enhanced tick object with symbol information
-            enhanced_tick_data = {'original_tick': tick_data, 'symbol': self.symbol}
-            
-            # Process the tick data
-            processed_tick = await mt5_handler.on_tick(enhanced_tick_data)
-            
-            if processed_tick:
-                # Call the callback function with the processed data
-                await self.callback_function(
-                    self.symbol, 
-                    self.timeframe, 
-                    processed_tick, 
-                    'tick'
-                )
-        except Exception as e:
-            logger.error(f"Error in on_tick callback for {self.symbol}: {e}")
-            
-    async def on_new_candle(self, candle_data):
-        """
-        Process candle data from MT5 and pass it to the callback function.
-        
-        Args:
-            candle_data: Raw candle data from MT5
-        """
-        try:
-            # Access MT5Handler to process the candle
-            mt5_handler = MT5Handler.get_instance()
-            if not mt5_handler:
-                logger.error("MT5Handler instance not available for candle processing")
-                return
-            
-            # Process the candle data
-            processed_candles = await mt5_handler.on_candle(candle_data, self.symbol, self.timeframe)
-            
-            if processed_candles:
-                # Call the callback function with the processed data
-                await self.callback_function(
-                    self.symbol, 
-                    self.timeframe, 
-                    processed_candles, 
-                    'candle'
-                )
-        except Exception as e:
-            logger.error(f"Error in on_new_candle callback for {self.symbol}/{self.timeframe}: {e}")
-            logger.exception(e)
+# Import RiskManager
+from src.risk_manager import RiskManager
 
 # Singleton instance for global reference
 _mt5_handler_instance = None
@@ -136,10 +66,8 @@ class MT5Handler:
         self.initialize()
         self._last_error = None  # Add error tracking
         
-        # Add real-time data monitoring
-        self.real_time_callbacks = {}
-        self.real_time_enabled = False
-        self.real_time_monitoring_task = None
+        # Initialize risk manager reference
+        self.risk_manager = None
     
     @classmethod
     def get_instance(cls):
@@ -365,6 +293,7 @@ class MT5Handler:
         # If we get here, all recovery attempts failed
         return None
     
+    
     def place_market_order(
         self,
         symbol: str,
@@ -417,26 +346,53 @@ class MT5Handler:
         # Validate stop loss and take profit
         min_stop_distance = symbol_info.point * symbol_info.trade_stops_level
         
+        # Adjust stop loss and take profit if they're too close to the entry price
         if action == mt5.ORDER_TYPE_BUY:
             if stop_loss >= price - min_stop_distance:
-                logger.error(f"Invalid stop loss for BUY order: SL ({stop_loss}) too close to entry ({price}). Min distance: {min_stop_distance}")
-                return None
+                logger.warning(f"Stop loss for BUY order too close to entry, adjusting: SL ({stop_loss}) → ({price - min_stop_distance - symbol_info.point})")
+                stop_loss = price - min_stop_distance - symbol_info.point
             if take_profit <= price + min_stop_distance:
-                logger.error(f"Invalid take profit for BUY order: TP ({take_profit}) too close to entry ({price}). Min distance: {min_stop_distance}")
-                return None
+                logger.warning(f"Take profit for BUY order too close to entry, adjusting: TP ({take_profit}) → ({price + min_stop_distance + symbol_info.point})")
+                take_profit = price + min_stop_distance + symbol_info.point
         else:  # SELL
             if stop_loss <= price + min_stop_distance:
-                logger.error(f"Invalid stop loss for SELL order: SL ({stop_loss}) too close to entry ({price}). Min distance: {min_stop_distance}")
-                return None
+                logger.warning(f"Stop loss for SELL order too close to entry, adjusting: SL ({stop_loss}) → ({price + min_stop_distance + symbol_info.point})")
+                stop_loss = price + min_stop_distance + symbol_info.point
             if take_profit >= price - min_stop_distance:
-                logger.error(f"Invalid take profit for SELL order: TP ({take_profit}) too close to entry ({price}). Min distance: {min_stop_distance}")
-                return None
+                logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
+                take_profit = price - min_stop_distance - symbol_info.point
         
         # Log original volume request
         logger.info(f"Requested position size: {volume:.4f} lots")
         
         # Adjust position size based on available margin
-        adjusted_volume = self.adjust_position_size(symbol, volume, price)
+        adjusted_volume = volume  # Default to requested volume
+        if self.risk_manager:
+            try:
+                # Get account balance from account_info
+                if account_info and 'balance' in account_info:
+                    account_balance = account_info['balance']
+                    
+                    # Get stop loss for risk calculation if not 0
+                    stop_loss_price = stop_loss if stop_loss != 0 else price * 0.95  # Default 5% if no SL
+                    
+                    # Call calculate_position_size with correct parameters
+                    if hasattr(self.risk_manager, 'calculate_position_size'):
+                        risk_percent = self.risk_manager.max_risk_per_trade * 100 if hasattr(self.risk_manager, 'max_risk_per_trade') else 1.0
+                        adjusted_volume = self.risk_manager.calculate_position_size(
+                            account_balance=account_balance,
+                            risk_per_trade=risk_percent,
+                            entry_price=price,
+                            stop_loss_price=stop_loss_price,
+                            symbol=symbol
+                        )
+                        if adjusted_volume != volume:
+                            logger.info(f"Adjusted position size: {adjusted_volume:.4f} lots (based on risk management)")
+                    else:
+                        logger.warning("RiskManager doesn't have calculate_position_size method")
+            except Exception as e:
+                logger.warning(f"Failed to adjust position size: {str(e)}. Using original size: {volume:.4f} lots")
+                adjusted_volume = volume
         
         # Enhanced margin error handling
         if adjusted_volume == 0:
@@ -462,12 +418,29 @@ class MT5Handler:
         # Round volume to valid step size
         adjusted_volume = round(adjusted_volume / symbol_info.volume_step) * symbol_info.volume_step
         
+        # Get appropriate filling mode for this symbol
+        filling_mode = self.get_symbol_filling_mode(symbol)
+        logger.debug(f"Using filling mode {filling_mode} for {symbol}")
+        
+        # Ensure comment is valid
+        if comment is None or not isinstance(comment, str):
+            comment = f"MT5Bot-{symbol}"
+        # Limit comment length to 31 characters to comply with MT5 requirements
+        comment = comment[:31]
+        
+        # Remove any potentially problematic characters from comment
+        comment = re.sub(r'[^a-zA-Z0-9_\-\.]', '', comment)
+        
+        # If comment is empty after sanitization, use a default
+        if not comment:
+            comment = f"MT5Bot{symbol.replace(' ', '')}"
+        
         # Prepare the request
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": adjusted_volume,
-            "type": action,
+            "type": action,  # Use MT5 constant instead of string
             "price": price,
             "sl": stop_loss,
             "tp": take_profit,
@@ -475,41 +448,78 @@ class MT5Handler:
             "magic": 234000,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": filling_mode,
         }
         
-        # Try multiple times with increasing deviation
+        # Try multiple times with increasing deviation and different filling modes if needed
         max_retries = 3
-        for attempt in range(max_retries):
-            result = mt5.order_send(request)  # type: ignore
-            if result is None:
-                logger.error(f"Failed to send order: {mt5.last_error()}")  # type: ignore
-                continue
+        filling_modes_to_try = [filling_mode]
+        
+        # Prepare fallback filling modes in case primary one fails
+        if filling_mode != mt5.ORDER_FILLING_IOC:
+            filling_modes_to_try.append(mt5.ORDER_FILLING_IOC)
+        if filling_mode != mt5.ORDER_FILLING_FOK and mt5.ORDER_FILLING_FOK not in filling_modes_to_try:
+            filling_modes_to_try.append(mt5.ORDER_FILLING_FOK)
+        
+        for filling_mode in filling_modes_to_try:
+            request["type_filling"] = filling_mode
+            logger.debug(f"Trying with filling mode: {filling_mode}")
+            
+            for attempt in range(max_retries):
+                result = mt5.order_send(request)  # type: ignore
+                if result is None:
+                    error_info = mt5.last_error()  # type: ignore
+                    logger.error(f"Failed to send order: {error_info}")
+                    
+                    if "unsupported filling" in str(error_info).lower():
+                        # Break this attempt loop and try next filling mode
+                        logger.warning(f"Unsupported filling mode {filling_mode}, will try alternative")
+                        break
+                    
+                    continue
+                    
+                logger.debug(f"Order result: {json.dumps(result._asdict(), default=str)}")
                 
-            logger.debug(f"Order result: {json.dumps(result._asdict(), default=str)}")
-            
-            if result.retcode == mt5.TRADE_RETCODE_DONE or result.retcode == 10009:
-                logger.info(f"Order executed successfully: Ticket {result.order}")
-                return {
-                    "ticket": result.order,
-                    "volume": result.volume,
-                    "price": result.price,
-                    "comment": comment
-                }
-            
-            if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
-                logger.warning(f"Requote detected on attempt {attempt + 1}")
-                # Update price and increase deviation
-                tick = mt5.symbol_info_tick(symbol)  # type: ignore
-                if tick:
-                    request["price"] = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
+                if result.retcode == mt5.TRADE_RETCODE_DONE or result.retcode == 10009:
+                    logger.info(f"Order executed successfully: Ticket {result.order}")
+                    return {
+                        "ticket": result.order,
+                        "volume": result.volume,
+                        "price": result.price,
+                        "comment": comment
+                    }
+                
+                if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
+                    logger.warning(f"Requote detected on attempt {attempt + 1}")
+                    # Update price and increase deviation
+                    tick = mt5.symbol_info_tick(symbol)  # type: ignore
+                    if tick:
+                        request["price"] = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
+                    request["deviation"] += 10
+                    continue
+                    
+                if result.retcode == 10016:  # Request canceled by dealer
+                    logger.warning(f"Order canceled by dealer. Trying with increased deviation")
+                    request["deviation"] += 15
+                    continue
+                
+                if result.retcode == 10018:  # Market closed
+                    logger.error(f"Market closed for {symbol}")
+                    return None
+                
+                # For any other error code, log the specific error
+                error_description = self.get_error_info(result.retcode)
+                logger.error(f"Order failed with error code {result.retcode}: {error_description}")
+                
+                if "unsupported filling" in str(result.comment).lower():
+                    # Break this attempt loop and try next filling mode
+                    logger.warning(f"Unsupported filling mode detected, will try alternative")
+                    break
+                
+                # For other errors, try again with increased deviation
                 request["deviation"] += 10
-                continue
-                
-            logger.error(f"Order failed with error code {result.retcode}")
-            return None
             
-        logger.error("Failed to place order after all retries")
+        logger.error("Failed to place order after trying all filling modes and retries")
         return None
     
     def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -596,6 +606,9 @@ class MT5Handler:
         close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
         price = mt5.symbol_info_tick(pos.symbol).ask if close_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(pos.symbol).bid
         
+        # Get the appropriate filling mode for this symbol
+        filling_mode = self.get_symbol_filling_mode(pos.symbol)
+        
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
@@ -607,7 +620,7 @@ class MT5Handler:
             "magic": 234000,
             "comment": "Close position",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": filling_mode,  # Use appropriate filling mode for this symbol
         }
         
         result = mt5.order_send(request)
@@ -868,19 +881,13 @@ class MT5Handler:
         
     def execute_trade(self, trade_params: Dict[str, Any]) -> Optional[List[int]]:
         """
-        Execute trade on MT5 with partial take profits.
+        Execute a trade with the given parameters.
         
         Args:
-            trade_params: Dictionary containing:
-                - symbol: Trading symbol
-                - signal_type: 'BUY' or 'SELL'
-                - entry_price: Entry price
-                - stop_loss: Stop loss price
-                - position_size: Total position size
-                - partial_tp_levels: List of dicts with 'ratio' and 'size' for each TP
-                
+            trade_params: Dictionary with trade parameters
+            
         Returns:
-            List of ticket numbers for opened positions, or None if execution failed
+            Optional[List[int]]: List of ticket numbers if successful, None otherwise
         """
         try:
             # Validate input parameters
@@ -894,6 +901,10 @@ class MT5Handler:
             risk = abs(trade_params['entry_price'] - trade_params['stop_loss'])
             base_volume = trade_params['position_size']
             orders = []
+            
+            # Get appropriate filling mode for this symbol
+            symbol = trade_params['symbol']
+            filling_mode = self.get_symbol_filling_mode(symbol)
             
             # Process each partial take profit level
             for i, tp_level in enumerate(trade_params['partial_tp_levels']):
@@ -931,7 +942,7 @@ class MT5Handler:
                         "magic": 234000,
                         "comment": f"Python Bot - {trade_params['signal_type']} TP{i+1} ({tp_level['ratio']:.1f}R)",
                         "type_time": mt5.ORDER_TIME_GTC,
-                        "type_filling": mt5.ORDER_FILLING_IOC,
+                        "type_filling": filling_mode,  # Use appropriate filling mode for this symbol
                     }
                     orders.append(request)
             
@@ -1204,7 +1215,8 @@ class MT5Handler:
             
             # Group deals by day
             daily_balance = {}
-            current_balance = self.get_account_info().get("balance", 0)
+            account_info = self.get_account_info()
+            current_balance = account_info.get("balance", 0) if account_info is not None else 0
             
             # Start with current balance and work backwards
             for deal in sorted(deals, key=lambda x: x.time, reverse=True):
@@ -1252,7 +1264,8 @@ class MT5Handler:
             list: Generated balance history with current balance
         """
         result = []
-        current_balance = self.get_account_info().get("balance", 0)
+        account_info = self.get_account_info()
+        current_balance = account_info.get("balance", 0) if account_info is not None else 0
         
         # Create entries for each day
         for i in range(days):
@@ -1576,128 +1589,310 @@ class MT5Handler:
             logger.error(f"Error getting MT5 error info: {str(e)}")
             return f"Error retrieving MT5 error: {str(e)}"
 
-    def calculate_position_size(self, symbol: str, price: float, 
-                                risk_amount: Optional[float] = None, 
-                                risk_percent: Optional[float] = None,
-                                entry_price: Optional[float] = None,
-                                stop_loss_price: Optional[float] = None,
-                                max_percent_of_balance: float = 3.0,
-                                enforce_limits: bool = True) -> float:
-   
+    def calculate_position_size(self, symbol, price=None, risk_amount=None, risk_percent=None, entry_price=None, stop_loss_price=None):
+        """
+        Calculate position size based on risk parameters.
+        
+        Args:
+            symbol: Symbol to trade
+            price: Current price (optional)
+            risk_amount: Fixed amount to risk (optional)
+            risk_percent: Percentage of balance to risk (optional)
+            entry_price: Entry price for the trade (optional)
+            stop_loss_price: Stop loss price (optional)
+            
+        Returns:
+            float: Position size in lots
+        """
         try:
-            # Get symbol info and account info
-            symbol_info = self.get_symbol_info(symbol)
-            account_info = self.get_account_info()
-            
-            if not symbol_info or not account_info:
-                logger.error(f"Cannot calculate position size - missing symbol info or account info")
-                return 0.0
+            # Check connection
+            if not self.connected:
+                logger.error("MT5 not connected")
+                return self.get_symbol_min_lot_size(symbol)  # Use new method for minimum lot size
                 
-            # Extract needed values
-            account_balance = account_info.get('balance', 0.0)
-            free_margin = account_info.get('margin_free', 0.0)
-            leverage = account_info.get('leverage', 100)
-            
-            # Get contract & price specifics
-            contract_size = getattr(symbol_info, 'trade_contract_size', 100000)
-            digit_multiplier = 10 ** getattr(symbol_info, 'digits', 5)
-            point_value = getattr(symbol_info, 'point', 0.00001)
-            min_lot = getattr(symbol_info, 'volume_min', 0.01)
-            max_lot = getattr(symbol_info, 'volume_max', 100.0)
-            lot_step = getattr(symbol_info, 'volume_step', 0.01)
-            
-            # Get margin required per lot
-            margin_initial = getattr(symbol_info, 'margin_initial', 0.0)
-            
-            # Fallback margin calculation if not available
-            if margin_initial <= 0:
-                standard_lot_value = contract_size * price
-                margin_initial = standard_lot_value / leverage
-            
-            # Safety check to prevent division by zero
-            margin_initial = max(margin_initial, 0.01) 
-            
-            # CALCULATION METHOD 1: Based on risk amount and stop loss
-            if risk_amount is not None and entry_price is not None and stop_loss_price is not None:
-                # Calculate position size based on fixed risk amount
-                risk_amount = min(risk_amount, account_balance * max_percent_of_balance / 100)
-                stop_distance = abs(entry_price - stop_loss_price)
+            # Get symbol info
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                logger.error(f"Symbol {symbol} not found in MT5")
+                return self.get_symbol_min_lot_size(symbol)  # Use new method for minimum lot size
                 
-                if stop_distance <= 0:
-                    logger.error(f"Invalid stop distance for {symbol}: entry={entry_price}, stop={stop_loss_price}")
-                    return 0.0
-                    
-                # Calculate appropriate position size in standard lots based on risk
-                one_pip_value = (contract_size / digit_multiplier) * point_value * 10
-                pips_at_risk = stop_distance / point_value
-                position_size = risk_amount / (pips_at_risk * one_pip_value)
+            # Ensure the symbol is selected
+            if not mt5.symbol_select(symbol, True):
+                logger.error(f"Failed to select symbol {symbol}")
+                return self.get_symbol_min_lot_size(symbol)  # Use new method for minimum lot size
                 
-            # CALCULATION METHOD 2: Based on risk percentage and stop loss
-            elif risk_percent is not None and entry_price is not None and stop_loss_price is not None:
-                # Convert percentage to decimal
-                risk_decimal = min(risk_percent / 100, max_percent_of_balance / 100)
+            # Get the pip value
+            digits = symbol_info.digits
+            point = symbol_info.point
+            contract_size = symbol_info.trade_contract_size
+            
+            # For Forex pairs, a pip is usually the 4th decimal place for 5-digit quotes
+            # For JPY pairs, a pip is usually the 2nd decimal place for 3-digit quotes
+            pip_multiplier = 10 if digits == 3 or digits == 5 else 1
+            pip_value = point * pip_multiplier
+            
+            # Get entry price if not provided
+            if entry_price is None:
+                # Use the latest tick if price not specified
+                if price is None:
+                    tick = self.get_last_tick(symbol)
+                    if tick is None:
+                        logger.error(f"Failed to get last tick for {symbol}")
+                        return 0.01
+                    price = tick.get('ask', 0)
+                entry_price = price
                 
-                # Calculate risk amount
-                risk_amount = account_balance * risk_decimal
-                stop_distance = abs(entry_price - stop_loss_price)
+            # Get account info
+            account_info = mt5.account_info()
+            if account_info is None:
+                logger.error("Failed to get account info")
+                return 0.01
                 
-                if stop_distance <= 0:
-                    logger.error(f"Invalid stop distance for {symbol}: entry={entry_price}, stop={stop_loss_price}")
-                    return 0.0
-                    
-                # Calculate position size based on risk percentage
-                one_pip_value = (contract_size / digit_multiplier) * point_value * 10
-                pips_at_risk = stop_distance / point_value
-                position_size = risk_amount / (pips_at_risk * one_pip_value)
+            # Determine risk amount
+            if risk_amount is None and risk_percent is not None:
+                balance = account_info.balance
+                risk_amount = balance * risk_percent / 100.0
+            elif risk_amount is None:
+                logger.warning("Neither risk_amount nor risk_percent provided, using minimal position size")
+                return 0.01
                 
-            # CALCULATION METHOD 3: Based on maximum affordable size
+            # Calculate stop loss distance
+            if stop_loss_price is not None:
+                stop_loss_pips = abs(entry_price - stop_loss_price) / pip_value
             else:
-                # Calculate max position size based on free margin
-                max_size_by_margin = free_margin / margin_initial * 0.9  # Use 90% of free margin
-                position_size = max_size_by_margin
-            
-            # Apply symbol-specific adjustments if needed
-            # Special handling for gold
-            if symbol.startswith("XAU") or symbol.startswith("GOLD"):
-                # Gold typically has higher margin requirements
-                position_size *= 0.1  # Reduce position size for gold
-            
-            # Special handling for JPY pairs
-            elif "JPY" in symbol:
-                # JPY pairs have different pip values
-                position_size *= 0.1  # Adjust for JPY pairs
-            
-            # Special handling for crypto
-            elif any(crypto in symbol for crypto in ["BTC", "ETH", "LTC", "XRP"]):
-                position_size *= 0.01  # Significant reduction for crypto due to volatility
-            
-            # ENFORCE SIZE LIMITS if requested
-            if enforce_limits:
-                # Apply min/max volume constraints
-                position_size = max(min_lot, min(position_size, max_lot))
+                logger.warning("No stop loss price provided, using default 10 pips")
+                stop_loss_pips = 10.0
                 
-                # Round to valid lot step
-                position_size = round(position_size / lot_step) * lot_step
+            # If stop loss distance is zero or very small, use default
+            if stop_loss_pips < 0.1:
+                logger.warning(f"Very small stop loss distance: {stop_loss_pips} pips, using default 10 pips")
+                stop_loss_pips = 10.0
                 
-                # Log any adjustments made
-                logger.info(f"Position size calculated for {symbol}: {position_size} lots")
-                
-                # Double-check against free margin
-                required_margin = position_size * margin_initial
-                if required_margin > free_margin:
-                    # Further reduce position size if needed
-                    adjusted_size = (free_margin * 0.9) / margin_initial
-                    adjusted_size = round(adjusted_size / lot_step) * lot_step
-                    adjusted_size = max(min_lot, min(adjusted_size, max_lot))
-                    
-                    logger.warning(f"Position size adjusted from {position_size} to {adjusted_size} due to margin constraints")
-                    position_size = adjusted_size
+            # Get conversion rate to account currency if needed
+            account_currency = account_info.currency
+            conversion_rate = 1.0
             
+            # Calculate position size based on risk
+            position_size = risk_amount / (stop_loss_pips * pip_value * contract_size * conversion_rate)
+            
+            # Adjust to symbol's volume_step
+            volume_step = symbol_info.volume_step
+            position_size = math.floor(position_size / volume_step) * volume_step
+            
+            # Ensure minimum size
+            position_size = max(position_size, symbol_info.volume_min)
+            
+            # Ensure maximum size
+            position_size = min(position_size, symbol_info.volume_max)
+            
+            logger.info(f"Calculated position size for {symbol}: {position_size} lots (risk: {risk_amount})")
+            
+            # Get minimum lot size and volume step for the symbol
+            min_lot_size = self.get_symbol_min_lot_size(symbol)
+            
+            # Normalize the lot size according to the symbol's requirements
+            position_size = self.normalize_volume(symbol, position_size)
+            
+            # Ensure position size is not less than minimum
+            if position_size < min_lot_size:
+                logger.info(f"Calculated position size {position_size} is less than minimum {min_lot_size} for {symbol}, using minimum")
+                position_size = min_lot_size
+                
             return position_size
             
         except Exception as e:
             logger.error(f"Error calculating position size: {str(e)}")
-            return 0.01  # Default to minimum size on error
+            return 0.01  # Return minimum position size on error
+
+    def get_symbol_min_lot_size(self, symbol: str) -> float:
+        """
+        Get the minimum permitted lot size for a specified symbol.
+        
+        Args:
+            symbol (str): The trading symbol to check
+            
+        Returns:
+            float: Minimum lot size for the symbol, or 0.01 as fallback
+        """
+        try:
+            if not self.connected:
+                logger.error("MT5 not connected")
+                return 0.01
+                
+            # Get symbol info from MT5
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                return 0.01
+                
+            # Extract minimum volume and volume step
+            min_volume = symbol_info.volume_min
+            volume_step = symbol_info.volume_step
+            
+            logger.debug(f"Symbol {symbol} min volume: {min_volume}, volume step: {volume_step}")
+            
+            # Ensure the value is valid
+            if min_volume <= 0:
+                logger.warning(f"Symbol {symbol} has invalid min_volume {min_volume}, using 0.01")
+                return 0.01
+                
+            return min_volume
+            
+        except Exception as e:
+            logger.error(f"Error getting min lot size for {symbol}: {str(e)}")
+            return 0.01
+
+    def normalize_volume(self, symbol: str, volume: float) -> float:
+        """
+        Normalize the volume to be within the allowed range and aligned with volume_step.
+        
+        Args:
+            symbol (str): The trading symbol
+            volume (float): The desired volume
+            
+        Returns:
+            float: The normalized volume that is valid for the symbol
+        """
+        try:
+            if not self.connected:
+                logger.error("MT5 not connected")
+                return 0.01
+                
+            # Get symbol info from MT5
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                return 0.01
+                
+            # Extract volume constraints
+            min_volume = symbol_info.volume_min
+            max_volume = symbol_info.volume_max
+            volume_step = symbol_info.volume_step
+            
+            logger.debug(f"Symbol {symbol} volume constraints: min={min_volume}, max={max_volume}, step={volume_step}")
+            
+            # Check if volume is below minimum
+            if volume < min_volume:
+                logger.warning(f"Volume {volume} is below minimum {min_volume} for {symbol}, adjusting to minimum")
+                return min_volume
+                
+            # Check if volume is above maximum
+            if volume > max_volume:
+                logger.warning(f"Volume {volume} exceeds maximum {max_volume} for {symbol}, adjusting to maximum")
+                return max_volume
+                
+            # Normalize volume to the nearest volume_step
+            normalized_volume = round(volume / volume_step) * volume_step
+            
+            # Ensure it's still within bounds after rounding
+            if normalized_volume < min_volume:
+                normalized_volume = min_volume
+            elif normalized_volume > max_volume:
+                normalized_volume = max_volume
+                
+            # Ensure precision: round to acceptable number of decimal places
+            # Most brokers handle up to 2 decimal places for lot sizes
+            normalized_volume = round(normalized_volume, 2)
+            
+            return normalized_volume
+            
+        except Exception as e:
+            logger.error(f"Error normalizing volume for {symbol}: {str(e)}")
+            return 0.01
+
+    # NEW METHOD: Periodic Data Fetching
+    async def fetch_data_periodically(self, symbols, timeframes, callback, interval_seconds=60):
+        """
+        Periodically fetch data for multiple symbols and timeframes.
+        
+        Args:
+            symbols (list): List of symbols to fetch data for
+            timeframes (list): List of timeframes to fetch data for
+            callback (callable): Function to call with fetched data
+            interval_seconds (int): Base interval in seconds between fetches
+        
+        This method will run indefinitely until canceled and will fetch data
+        for each symbol and timeframe combination at appropriate intervals.
+        """
+        if not symbols or not timeframes:
+            logger.error("No symbols or timeframes provided for periodic data fetching")
+            return
+            
+        logger.info(f"Starting periodic data fetching for {len(symbols)} symbols and {len(timeframes)} timeframes")
+        
+        # Create a mapping of timeframes to their intervals in seconds
+        tf_intervals = {
+            'M1': 60,
+            'M5': 300,
+            'M15': 900,
+            'M30': 1800,
+            'H1': 3600,
+            'H4': 14400,
+            'D1': 86400,
+        }
+        
+        # Keep track of when we last fetched data for each symbol/timeframe
+        last_fetch = {}
+        for symbol in symbols:
+            for timeframe in timeframes:
+                last_fetch[(symbol, timeframe)] = 0  # Initialize to 0 to fetch immediately
+        
+        # Create a stop event to allow canceling this task
+        self._fetch_data_stop_event = asyncio.Event()
+        
+        try:
+            while not self._fetch_data_stop_event.is_set():
+                current_time = time.time()
+                
+                # Check for each symbol and timeframe if it's time to fetch
+                for symbol in symbols:
+                    for timeframe in timeframes:
+                        tf_interval = tf_intervals.get(timeframe, interval_seconds)
+                        
+                        # Fetch if enough time has passed since last fetch
+                        if current_time - last_fetch.get((symbol, timeframe), 0) >= tf_interval:
+                            try:
+                                # Fetch the data using get_market_data instead of get_historical_data
+                                # Default to 1000 candles or use a reasonable lookback for the timeframe
+                                num_candles = 1000
+                                if timeframe.startswith('M'):
+                                    # For minute timeframes, use more candles for shorter timeframes
+                                    try:
+                                        minutes = int(timeframe[1:])
+                                        num_candles = min(2000, max(1000, int(5000 / minutes)))
+                                    except ValueError:
+                                        num_candles = 1000
+                                elif timeframe.startswith('H'):
+                                    # For hourly timeframes, fewer candles are typically needed
+                                    num_candles = 500
+                                
+                                # Call get_market_data which doesn't require date parameters
+                                data = self.get_market_data(symbol, timeframe, num_candles)
+                                
+                                # Update last fetch time
+                                last_fetch[(symbol, timeframe)] = current_time
+                                
+                                # Call the callback with the fetched data
+                                if data is not None and callback:
+                                    # Handle both sync and async callbacks
+                                    if asyncio.iscoroutinefunction(callback):
+                                        await callback(symbol, timeframe, data)
+                                    else:
+                                        callback(symbol, timeframe, data)
+                            except Exception as e:
+                                logger.error(f"Error fetching data for {symbol}/{timeframe}: {str(e)}")
+                
+                # Sleep for a short time before checking again
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logger.info("Periodic data fetching task was cancelled")
+        except Exception as e:
+            logger.error(f"Unexpected error in periodic data fetching: {str(e)}")
+            logger.error(traceback.format_exc())
+        finally:
+            self._fetch_data_stop_event = None
+            logger.info("Periodic data fetching stopped")
 
     def _get_mt5_timeframe(self, timeframe: str) -> int:
         """
@@ -1828,1076 +2023,304 @@ class MT5Handler:
         # Use get() method instead of direct attribute access
         return float(account_info.get("margin_free", 0.0))
 
-    def start_real_time_monitoring(self, symbols=None, timeframes=None, callback_function=None):
+    async def stop(self):
         """
-        Start real-time market data monitoring.
-        
-        Args:
-            symbols: List of symbols to monitor
-            timeframes: List of timeframes to monitor
-            callback_function: Function to call with processed data
-            
-        Returns:
-            bool: True if started successfully, False otherwise
+        Stop all running tasks and disconnect from MT5
         """
-        logger.info("🚀 Starting real-time market data monitoring")
-        
-        # Initialize the real-time monitoring dict if not already done
-        if not hasattr(self, 'rt_monitoring'):
-            self.rt_monitoring = {
-                "running": False,
-                "task": None,
-                "callbacks": []
-            }
+        # Stop periodic data fetching if active
+        if hasattr(self, '_fetch_data_stop_event') and self._fetch_data_stop_event:
+            self._fetch_data_stop_event.set()
             
-        # Get default symbols and timeframes if not provided
-        if not symbols:
-            # Check if symbols in TRADING_CONFIG are in the new format (dict with symbol and timeframe)
-            symbols_config = MT5_CONFIG.get("symbols", [])
-            trading_symbols = TRADING_CONFIG.get("symbols", [])
-            
-            if trading_symbols and isinstance(trading_symbols[0], dict):
-                # Extract just the symbol names from the dictionary format
-                symbols = [item['symbol'] for item in trading_symbols]
-            else:
-                # Use the old format or default
-                symbols = list(trading_symbols if trading_symbols else symbols_config)
-                
-            if not symbols:  # If still empty, use default
-                symbols = ["EURUSD"]
-            
-            logger.info(f"📊 Using symbols from config: {symbols}")
-            
-        if not timeframes:
-            # Get timeframes from TRADING_CONFIG
-            timeframes = TRADING_CONFIG.get("timeframes", ["M15"])
-            
-            # Limit to just 1-2 timeframes to avoid excessive data
-            if len(timeframes) > 2:
-                logger.warning(f"⚠️ Too many timeframes configured: {timeframes}. Using only primary timeframes.")
-                # Use only the first 2 timeframes (typically M1/M5 or M15)
-                timeframes = timeframes[:2]
-                
-            logger.info(f"📈 Using timeframes from config: {timeframes}")
-            
-        # Check if MT5 is connected
-        if not self.is_connected():
-            logger.error("❌ MT5 is not connected, cannot start real-time monitoring")
-            return False
-            
-        # Create callback objects for each symbol/timeframe combination
-        for symbol in symbols:
-            for timeframe in timeframes:
-                callback = RealTimeDataCallback(symbol, timeframe, callback_function)
-                self.rt_monitoring["callbacks"].append(callback)
-                logger.info(f"✅ Added callback for {symbol}/{timeframe}")
-                
-        # Start the monitoring task if not already running
-        if not self.rt_monitoring.get("running", False):
-            self.rt_monitoring["running"] = True
-            
-            # Start the monitoring task
+        # Shutdown MT5 connection
+        if self.connected:
             try:
-                self._start_monitoring_task()
-                logger.info(f"🎉 Started real-time monitoring for {len(symbols)} symbols and {len(timeframes)} timeframes")
-                return True
+                mt5.shutdown()
+                self.connected = False
+                self.initialized = False
+                logger.info("MetaTrader 5 connection closed")
             except Exception as e:
-                logger.error(f"❌ Error starting real-time monitoring: {str(e)}")
-                self.rt_monitoring["running"] = False
-                return False
-        else:
-            logger.info("ℹ️ Real-time monitoring is already running")
-            return True
+                logger.error(f"Error during MT5 shutdown: {str(e)}")
 
-    def _start_monitoring_task(self):
-        """Start the monitoring task in the background."""
-        
-        async def monitoring_loop():
-            """Main monitoring loop for real-time data."""
-            logger.info("🔄 Real-time monitoring loop started")
-            
-            while self.rt_monitoring.get("running", False):
-                try:
-                    # Check connection first
-                    if not self.is_connected():
-                        logger.warning("⚠️ MT5 connection lost during monitoring, attempting to reconnect")
-                        if not await self._reconnect():
-                            # If reconnection failed, sleep and try again
-                            await asyncio.sleep(5)
-                            continue
-                    
-                    # Get all callbacks
-                    callbacks = self.rt_monitoring.get("callbacks", [])
-                    
-                    # Process each symbol - group callbacks by symbol to avoid duplicate tick processing
-                    symbols_processed = set()
-                    symbol_timeframe_map = {}
-                    
-                    # First organize callbacks by symbol and timeframe
-                    for callback in callbacks:
-                        symbol = callback.symbol
-                        timeframe = callback.timeframe
-                        
-                        if symbol not in symbol_timeframe_map:
-                            symbol_timeframe_map[symbol] = {}
-                        
-                        if timeframe not in symbol_timeframe_map[symbol]:
-                            symbol_timeframe_map[symbol][timeframe] = []
-                            
-                        symbol_timeframe_map[symbol][timeframe].append(callback)
-                    
-                    # Now process each symbol once
-                    for symbol, timeframes in symbol_timeframe_map.items():
-                        try:
-                            # Get latest tick data - ONLY ONCE PER SYMBOL
-                            if mt5:
-                                tick = mt5.symbol_info_tick(symbol)
-                                if tick:
-                                    # Create an enhanced tick object with symbol information
-                                    enhanced_tick_data = {'original_tick': tick, 'symbol': symbol}
-                                    
-                                    # Log tick data periodically (every 10th tick to avoid spam)
-                                    if not hasattr(self, '_tick_counters'):
-                                        self._tick_counters = {}
-                                    if symbol not in self._tick_counters:
-                                        self._tick_counters[symbol] = 0
-                                    
-                                    self._tick_counters[symbol] += 1
-                                    if self._tick_counters[symbol] % 10 == 0:
-                                        bid = getattr(tick, 'bid', 0)
-                                        ask = getattr(tick, 'ask', 0)
-                                        logger.debug(f"📊 {symbol} tick: Bid={bid:.5f} Ask={ask:.5f} Spread={(ask-bid)*10000:.1f} points")
-                                    
-                                    # Process tick for each timeframe's callbacks (just one tick per symbol)
-                                    for tf, tf_callbacks in timeframes.items():
-                                        for callback in tf_callbacks:
-                                            # Limit to one tick processing per symbol/timeframe pair
-                                            asyncio.create_task(callback.on_tick(enhanced_tick_data))
-                                
-                                # Get the latest candles for each timeframe
-                                for timeframe, tf_callbacks in timeframes.items():
-                                    mt5_timeframe = self._get_mt5_timeframe(timeframe)
-                                    rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
-                                    
-                                    if rates is not None and len(rates) > 0:
-                                        # Store last candle time to detect new candles
-                                        candle_key = f"{symbol}_{timeframe}"
-                                        if not hasattr(self, '_last_candle_times'):
-                                            self._last_candle_times = {}
-                                            
-                                        # Get the time of the latest candle
-                                        latest_time = pd.to_datetime(rates[-1]['time'], unit='s')
-                                        
-                                        # Check if this is a new candle
-                                        is_new_candle = False
-                                        if candle_key not in self._last_candle_times:
-                                            is_new_candle = True
-                                        elif latest_time != self._last_candle_times[candle_key]:
-                                            is_new_candle = True
-                                            
-                                        if is_new_candle:
-                                            # Get candle details for logging
-                                            latest_candle = rates[-1]
-                                            candle_open = latest_candle['open']
-                                            candle_close = latest_candle['close']
-                                            candle_high = latest_candle['high']
-                                            candle_low = latest_candle['low']
-                                            
-                                            # Determine candle type and color
-                                            candle_emoji = "🟢" if candle_close > candle_open else "🔴"
-                                            candle_change = (candle_close - candle_open) / candle_open * 100 if candle_open > 0 else 0
-                                            
-                                            # Log the new candle formation
-                                            logger.info(f"{candle_emoji} New {symbol}/{timeframe} candle: O:{candle_open:.5f} H:{candle_high:.5f} L:{candle_low:.5f} C:{candle_close:.5f} ({'+' if candle_change >= 0 else ''}{candle_change:.2f}%)")
-                                            
-                                            # Update the last candle time
-                                            self._last_candle_times[candle_key] = latest_time
-                                        
-                                        # Distribute candle data to all callbacks for this symbol/timeframe
-                                        for callback in tf_callbacks:
-                                            asyncio.create_task(callback.on_new_candle(rates))
-                                    else:
-                                        logger.warning(f"⚠️ No candle data available for {symbol}/{timeframe}")
-                            else:
-                                logger.error("❌ MT5 not initialized in monitoring loop")
-                                
-                        except Exception as e:
-                            logger.error(f"❌ Error processing {symbol}: {str(e)}")
-                    
-                    # Sleep to avoid excessive CPU usage
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Error in monitoring loop: {str(e)}")
-                    await asyncio.sleep(5)  # Sleep longer on error
-                    
-            logger.info("🛑 Monitoring loop ended")
-            
-        # Create and store the monitoring task
-        self.rt_monitoring["task"] = asyncio.create_task(monitoring_loop())
-        
-    async def _reconnect(self):
-        """Attempt to reconnect to MT5."""
-        try:
-            # Shutdown existing connection
-            self.shutdown()
-            
-            # Initialize new connection
-            success = self.initialize()
-            
-            if success:
-                logger.info("Successfully reconnected to MT5")
-                return True
-            else:
-                logger.error("Failed to reconnect to MT5")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error during MT5 reconnection: {str(e)}")
-            return False
-
-    def stop_real_time_monitoring(self):
-        """Stop real-time market data monitoring."""
-        logger.info("Stopping real-time market data monitoring")
-        
-        # Cancel monitoring task
-        if self.rt_monitoring.get("task"):
-            self.rt_monitoring["task"].cancel()
-            self.rt_monitoring["task"] = None
-            
-        # Clear callbacks
-        self.rt_monitoring["callbacks"] = {}
-        
-        # Set disabled flag
-        self.rt_monitoring["running"] = False
-        
-        logger.info("Real-time monitoring stopped")
-        return True
-    
-    def get_real_time_status(self):
-        """Get the status of real-time monitoring."""
-        # Ensure rt_monitoring is properly initialized
-        if not hasattr(self, 'rt_monitoring') or not isinstance(self.rt_monitoring, dict):
-            return {
-                "running": False,
-                "symbols": [],
-                "callback_count": 0,
-                "task_running": False
-            }
-
-        # Safe access to rt_monitoring
-        callbacks = self.rt_monitoring.get("callbacks", [])
-        symbols = set()
-        
-        # Extract symbols from callbacks
-        for callback in callbacks:
-            if hasattr(callback, 'symbol'):
-                symbols.add(callback.symbol)
-        
-        # Check task status safely
-        task = self.rt_monitoring.get("task")
-        task_running = False
-        if task is not None and hasattr(task, "done"):
-            task_running = not task.done()
-        
-        return {
-            "running": self.rt_monitoring.get("running", False),
-            "symbols": list(symbols),
-            "callback_count": len(callbacks),
-            "task_running": task_running
-        }
-
-    async def on_tick(self, tick_data):
+    def get_last_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Process incoming tick data from MT5.
+        Get the latest tick data for a symbol.
         
         Args:
-            tick_data: Raw tick data from MT5 or an enhanced object with symbol information
+            symbol: Symbol to get tick data for
             
         Returns:
-            Processed tick data ready for analysis
-        """
-        try:
-            if not tick_data:
-                logger.warning("Received empty tick data")
-                return None
-            
-            # Debug the type of tick_data to help troubleshoot
-            logger.debug(f"Tick data type: {type(tick_data)}, data: {str(tick_data)[:200]}...")
-                
-            # Extract symbol from tick data
-            symbol = None
-            original_tick = None
-            bid = 0
-            ask = 0
-            timestamp = datetime.now(UTC)
-            volume = 0
-            
-            # Check if we have an enhanced tick object with symbol and original_tick
-            if isinstance(tick_data, dict) and 'original_tick' in tick_data and 'symbol' in tick_data:
-                symbol = tick_data['symbol']
-                original_tick = tick_data['original_tick']
-            else:
-                # Legacy code path for direct tick objects
-                original_tick = tick_data
-                
-                # If tick_data is a string, it might be the symbol itself
-                if isinstance(tick_data, str):
-                    symbol = tick_data
-                
-                # Safe attribute access
-                elif hasattr(tick_data, 'symbol'):
-                    symbol = tick_data.symbol
-                
-                # Try to extract from named tuple
-                elif hasattr(tick_data, '_asdict') and callable(tick_data._asdict):
-                    try:
-                        tick_dict = tick_data._asdict()
-                        if isinstance(tick_dict, dict) and 'symbol' in tick_dict:
-                            symbol = tick_dict['symbol']
-                    except Exception:
-                        pass
-                
-                # Try to extract from dictionary
-                elif isinstance(tick_data, dict):
-                    symbol = tick_data.get('symbol')
-                
-                # Try to get the symbol from the callback metadata if available
-                if not symbol and hasattr(self, 'current_symbol'):
-                    symbol = self.current_symbol
-            
-            # Extract other fields from the original tick
-            if original_tick is not None:
-                # Safely extract other fields
-                if hasattr(original_tick, 'bid'):
-                    bid = original_tick.bid
-                elif isinstance(original_tick, dict):
-                    bid = original_tick.get('bid', 0)
-                    
-                if hasattr(original_tick, 'ask'):
-                    ask = original_tick.ask
-                elif isinstance(original_tick, dict):
-                    ask = original_tick.get('ask', 0)
-                    
-                if hasattr(original_tick, 'time'):
-                    try:
-                        timestamp = datetime.fromtimestamp(original_tick.time)
-                    except (ValueError, TypeError, OSError):
-                        pass
-                elif isinstance(original_tick, dict) and 'time' in original_tick:
-                    try:
-                        time_value = original_tick.get('time')
-                        if time_value is not None:
-                            timestamp = datetime.fromtimestamp(float(time_value))
-                    except (ValueError, TypeError, OSError):
-                        pass
-                    
-                if hasattr(original_tick, 'volume'):
-                    volume = original_tick.volume
-                elif isinstance(original_tick, dict):
-                    volume = original_tick.get('volume', 0)
-            
-            # If still no symbol, log warning with more details and return None
-            if not symbol:
-                logger.warning(f"Tick data missing symbol information - cannot process. Data type: {type(tick_data)}")
-                return None
-                
-            # Format tick data into a standardized dictionary
-            processed_tick = {
-                'symbol': symbol,
-                'bid': bid,
-                'ask': ask,
-                'time': timestamp,
-                'volume': volume,
-            }
-            
-            # Calculate spread from bid/ask
-            processed_tick['spread'] = (ask - bid) if bid > 0 and ask > 0 else 0
-            
-            # Call the real-time data callbacks if registered
-            self._notify_tick_callbacks(symbol, processed_tick)
-            
-            return processed_tick
-            
-        except Exception as e:
-            logger.error(f"Error processing tick data: {str(e)}")
-            logger.error(traceback.format_exc())  # Add full traceback for better debugging
-            return None
-            
-    async def on_candle(self, candle_data, symbol=None, timeframe=None):
-        """
-        Process completed candle data from MT5.
-        
-        Args:
-            candle_data: Raw candle data from MT5
-            symbol: Optional symbol name if not contained in the candle data
-            timeframe: Optional timeframe identifier
-            
-        Returns:
-            Processed candle data ready for analysis
-        """
-        try:
-            # Check if candle_data is empty - handle all possible types
-            if candle_data is None:
-                logger.warning("Received None candle_data")
-                return None
-            elif isinstance(candle_data, (list, tuple)) and len(candle_data) == 0:
-                logger.warning("Received empty list/tuple candle_data")
-                return None
-            elif isinstance(candle_data, np.ndarray) and candle_data.size == 0:
-                logger.warning("Received empty numpy array candle_data")
-                return None
-            elif isinstance(candle_data, pd.DataFrame) and candle_data.empty:
-                logger.warning("Received empty DataFrame candle_data")
-                return None
-            
-            # Format candle data into DataFrame
-            try:
-                df_candles = self.format_candles_to_dataframe(candle_data, symbol, timeframe)
-            except Exception as e:
-                logger.error(f"Error formatting candles to DataFrame: {str(e)}")
-                logger.error(traceback.format_exc())
-                return None
-            
-            if df_candles is None or df_candles.empty:
-                logger.warning(f"Could not format candles for {symbol}/{timeframe}")
-                return None
-            
-            # Process the candle data for analysis - with special error handling
-            try:
-                processed_candles = self.process_candles_data(df_candles)
-            except Exception as e:
-                logger.error(f"Error in process_candles_data: {str(e)}")
-                logger.error(traceback.format_exc())
-                # Return the original dataframe as a fallback
-                processed_candles = df_candles
-            
-            # Generate higher timeframes if needed
-            if timeframe in ['M1', '1m', 'm1', '1']:
-                # Dictionary to hold multiple timeframes
-                timeframe_data = {
-                    timeframe: processed_candles
-                }
-                
-                # Create higher timeframes
-                for higher_tf in ['5m', '15m', '1h', '4h']:
-                    try:
-                        resampled_df = self.resample_to_higher_timeframe(processed_candles, higher_tf)
-                        if resampled_df is not None and not resampled_df.empty:
-                            timeframe_data[higher_tf] = resampled_df
-                    except Exception as resample_err:
-                        logger.error(f"Error resampling to {higher_tf}: {str(resample_err)}")
-                
-                # Notify callbacks with all timeframe data
-                if symbol:
-                    self._notify_candle_callbacks(symbol, timeframe, timeframe_data)
-                
-                return timeframe_data
-            else:
-                # If not base timeframe, just return the processed candles
-                if symbol:
-                    self._notify_candle_callbacks(symbol, timeframe, {timeframe: processed_candles})
-                
-                return {timeframe: processed_candles}
-                
-        except Exception as e:
-            logger.error(f"Error processing candle data: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
-            
-    def format_candles_to_dataframe(self, candles, symbol=None, timeframe=None):
-        """
-        Convert raw candle data to pandas DataFrame format.
-        
-        Args:
-            candles: Raw candle data from MT5
-            symbol: Optional symbol name
-            timeframe: Optional timeframe identifier
-            
-        Returns:
-            pd.DataFrame: Formatted candle data
-        """
-        try:
-            # Check for empty candles - handle different types safely
-            if candles is None:
-                logger.warning(f"No candle data provided for {symbol}/{timeframe} (None)")
-                return None
-            elif isinstance(candles, (list, tuple)) and len(candles) == 0:
-                logger.warning(f"No candle data provided for {symbol}/{timeframe} (empty list/tuple)")
-                return None
-            elif isinstance(candles, np.ndarray) and candles.size == 0:
-                logger.warning(f"No candle data provided for {symbol}/{timeframe} (empty numpy array)")
-                return None
-            elif isinstance(candles, pd.DataFrame) and candles.empty:
-                logger.warning(f"No candle data provided for {symbol}/{timeframe} (empty DataFrame)")
-                return None
-                
-            # If candles is already a DataFrame
-            if isinstance(candles, pd.DataFrame):
-                df = candles.copy()
-                
-                # Add volume column if missing
-                if 'volume' not in df.columns:
-                    # Try to use tick_volume if available
-                    if 'tick_volume' in df.columns:
-                        df['volume'] = df['tick_volume']
-                    else:
-                        df['volume'] = 0
-                
-                # Add symbol column if not present and symbol is provided
-                if 'symbol' not in df.columns and symbol:
-                    df['symbol'] = symbol
-                
-                return df
-            
-            # Convert rates to pandas DataFrame
-            df = pd.DataFrame(candles)
-            
-            # Rename columns if necessary
-            if 'time' in df.columns:
-                # Convert time to datetime if it's not already
-                if not pd.api.types.is_datetime64_any_dtype(df['time']):
-                    df['time'] = pd.to_datetime(df['time'], unit='s')
-            
-            # Standard column set
-            if all(col in df.columns for col in [0, 1, 2, 3, 4]):
-                # Numeric columns format from MT5
-                column_mapping = {0: 'time', 1: 'open', 2: 'high', 3: 'low', 4: 'close'}
-                if 5 in df.columns:
-                    column_mapping[5] = 'volume'
-                df = df.rename(columns=column_mapping)
-                
-                # Add volume column if missing
-                if 'volume' not in df.columns:
-                    if 'real_volume' in df.columns:
-                        df['volume'] = df['real_volume']
-                    elif 'tick_volume' in df.columns:
-                        df['volume'] = df['tick_volume']
-                    else:
-                        df['volume'] = 0
-                    
-                df['time'] = pd.to_datetime(df['time'], unit='s')
-            
-            # Set time as index
-            if 'time' in df.columns:
-                df.set_index('time', inplace=True)
-                
-                # Add symbol column if symbol is provided
-                if symbol:
-                    df['symbol'] = symbol
-                
-                # Add timeframe column if timeframe is provided
-                if timeframe:
-                    df['timeframe'] = timeframe
-                
-                # Sort by time index
-                df = df.sort_index()
-                
-                return df
-            else:
-                logger.warning(f"No 'time' column found in candle data for {symbol}/{timeframe}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error formatting candles to DataFrame: {str(e)}")
-            logger.error(traceback.format_exc())  # Add traceback for better debugging
-            return None
-            
-    def process_candles_data(self, df):
-        """
-        Process candle data for further analysis.
-        
-        Args:
-            df: DataFrame containing candle data
-            
-        Returns:
-            pd.DataFrame: Processed candle data
-        """
-        try:
-            if df is None or df.empty:
-                logger.warning("Empty DataFrame provided for processing")
-                return df
-            
-            # Make a copy to avoid modifying the original
-            df_processed = df.copy()
-            
-            # Reset index if time is the index
-            if df_processed.index.name == 'time':
-                df_processed = df_processed.reset_index()
-            
-            # Calculate basic price changes
-            if 'close' in df_processed.columns and 'open' in df_processed.columns:
-                # Calculate candle body size
-                df_processed['body_size'] = abs(df_processed['close'] - df_processed['open'])
-                
-                # Calculate total candle size (high to low)
-                if 'high' in df_processed.columns and 'low' in df_processed.columns:
-                    df_processed['candle_size'] = df_processed['high'] - df_processed['low']
-                
-                # Calculate candle direction (1=up, -1=down, 0=doji)
-                # Use element-wise comparison with .gt(), .lt() and .eq() to avoid ambiguous truth value errors
-                up_candles = df_processed['close'].gt(df_processed['open'])
-                down_candles = df_processed['close'].lt(df_processed['open'])
-                doji_candles = df_processed['close'].eq(df_processed['open'])
-                
-                df_processed['direction'] = np.where(up_candles, 1, 
-                                                  np.where(down_candles, -1, 0))
-                
-                # Calculate percentage change - specify fill_method=None to prevent FutureWarning
-                df_processed['pct_change'] = df_processed['close'].pct_change(fill_method=None) * 100
-            
-            # Ensure the DataFrame has a time column
-            if 'time' not in df_processed.columns and df_processed.index.name != 'time':
-                logger.warning("DataFrame lacks a time column")
-            
-            return df_processed
-            
-        except Exception as e:
-            logger.error(f"Error processing candle data: {str(e)}")
-            logger.error(traceback.format_exc())  # Add full traceback for better debugging
-            return df
-            
-    def resample_to_higher_timeframe(self, df, timeframe='5m'):
-        """
-        Resample data to a higher timeframe.
-        
-        Args:
-            df: DataFrame containing candle data
-            timeframe: Target timeframe for resampling
-            
-        Returns:
-            pd.DataFrame: Resampled candle data
-        """
-        try:
-            if df is None or df.empty:
-                logger.warning("Empty DataFrame provided for resampling")
-                return None
-            
-            # Make a copy to avoid modifying the original
-            df_copy = df.copy()
-            
-            # Ensure df has a datetime index
-            if df_copy.index.name != 'time' and 'time' in df_copy.columns:
-                df_copy = df_copy.set_index('time')
-            
-            # Map timeframe strings to pandas resampling rules
-            tf_map = {
-                '1m': '1min', 'm1': '1min', 'M1': '1min', '1': '1min',
-                '5m': '5min', 'm5': '5min', 'M5': '5min', '5': '5min',
-                '15m': '15min', 'm15': '15min', 'M15': '15min', '15': '15min',
-                '30m': '30min', 'm30': '30min', 'M30': '30min', '30': '30min',
-                '1h': '1h', 'h1': '1h', 'H1': '1h', '60': '1h',
-                '4h': '4h', 'h4': '4h', 'H4': '4h', '240': '4h',
-                '1d': '1D', 'd1': '1D', 'D1': '1D', '1440': '1D',
-                '1w': '1W', 'w1': '1W', 'W1': '1W'
-            }
-            
-            # Get the appropriate resampling rule
-            rule = tf_map.get(timeframe, '5min')  # Default to 5min if timeframe not found
-            
-            # Ensure all required columns exist, adding defaults if needed
-            required_columns = ['open', 'high', 'low', 'close', 'volume']
-            for col in required_columns:
-                if col not in df_copy.columns:
-                    # Add missing column with default value (0 for volume, first column value for others)
-                    if col == 'volume':
-                        df_copy[col] = 0
-                    elif col == 'open' and 'close' in df_copy.columns:
-                        df_copy[col] = df_copy['close']
-                    elif col == 'high' and 'close' in df_copy.columns:
-                        df_copy[col] = df_copy['close']
-                    elif col == 'low' and 'close' in df_copy.columns:
-                        df_copy[col] = df_copy['close']
-                    elif col == 'close' and len(df_copy.columns) > 0:
-                        # Use first numeric column as close if available
-                        for potential_col in df_copy.columns:
-                            if pd.api.types.is_numeric_dtype(df_copy[potential_col]):
-                                df_copy[col] = df_copy[potential_col]
-                                break
-                        else:
-                            df_copy[col] = 0
-                    else:
-                        df_copy[col] = 0
-            
-            # Resample OHLC data
-            if all(col in df_copy.columns for col in required_columns):
-                # Use try/except for the resampling operation
-                try:
-                    resampled = df_copy.resample(rule).agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    })
-                    
-                    # Preserve any other columns that need aggregation
-                    for col in df_copy.columns:
-                        if col not in required_columns and col != 'time':
-                            if col in ['symbol', 'timeframe']:
-                                # For categorical columns, use first value
-                                resampled[col] = df_copy[col].resample(rule).first()
-                    
-                    # Reset index to have 'time' as a column
-                    resampled = resampled.reset_index()
-                    
-                    # Update timeframe column
-                    if 'timeframe' in resampled.columns:
-                        resampled['timeframe'] = timeframe
-                    
-                    # Process the resampled data with error handling
-                    try:
-                        return self.process_candles_data(resampled)
-                    except Exception as process_error:
-                        logger.error(f"Error processing resampled data: {str(process_error)}")
-                        logger.error(traceback.format_exc())
-                        # Return the unprocessed resampled data as fallback
-                        return resampled
-                
-                except Exception as resample_error:
-                    logger.error(f"Error during resampling operation: {str(resample_error)}")
-                    logger.error(traceback.format_exc())
-                    return None
-            else:
-                missing_cols = [col for col in required_columns if col not in df_copy.columns]
-                logger.warning(f"DataFrame missing required OHLC columns for resampling: {missing_cols}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error resampling to higher timeframe: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
-            
-    def _notify_tick_callbacks(self, symbol, tick_data):
-        """
-        Notify registered callbacks about new tick data.
-        
-        Args:
-            symbol: Symbol identifier
-            tick_data: Processed tick data
-        """
-        if hasattr(self, 'real_time_callbacks') and self.real_time_callbacks:
-            for callback in self.real_time_callbacks:
-                if callback.symbol == symbol:
-                    try:
-                        # Call the on_tick method of the callback
-                        callback.on_tick(tick_data)
-                    except Exception as e:
-                        logger.error(f"Error in tick callback: {str(e)}")
-    
-    def _notify_candle_callbacks(self, symbol, timeframe, candle_data):
-        """
-        Notify registered callbacks about new candle data.
-        
-        Args:
-            symbol: Symbol identifier
-            timeframe: Timeframe identifier
-            candle_data: Processed candle data dictionary
-        """
-        if hasattr(self, 'real_time_callbacks') and self.real_time_callbacks:
-            for callback in self.real_time_callbacks:
-                if callback.symbol == symbol and callback.timeframe == timeframe:
-                    try:
-                        # Call the on_new_candle method of the callback
-                        callback.on_new_candle(candle_data)
-                    except Exception as e:
-                        logger.error(f"Error in candle callback: {str(e)}")
-
-    async def get_rates(self, symbol: str, timeframe: str, count: int = 1000, start_pos: int = 0) -> Optional[pd.DataFrame]:
-        """
-        Get historical rate data from MT5 asynchronously.
-        
-        Args:
-            symbol: Symbol to get rates for
-            timeframe: Timeframe as string (e.g., 'M15', 'H1')
-            count: Number of candles to retrieve
-            start_pos: Start position (0 = current)
-            
-        Returns:
-            Optional[pd.DataFrame]: DataFrame with rate data or None if error
+            Dictionary with tick data or None if error
         """
         try:
             if not self.connected:
-                logger.error(f"MT5 not connected when getting rates for {symbol}/{timeframe}")
+                logger.error("MT5 not connected")
                 return None
                 
-            # Map timeframe string to MT5 constant
-            timeframe_map = {
-                "M1": mt5.TIMEFRAME_M1,
-                "M5": mt5.TIMEFRAME_M5,
-                "M15": mt5.TIMEFRAME_M15,
-                "M30": mt5.TIMEFRAME_M30,
-                "H1": mt5.TIMEFRAME_H1,
-                "H4": mt5.TIMEFRAME_H4,
-                "D1": mt5.TIMEFRAME_D1,
-                "W1": mt5.TIMEFRAME_W1,
-                "MN1": mt5.TIMEFRAME_MN1
-            }
-            
-            tf = timeframe_map.get(timeframe.upper())
-            if tf is None:
-                logger.error(f"Invalid timeframe: {timeframe}")
-                return None
-                
-            # Select the symbol
+            # Select the symbol to make sure it's available
             if not mt5.symbol_select(symbol, True):
                 logger.error(f"Failed to select symbol {symbol}")
                 return None
                 
-            # Run the actual data fetch in a separate thread to not block asyncio
-            loop = asyncio.get_running_loop()
-            rates = await loop.run_in_executor(
-                None, 
-                lambda: mt5.copy_rates_from_pos(symbol, tf, start_pos, count)
-            )
-            
-            if rates is None or len(rates) == 0:
-                error = mt5.last_error()
-                logger.error(f"Failed to get rates for {symbol}/{timeframe}. Error: {error}")
-                return None
-                
-            # Convert to DataFrame
-            df = pd.DataFrame(rates)
-            df['time'] = pd.to_datetime(df['time'], unit='s')
-            
-            # Ensure the DataFrame has all required columns
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col not in df.columns:
-                    if col == 'volume' and 'tick_volume' in df.columns:
-                        df['volume'] = df['tick_volume']
-                    else:
-                        logger.warning(f"Column {col} missing in rates data for {symbol}/{timeframe}")
-            
-            # Add symbol column
-            df['symbol'] = symbol
-            
-            # Set time as index
-            df.set_index('time', inplace=True)
-            
-            logger.debug(f"Retrieved {len(df)} candles for {symbol}/{timeframe}")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error getting rates for {symbol}/{timeframe}: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
-
-    def get_market_data_batch(self, symbols, timeframes, num_candles=1000):
-        """
-        Fetch data for multiple symbols and timeframes efficiently.
-        
-        Args:
-            symbols: List of symbols to fetch data for
-            timeframes: List of timeframes to fetch data for
-            num_candles: Number of candles to fetch for each symbol/timeframe
-            
-        Returns:
-            Nested dictionary with format {symbol: {timeframe: dataframe}}
-        """
-        results = {}
-        for symbol in symbols:
-            results[symbol] = {}
-            for timeframe in timeframes:
-                try:
-                    results[symbol][timeframe] = self.get_market_data(symbol, timeframe, num_candles)
-                except Exception as e:
-                    logger.error(f"Error fetching data for {symbol} {timeframe}: {str(e)}")
-                    results[symbol][timeframe] = None
-        return results
-    
-    def get_last_tick(self, symbol: str):
-        """
-        Get the latest price tick for a symbol.
-        
-        Args:
-            symbol: The trading symbol (e.g., 'EURUSD')
-            
-        Returns:
-            The latest tick info or None if not available
-        """
-        try:
-            if not self.connected:
-                logger.error("MT5 not connected, cannot get last tick")
-                return None
-                
-            # Ensure the symbol is selected
-            if not mt5.symbol_select(symbol, True):
-                logger.error(f"Failed to select symbol {symbol}")
-                return None
-                
-            # Get the last tick
+            # Get the latest tick
             tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                logger.warning(f"No tick data available for {symbol}")
+            if tick is None:
+                logger.error(f"Failed to get tick data for {symbol}: {mt5.last_error()}")
                 return None
                 
-            # Log tick details at debug level
-            logger.debug(f"Latest tick for {symbol}: Bid={tick.bid}, Ask={tick.ask}, Time={tick.time}")
+            # Convert to dictionary
+            tick_dict = {
+                "symbol": symbol,
+                "time": tick.time,
+                "bid": tick.bid,
+                "ask": tick.ask,
+                "last": tick.last,
+                "volume": tick.volume,
+                "time_msc": getattr(tick, "time_msc", 0),
+                "flags": getattr(tick, "flags", 0),
+                "volume_real": getattr(tick, "volume_real", 0.0)
+            }
             
-            return tick
+            return tick_dict
             
         except Exception as e:
             logger.error(f"Error getting last tick for {symbol}: {str(e)}")
             return None
     
-    def preprocess_data(self, data):
+    def check_price_movement(self, symbol: str, lookback_period: int = 5, threshold_percent: float = 0.1) -> Dict[str, Any]:
         """
-        Apply basic preprocessing to raw MT5 data.
+        Check if a symbol's price has moved significantly since the last check.
         
         Args:
-            data: Raw market data DataFrame
+            symbol: Symbol to check price movement for
+            lookback_period: Number of minutes to look back for comparison
+            threshold_percent: Percentage threshold to determine significant movement
             
         Returns:
-            Preprocessed DataFrame
-        """
-        if data is None:
-            return None
-            
-        # Handle missing values
-        data = data.dropna()
-        
-        # Ensure datetime index is properly formatted
-        if not data.empty and not isinstance(data.index, pd.DatetimeIndex):
-            try:
-                data.index = pd.to_datetime(data.index)
-            except Exception as e:
-                logger.error(f"Error converting index to datetime: {str(e)}")
-        
-        # Ensure column names are standardized
-        if not data.empty:
-            data.columns = [col.lower() for col in data.columns]
-        
-        return data
-    
-    def get_monitored_symbols(self):
-        """
-        Get the list of currently monitored symbols.
-        
-        Returns:
-            list: List of symbols currently being monitored
-        """
-        # Ensure rt_monitoring is properly initialized
-        if not hasattr(self, 'rt_monitoring') or not isinstance(self.rt_monitoring, dict):
-            return []
-
-        # Extract symbols from callbacks
-        symbols = set()
-        for callback in self.rt_monitoring.get("callbacks", []):
-            if hasattr(callback, 'symbol'):
-                symbols.add(callback.symbol)
-        
-        return list(symbols)
-    
-    def subscribe_symbols(self, symbols, timeframes=None, callback_function=None):
-        """
-        Add new symbols to real-time monitoring.
-        
-        Args:
-            symbols: List of symbols to add to monitoring
-            timeframes: List of timeframes to monitor for these symbols
-            callback_function: Function to call with processed data
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        logger.info(f"Adding {len(symbols)} symbols to real-time monitoring: {', '.join(symbols)}")
-        
-        # Initialize real-time monitoring if needed
-        if not hasattr(self, 'rt_monitoring'):
-            self.rt_monitoring = {
-                "running": False,
-                "task": None,
-                "callbacks": []
+            Dictionary with price movement information:
+            {
+                "symbol": Symbol name,
+                "current_bid": Current bid price,
+                "current_ask": Current ask price,
+                "previous_bid": Bid price from lookback_period ago,
+                "previous_ask": Ask price from lookback_period ago,
+                "bid_change_percent": Percentage change in bid price,
+                "ask_change_percent": Percentage change in ask price,
+                "significant_movement": Boolean indicating if movement exceeds threshold,
+                "direction": "up", "down", or "sideways" based on bid price movement
             }
-        
-        # Get callback function from existing callbacks if not provided
-        if not callback_function and self.rt_monitoring.get("callbacks"):
-            for callback in self.rt_monitoring.get("callbacks", []):
-                if hasattr(callback, 'callback_function'):
-                    callback_function = callback.callback_function
-                    break
-        
-        # If still no callback function, we can't proceed
-        if not callback_function:
-            logger.error("No callback function available for new symbols")
-            return False
-        
-        # Get timeframes from existing callbacks if not provided
-        if not timeframes and self.rt_monitoring.get("callbacks"):
-            timeframes_set = set()
-            for callback in self.rt_monitoring.get("callbacks", []):
-                if hasattr(callback, 'timeframe'):
-                    timeframes_set.add(callback.timeframe)
-            
-            if timeframes_set:
-                timeframes = list(timeframes_set)
-        
-        # If still no timeframes, use defaults
-        if not timeframes:
-            timeframes = ["M15"]
-        
-        # Create callback objects for each symbol/timeframe combination
-        for symbol in symbols:
-            for timeframe in timeframes:
-                # Check if callback already exists for this symbol/timeframe
-                callback_exists = False
-                for callback in self.rt_monitoring.get("callbacks", []):
-                    if (hasattr(callback, 'symbol') and hasattr(callback, 'timeframe') and 
-                        callback.symbol == symbol and callback.timeframe == timeframe):
-                        callback_exists = True
-                        break
-                
-                if not callback_exists:
-                    callback = RealTimeDataCallback(symbol, timeframe, callback_function)
-                    self.rt_monitoring["callbacks"].append(callback)
-                    logger.info(f"Added callback for {symbol}/{timeframe}")
-        
-        # Start monitoring if not already running
-        if not self.rt_monitoring.get("running", False):
-            self.rt_monitoring["running"] = True
-            self._start_monitoring_task()
-            logger.info("Started real-time monitoring")
-            
-        return True
-    
-    def unsubscribe_symbols(self, symbols):
         """
-        Remove symbols from real-time monitoring.
+        try:
+            if not self.connected:
+                logger.error("MT5 not connected")
+                return self._create_default_movement_result(symbol)
+            
+            # Get current tick data
+            current_tick = self.get_last_tick(symbol)
+            if current_tick is None:
+                logger.error(f"Failed to get current tick data for {symbol}")
+                return self._create_default_movement_result(symbol)
+                
+            # Get historical M1 data for the lookback period
+            now = datetime.now()
+            start_time = now - timedelta(minutes=lookback_period)
+            
+            # Get historical data for comparison
+            historical_data = self.get_historical_data(symbol, "M1", start_time, now)
+            if historical_data is None or len(historical_data) == 0:
+                logger.warning(f"No historical data available for {symbol}, using last tick only")
+                return self._create_default_movement_result(symbol)
+                
+            # Get first candle's open price as the previous price
+            previous_bid = historical_data.iloc[0]['open']
+            previous_ask = previous_bid + historical_data.iloc[0]['spread'] * mt5.symbol_info(symbol).point if 'spread' in historical_data.columns else previous_bid
+            
+            # Current prices
+            current_bid = current_tick['bid']
+            current_ask = current_tick['ask']
+            
+            # Calculate percentage changes
+            bid_change_percent = ((current_bid - previous_bid) / previous_bid) * 100 if previous_bid > 0 else 0
+            ask_change_percent = ((current_ask - previous_ask) / previous_ask) * 100 if previous_ask > 0 else 0
+            
+            # Determine movement significance and direction
+            significant_movement = abs(bid_change_percent) >= threshold_percent
+            
+            direction = "sideways"
+            if bid_change_percent > 0:
+                direction = "up"
+            elif bid_change_percent < 0:
+                direction = "down"
+                
+            return {
+                "symbol": symbol,
+                "current_bid": current_bid,
+                "current_ask": current_ask,
+                "previous_bid": previous_bid,
+                "previous_ask": previous_ask,
+                "bid_change_percent": bid_change_percent,
+                "ask_change_percent": ask_change_percent,
+                "significant_movement": significant_movement,
+                "direction": direction,
+                "lookback_period_minutes": lookback_period,
+                "threshold_percent": threshold_percent
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking price movement for {symbol}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return self._create_default_movement_result(symbol)
+            
+    def _create_default_movement_result(self, symbol: str) -> Dict[str, Any]:
+        """Create a default price movement result when data is unavailable."""
+        return {
+            "symbol": symbol,
+            "current_bid": 0,
+            "current_ask": 0,
+            "previous_bid": 0,
+            "previous_ask": 0,
+            "bid_change_percent": 0,
+            "ask_change_percent": 0,
+            "significant_movement": False,
+            "direction": "unknown",
+            "lookback_period_minutes": 0,
+            "threshold_percent": 0,
+            "error": True
+        }
+
+    def get_all_symbols_lot_info(self, symbols=None):
+        """
+        Get lot size information for all symbols or specified symbols.
         
         Args:
-            symbols: List of symbols to remove from monitoring
+            symbols (list, optional): List of symbols to check. If None, check all available symbols.
             
         Returns:
-            bool: True if successful, False otherwise
+            dict: Dictionary with symbol names as keys and lot size info as values
         """
-        logger.info(f"Removing {len(symbols)} symbols from real-time monitoring: {', '.join(symbols)}")
+        if not self.connected:
+            logger.error("MT5 not connected")
+            return {}
+            
+        result = {}
         
-        # Ensure rt_monitoring is properly initialized
-        if not hasattr(self, 'rt_monitoring') or not isinstance(self.rt_monitoring, dict):
-            logger.warning("Real-time monitoring not initialized, nothing to unsubscribe")
-            return False
+        try:
+            # If no symbols provided, get all available symbols
+            if symbols is None:
+                symbols_info = mt5.symbols_get()
+                symbols = [symbol.name for symbol in symbols_info]
+            
+            # Process each symbol
+            for symbol in symbols:
+                # Try to select the symbol
+                if not mt5.symbol_select(symbol, True):
+                    logger.warning(f"Could not select symbol {symbol}")
+                    continue
+                    
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    logger.warning(f"Could not get info for symbol {symbol}")
+                    continue
+                
+                # Extract lot size information
+                result[symbol] = {
+                    "min_lot": symbol_info.volume_min,
+                    "max_lot": symbol_info.volume_max,
+                    "lot_step": symbol_info.volume_step,
+                    "contract_size": symbol_info.trade_contract_size,
+                    "digits": symbol_info.digits,
+                    "point": symbol_info.point,
+                    "currency_profit": symbol_info.currency_profit
+                }
+                
+            logger.info(f"Retrieved lot information for {len(result)} symbols")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting symbols lot information: {str(e)}")
+            return {}
+
+    def get_symbol_filling_mode(self, symbol: str) -> int:
+        """
+        Determine the appropriate filling mode for a symbol.
         
-        if not self.rt_monitoring.get("callbacks"):
-            logger.warning("No callbacks registered, nothing to unsubscribe")
-            return False
-        
-        # Convert symbols to lowercase for case-insensitive comparison
-        symbols_lower = [s.lower() for s in symbols]
-        
-        # Remove callbacks for the specified symbols
-        new_callbacks = []
-        for callback in self.rt_monitoring.get("callbacks", []):
-            if hasattr(callback, 'symbol') and callback.symbol.lower() in symbols_lower:
-                logger.debug(f"Removing callback for {callback.symbol}/{callback.timeframe}")
+        Args:
+            symbol: The trading symbol
+            
+        Returns:
+            int: The appropriate filling mode (MT5 constant)
+        """
+        try:
+            # Get supported filling modes
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                logger.error(f"Symbol {symbol} not found")
+                return mt5.ORDER_FILLING_FOK  # Default to FOK
+                
+            # Check the symbol's supported filling modes
+            filling_mode = symbol_info.filling_mode
+            logger.debug(f"Symbol {symbol} supports filling modes: {filling_mode}")
+            
+            # Determine the appropriate filling mode based on what's supported
+            if (filling_mode & mt5.ORDER_FILLING_IOC) == mt5.ORDER_FILLING_IOC:
+                return mt5.ORDER_FILLING_IOC
+            elif (filling_mode & mt5.ORDER_FILLING_FOK) == mt5.ORDER_FILLING_FOK:
+                return mt5.ORDER_FILLING_FOK
+            elif (filling_mode & mt5.ORDER_FILLING_RETURN) == mt5.ORDER_FILLING_RETURN:
+                return mt5.ORDER_FILLING_RETURN
             else:
-                new_callbacks.append(callback)
+                # Default to FOK if no specific filling mode is supported
+                return mt5.ORDER_FILLING_FOK
+                
+        except Exception as e:
+            logger.error(f"Error determining filling mode for {symbol}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return mt5.ORDER_FILLING_FOK  # Default to FOK
+
+    def get_account_info(self) -> Dict[str, Any]:
+        """Get account information from MT5"""
         
-        # Update callbacks list
-        self.rt_monitoring["callbacks"] = new_callbacks
+        account_info = mt5.account_info()
+        if account_info is None:
+            logger.error("Failed to get account info")
+            return {}
+
+    def is_symbol_available(self, symbol: str) -> bool:
+        """
+        Check if a symbol is available in MT5 and attempt to add it if not visible.
         
-        # Check if we still have any callbacks
-        if not new_callbacks:
-            logger.info("No callbacks remaining, stopping real-time monitoring")
-            self.stop_real_time_monitoring()
-        
-        return True
+        Args:
+            symbol: The trading symbol to check
+            
+        Returns:
+            bool: True if the symbol is available, False otherwise
+        """
+        try:
+            if not self.connected:
+                logger.error("MT5 not connected")
+                return False
+                
+            # First check if the symbol exists in MT5
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                logger.error(f"Symbol {symbol} not found in MT5")
+                return False
+                
+            # If symbol exists but is not visible in MarketWatch, try to add it
+            if not symbol_info.visible:
+                logger.info(f"Symbol {symbol} not visible in MarketWatch, attempting to add it")
+                if not mt5.symbol_select(symbol, True):
+                    logger.error(f"Failed to add {symbol} to MarketWatch")
+                    return False
+                
+                # Double-check it's now visible
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info or not symbol_info.visible:
+                    logger.error(f"Symbol {symbol} still not visible after adding")
+                    return False
+                
+            logger.debug(f"Symbol {symbol} is available and visible")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking symbol availability for {symbol}: {str(e)}")
+            return False

@@ -20,35 +20,32 @@ MT5_CONFIG = {
 # Trading Configuration
 TRADING_CONFIG = {
     "symbols": [
-        # "AUDCADm",  "AUDJPYm", "CADJPYm", "EURCADm", "XAUUSDm", 
-        # "EURCHFm", "EURGBPm", "EURJPYm", "AUDUSDm", "GBPUSDm", "NZDUSDm", 
-        # "USDCADm", "USDJPYm", "USDCHFm", "XAGUSDm", "BTCUSDm", "ETHUSDm"
-        "V75",
-        "V100",
-        "V10",
-        "V25",
-        "V75",
-        "V100",
-        "Boom 300",
-        "Boom 500",
-        "Boom 1000",
-        "Crash 300",
-        "Crash 500",
-        "Crash 1000",
-        "Jump 10",
-        "Jump 25",
-        "Jump 50",
-        "Jump 75",  
-        "Jump 100",
-        "DS10",
-        "DS30",
-        # The following symbols appear to be unavailable in your MT5 account:
-        # "DS50",
-        # "DEX 600",
-        # "DEX 900",
-        # "DEX 1500",
+        # Volatility Indices (common format in Deriv/MT5)
+        "Volatility 10 Index",
+        "Volatility 25 Index",
+        "Volatility 50 Index",
+        "Volatility 75 Index",
+        "Volatility 100 Index",
+        # Crash/Boom Indices
+        "Crash 300 Index",
+        "Crash 500 Index",
+        "Crash 1000 Index",
+        "Boom 300 Index",
+        "Boom 500 Index",
+        "Boom 1000 Index",
+        # Jump Indices
+        "Jump 10 Index",
+        "Jump 25 Index",
+        "Jump 50 Index",
+        "Jump 75 Index",
+        "Jump 100 Index",
+        # Step Indices
+        "Step Index",
+        # Range Break Indices
+        "Range Break 100 Index",
+        "Range Break 200 Index",
     ],
-    "fixed_lot_size": 0.01,  # Fixed lot size to use if use_fixed_lot_size is true
+    "fixed_lot_size": 0.05,  # Fixed lot size to use if use_fixed_lot_size is true
     "use_fixed_lot_size": True,  # When true, use fixed lot size instead of risk-based calculation
     "max_lot_size": 0.3,  # Maximum lot size even when using risk-based calculation
     "max_daily_risk": 0.06,
@@ -63,7 +60,7 @@ TRADING_CONFIG = {
     "data_management": {
         "use_direct_fetch": True,      # Use direct fetching for all timeframes
         "real_time_bars_count": 10,    # Number of recent bars to fetch for validation
-        "price_tolerance": 0.0003,     # 0.03% price tolerance for validation
+        "price_tolerance": 0.02,       # 2% price tolerance for validation (increased from 0.0003/0.03%)
         "validate_trades": True,       # Validate trades against real-time data before execution
         "tick_delay_tolerance": 2.0,   # Maximum allowed tick delay in seconds
     },
@@ -78,11 +75,9 @@ TRADING_CONFIG = {
 
 # Telegram Configuration
 TELEGRAM_CONFIG = {
-    "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
-    "allowed_user_ids": [
-        "6018798296",
-        "5421178210"
-    ],
+       "token": os.getenv("TELEGRAM_BOT_TOKEN"),
+       "allowed_users": [int(id) for id in os.getenv("TELEGRAM_ALLOWED_USERS").split(",")],
+       "enabled": True
 }
 
 # Logging Configuration

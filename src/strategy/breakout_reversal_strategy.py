@@ -26,6 +26,8 @@ from scipy import stats
 import matplotlib.pyplot as plt
 import os
 from pathlib import Path
+import time
+import traceback
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr
@@ -281,10 +283,14 @@ class BreakoutReversalStrategy(SignalGenerator):
             debug_visualize (bool, optional): Force update and visualization of trend lines
             force_trendlines (bool, optional): Force trendline detection without creating debug plots
             skip_plots (bool, optional): Skip creating debug plots even if debug_visualize is True
+            process_immediately (bool, optional): Whether to return signals for immediate processing
             
         Returns:
             list: List of signal dictionaries
         """
+        start_time = time.time()
+        logger.info(f"🚀 SIGNAL GENERATION START: {self.name} strategy")
+        
         if not market_data:
             logger.warning("⚠️ No market data provided to generate signals")
             return []
@@ -293,6 +299,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         debug_visualize = kwargs.get('debug_visualize', debug_visualize)
         force_trendlines = kwargs.get('force_trendlines', force_trendlines)
         skip_plots = kwargs.get('skip_plots', skip_plots)
+        process_immediately = kwargs.get('process_immediately', False)
         
         # Debug logging
         if debug_visualize:
@@ -302,10 +309,11 @@ class BreakoutReversalStrategy(SignalGenerator):
             
         signals = []
         all_signals = []  # To collect all potential signals for scoring
-        logger.info(f"🔍 Generating signals with {self.name} strategy")
+        logger.info(f"🔍 Generating signals with {self.name} strategy for {len(market_data)} symbols")
         
+        # Process symbols one by one, potentially returning signals immediately
         for symbol in market_data:
-            # Log market data format for this symbol
+            symbol_start_time = time.time()
             logger.debug(f"📊 Market data for {symbol} contains timeframes: {list(market_data[symbol].keys())}")
             
             # Skip if we don't have all required timeframes
@@ -687,11 +695,36 @@ class BreakoutReversalStrategy(SignalGenerator):
                 h1_trend = self._determine_h1_trend(higher_df)
                 signal = self._score_signal(signal, symbol, primary_df, higher_df, h1_trend)
                 
-            # Add to all signals collection
+            # For each symbol, return the best signal immediately if requested
+            if process_immediately and symbol_signals:
+                # Find best signal for this symbol
+                best_signal = max(symbol_signals, key=lambda x: x.get('score', 0))
+                
+                # Log all signals with their scores for debugging
+                for signal in symbol_signals:
+                    logger.debug(f"Signal {signal['direction']} for {symbol}: {signal.get('reason', 'No reason')} - Score: {signal.get('score', 0):.2f}")
+                
+                logger.info(f"🌟 Selected best signal for {symbol}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
+                
+                # Remove scoring metadata before returning
+                if 'original_symbol' in best_signal:
+                    del best_signal['original_symbol']
+                if 'score_details' in best_signal:
+                    del best_signal['score_details']
+                
+                # Return this single signal in a list for immediate processing
+                symbol_time = time.time() - symbol_start_time
+                logger.info(f"📊 Generated signal for {symbol} in {symbol_time:.2f}s: {best_signal['direction']} at {best_signal['entry_price']:.5f} | confidence: {best_signal['confidence']:.2f}")
+                logger.info(f"👉 RETURNING IMMEDIATE SIGNAL FOR {symbol}")
+                return [best_signal]
+            
+            # Add to all signals collection for batch processing
             all_signals.extend(symbol_signals)
         
-        # Select best signals based on scoring
+        # After processing all symbols, add this log before signal selection:
         if all_signals:
+            logger.info(f"👉 Found {len(all_signals)} potential signals before scoring and selection")
+            
             # Group signals by symbol
             signals_by_symbol = {}
             for signal in all_signals:
@@ -712,7 +745,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 for signal in symbol_signals:
                     logger.debug(f"Signal {signal['direction']} for {symbol}: {signal.get('reason', 'No reason')} - Score: {signal.get('score', 0):.2f}")
                 
-                logger.info(f"Selected best signal for {symbol}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
+                logger.info(f"🌟 Selected best signal for {symbol}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
                 
                 # Remove scoring metadata before returning
                 if 'original_symbol' in best_signal:
@@ -722,7 +755,15 @@ class BreakoutReversalStrategy(SignalGenerator):
                 
                 signals.append(best_signal)
         
-        logger.info(f"✅ Generated {len(signals)} signals with {self.name} (after prioritization)")
+        generation_time = time.time() - start_time
+        logger.info(f"✅ Generation completed in {generation_time:.2f}s - Produced {len(signals)} final signals")
+        if signals:
+            for i, signal in enumerate(signals):
+                logger.info(f"📊 Final Signal #{i+1}: {signal['symbol']} {signal['direction']} at {signal['entry_price']:.5f} | confidence: {signal['confidence']:.2f}")
+            logger.info(f"👉 RETURNING {len(signals)} SIGNALS FOR PROCESSING")
+        else:
+            logger.info("📭 No signals generated - returning empty list")
+        
         return signals
     
     def _score_signal(self, signal, symbol, df, h1_df, h1_trend):

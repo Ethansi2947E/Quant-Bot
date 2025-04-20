@@ -7,22 +7,69 @@ import traceback
 from datetime import datetime, UTC
 from typing import Dict, Optional
 import logging
+import os
 
 # Third-party imports
 from httpx import ConnectError
 from loguru import logger
 import telegram
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # Local imports
-from config.config import TELEGRAM_CONFIG
+from config.config import TELEGRAM_CONFIG, TRADING_CONFIG
 
 # Singleton instance for global reference
 _telegram_bot_instance = None
 
 class TelegramBot:
-    def __init__(self):
+    def __init__(self, trading_bot=None, config=None):
+        """
+        Initialize the Telegram bot.
+        
+        Args:
+            trading_bot: Optional reference to the main trading bot
+            config: Optional configuration override
+        """
+        self.trading_bot = trading_bot
+        self.config = config or TELEGRAM_CONFIG
+        self.trading_config = TRADING_CONFIG
+        
+        # Get token from config or environment variable
+        self.token = self.config.get("token") or os.environ.get("TELEGRAM_TOKEN")
+        
+        # Check if token is available
+        if not self.token:
+            logger.error("No Telegram token found in config or environment variables")
+            self.token = "dummy_token"  # Placeholder to avoid initialization errors
+            
+        # Get allowed user IDs
+        self.allowed_user_ids = self.config.get("allowed_users", [])
+        
+        # Convert to strings for easier comparison
+        self.allowed_user_ids = [str(id) for id in self.allowed_user_ids]
+        
+        # Initialize handlers
+        self.application = None
+        self.keyboard_shown = False
+        self.last_update = None
+        self.is_running = False
+        
+        # Initialize command history for each user
+        self.command_history = {user_id: [] for user_id in self.allowed_user_ids}
+        
+        # Initialize trade notification settings
+        self.trade_notification_settings = {
+            "enabled": self.config.get("trade_notifications", {}).get("enabled", True),
+            "open": self.config.get("trade_notifications", {}).get("open", True),
+            "close": self.config.get("trade_notifications", {}).get("close", True),
+            "signals": self.config.get("trade_notifications", {}).get("signals", False),
+            "rejected": self.config.get("trade_notifications", {}).get("rejected", False),
+            "tp_hit": self.config.get("trade_notifications", {}).get("tp_hit", True),
+            "sl_hit": self.config.get("trade_notifications", {}).get("sl_hit", True),
+            "trailing_update": self.config.get("trade_notifications", {}).get("trailing_update", False)
+        }
+        
         # Check if instance already exists - support singleton pattern
         global _telegram_bot_instance
         if _telegram_bot_instance is not None:
@@ -33,10 +80,7 @@ class TelegramBot:
         
         # Initialize with config's trading_enabled value if available, otherwise default to True
         self.trading_enabled = True  # Default to enabled
-        self.application = None
-        self.bot = None
         self.trade_history = []
-        self.is_running = False  # Add state tracking
         self.start_time = datetime.now(UTC)  # Track bot start time
         self.performance_metrics = {
             'total_trades': 0,
@@ -46,15 +90,11 @@ class TelegramBot:
             'max_drawdown': 0.0,
             'win_rate': 0.0
         }
-        self.allowed_user_ids = TELEGRAM_CONFIG.get("allowed_user_ids", [])
         self.command_handlers = {}
-        self.config = None  # Initialize config attribute
         self.chat_id = None  # Initialize chat_id attribute
         self.message_counter = 0
         self.last_error_time = None
         self.last_error_message = None
-        self.last_update = None
-        self.keyboard_shown = False
     
     @classmethod
     def get_instance(cls):
@@ -71,7 +111,7 @@ class TelegramBot:
         Returns:
             bool: True if the bot is initialized and running, False otherwise
         """
-        return self.is_running and self.bot is not None
+        return self.is_running and self.application is not None
     
     async def initialize(self, config):
         """Initialize the Telegram bot with configuration."""
@@ -103,24 +143,24 @@ class TelegramBot:
             self.start_time = datetime.now(UTC)  # Reset start time on initialization
             
             # Validate bot token
-            if not TELEGRAM_CONFIG.get("bot_token"):
+            if not TELEGRAM_CONFIG.get("token"):
                 logger.error("No bot token provided in TELEGRAM_CONFIG")
                 return False
             
             # Validate user IDs
-            if not TELEGRAM_CONFIG.get("allowed_user_ids"):
+            if not TELEGRAM_CONFIG.get("allowed_users"):
                 logger.error("No allowed user IDs configured!")
                 return False
             
             # Convert and validate user IDs
-            self.allowed_user_ids = [str(uid) for uid in TELEGRAM_CONFIG["allowed_user_ids"]]
+            self.allowed_user_ids = [str(uid) for uid in TELEGRAM_CONFIG["allowed_users"]]
             logger.info(f"Configured for {len(self.allowed_user_ids)} users: {self.allowed_user_ids}")
             
             # Stop any existing application
             await self.stop()
             
             logger.info("Building Telegram application...")
-            self.application = Application.builder().token(TELEGRAM_CONFIG["bot_token"]).build()
+            self.application = Application.builder().token(TELEGRAM_CONFIG["token"]).build()
             
             # Add command handlers with logging
             logger.info("Registering command handlers...")
@@ -254,43 +294,57 @@ Details: {str(context.error)}"""
             
     async def _message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Handle text messages which could be either keyboard commands, category selections,
-        or regular messages.
+        Handle incoming messages from users.
+        
+        Args:
+            update: Telegram update object
+            context: Telegram context object
         """
         try:
             # Store last update for interactive features
             self.last_update = update
             
+            # Skip if message is None or user is not authorized
             if not update.message or not update.effective_user:
+                logger.debug("Skipping message without message or effective_user")
                 return
-            
+                
+            # Safety check for user ID                
             user_id = update.effective_user.id
-            message_text = update.message.text
-        
-            # Authorization check
+            
+            # Check if user is authorized
             if str(user_id) not in self.allowed_user_ids:
-                await update.message.reply_text("Unauthorized access.")
+                logger.warning(f"Unauthorized access from user {user_id}")
+                await update.message.reply_text("🔒 Unauthorized access. Your ID has been logged.")
                 return
             
-            # Log the message for debugging
-            logger.debug(f"Received message from {user_id}: {message_text}")
+            # Mark that the keyboard has been shown to this user
+            self.keyboard_shown = True
+                
+            # Get the text message
+            message_text = update.message.text
             
-            # Map category names to internal category keys
-            category_map = {
-                "🔄 Main Controls": "main_controls",
-                "📊 Trading Controls": "trading_controls",
-                "📈 Performance Analytics": "performance_analytics",
-                "🎯 Signal Management": "signal_management",
-                "⚙️ Risk & Position Management": "risk_management", 
-                "🔧 System Settings": "system_settings"
-            }
+            # Safety check for empty messages
+            if not message_text:
+                logger.debug("Received empty message")
+                await update.message.reply_text("Please send a text message or command.")
+                return
             
-            # Check if this is a back button press
+            # Check for special keyboard options
             if message_text == "⬅️ Back to Main Menu":
                 await self.show_command_keyboard(update, context)
                 return
                 
             # Check if this is a category selection
+            category_map = {
+                "🔄 Main Controls": "main_controls",
+                "📊 Trading Controls": "trading_controls",
+                "📈 Performance Analytics": "performance_analytics",
+                "🎯 Signal Management": "signal_management",
+                "⚙️ Risk & Position Management": "risk_management",
+                "🔧 System Settings": "system_settings"
+            }
+            
             if message_text in category_map:
                 category = category_map[message_text]
                 await self.show_command_keyboard(update, context, category)
@@ -583,63 +637,95 @@ Details: {str(context.error)}"""
             return False
 
     async def handle_enable_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):  # pylint: disable=unused-argument
-        """Handle the /enable command."""
+        """
+        Handle the /enable command to enable trading.
+        
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
         try:
-            # Check authorization
-            if not await self.check_auth(update.effective_chat.id):
-                await update.message.reply_text("⛔ Unauthorized")
+            # Skip if message or effective_user is None
+            if not update or not update.effective_user or not update.message:
+                logger.warning("Skipping enable command due to missing update components")
                 return
-
-            # Enable trading
-            result = await self.enable_trading_core()
-            if result:
-                await update.message.reply_text("✅ Trading has been ENABLED")
-                # Send notification to all other authorized users
-                for user_id in self.allowed_user_ids:
-                    if str(user_id) != str(update.effective_chat.id):
-                        try:
-                            await self.send_notification(
-                                f"ℹ️ Trading was enabled by user {update.effective_user.username or update.effective_user.id}",
-                                chat_id=int(user_id)
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to notify user {user_id}: {str(e)}")
-            else:
-                await update.message.reply_text("❌ Failed to enable trading")
-
+                
+            user_id = update.effective_user.id
+            
+            # Authorization check
+            if str(user_id) not in self.allowed_user_ids:
+                if update.message:
+                    await update.message.reply_text("Unauthorized access.")
+                return
+                
+            logger.info("Enabling trading via Telegram command")
+            
+            # Get current enabled status
+            current_status = self.trading_enabled
+            
+            if current_status:
+                if update.message:
+                    await update.message.reply_text("✅ Trading is already enabled.")
+                return
+                
+            # Enable trading in the core
+            await self.enable_trading_core()
+            
+            # Log and notify user
+            logger.info(f"Trading enabled by user {update.effective_user.username} (ID: {user_id})")
+            if update.message:
+                await update.message.reply_text("✅ Trading has been enabled.")
         except Exception as e:
             logger.error(f"Error in enable command: {str(e)}")
-            await update.message.reply_text("❌ Error processing command")
-
+            logger.error(traceback.format_exc())
+            if update and update.message:
+                await update.message.reply_text(f"❌ Error enabling trading: {str(e)}")
+                
     async def handle_disable_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):  # pylint: disable=unused-argument
-        """Handle the /disable command."""
+        """
+        Handle the /disable command to disable trading.
+        
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
         try:
-            # Check authorization
-            if not await self.check_auth(update.effective_chat.id):
-                await update.message.reply_text("⛔ Unauthorized")
+            # Skip if message or effective_user is None
+            if not update or not update.effective_user or not update.message:
+                logger.warning("Skipping disable command due to missing update components")
                 return
-
-            # Disable trading
-            result = await self.disable_trading_core()
-            if result:
-                await update.message.reply_text("✅ Trading has been DISABLED")
-                # Send notification to all other authorized users
-                for user_id in self.allowed_user_ids:
-                    if str(user_id) != str(update.effective_chat.id):
-                        try:
-                            await self.send_notification(
-                                f"ℹ️ Trading was disabled by user {update.effective_user.username or update.effective_user.id}",
-                                chat_id=int(user_id)
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to notify user {user_id}: {str(e)}")
-            else:
-                await update.message.reply_text("❌ Failed to disable trading")
-
+                
+            user_id = update.effective_user.id
+            
+            # Authorization check
+            if str(user_id) not in self.allowed_user_ids:
+                if update.message:
+                    await update.message.reply_text("Unauthorized access.")
+                return
+                
+            logger.info("Disabling trading via Telegram command")
+            
+            # Get current enabled status
+            current_status = self.trading_enabled
+            
+            if not current_status:
+                if update.message:
+                    await update.message.reply_text("❌ Trading is already disabled.")
+                return
+                
+            # Disable trading in the core
+            await self.disable_trading_core()
+            
+            # Log and notify user
+            logger.info(f"Trading disabled by user {update.effective_user.username if update.effective_user else 'Unknown'} (ID: {user_id})")
+            if update.message:
+                await update.message.reply_text("❌ Trading has been disabled.")
         except Exception as e:
             logger.error(f"Error in disable command: {str(e)}")
-            await update.message.reply_text("❌ Error processing command")
-
+            logger.error(traceback.format_exc())
+            if update and update.message:
+                await update.message.reply_text(f"❌ Error disabling trading: {str(e)}")
+                
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):  # pylint: disable=unused-argument
         """Handle the /status command to get bot status."""
         if not update or not hasattr(update, 'effective_user') or update.effective_user is None:
@@ -647,7 +733,7 @@ Details: {str(context.error)}"""
             return
             
         user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+        if str(user_id) in TELEGRAM_CONFIG["allowed_users"]:
             try:
                 # Get current status
                 status = "enabled" if self.trading_enabled else "disabled"
@@ -699,7 +785,7 @@ Details: {str(context.error)}"""
             return
             
         user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+        if str(user_id) in TELEGRAM_CONFIG["allowed_users"]:
             help_text = """<b>📱 TRADING BOT COMMANDS 📱</b>
 
 <b>➡️ BASIC CONTROLS</b>
@@ -744,7 +830,7 @@ Details: {str(context.error)}"""
             return
             
         user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+        if str(user_id) in TELEGRAM_CONFIG["allowed_users"]:
             try:
                 # Calculate performance stats with safety checks
                 total_trades = self.performance_metrics.get('total_trades', 0)
@@ -824,7 +910,7 @@ Details: {str(context.error)}"""
             return
             
         user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_user_ids"]:
+        if str(user_id) in TELEGRAM_CONFIG["allowed_users"]:
             self.trading_enabled = False
             # Signal to close all trades
             await self.send_message("⚠️ Stopping bot and closing all trades...")
@@ -1434,37 +1520,53 @@ Stay profitable! 📈"""
 
     async def send_message(self, message: str, chat_id: Optional[int] = None, parse_mode: str = 'HTML',
                           disable_web_page_preview: bool = True):
-        """Send message to specific user or all allowed users."""
+        """
+        Send a message to a chat.
+        
+        Args:
+            message: Text message to send
+            chat_id: Chat ID to send to (defaults to first allowed user if None)
+            parse_mode: Message parsing mode (HTML, Markdown, etc.)
+            disable_web_page_preview: Whether to disable web previews
+
+        Returns:
+            The message sending result
+        """
         try:
-            if not self.is_running or self.bot is None:
-                logger.warning("Cannot send message: bot is not running or initialized")
-                # Don't try to initialize here
-                return
+            # Ensure bot is initialized
+            if not self.is_initialized() or not self.application:
+                logger.error("Bot not initialized for sending message")
+                return False
                 
-            if chat_id:
-                # Send to specific user if they're allowed
-                if str(chat_id) in self.allowed_user_ids:
-                    await self.bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode=parse_mode,
-                        disable_web_page_preview=disable_web_page_preview
-                    )
-            else:
-                # Send to all allowed users
-                for user_id in self.allowed_user_ids:
-                    try:
-                        await self.bot.send_message(
-                            chat_id=int(user_id),
-                            text=message,
-                            parse_mode=parse_mode,
-                            disable_web_page_preview=disable_web_page_preview
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to send message to user {user_id}: {str(e)}")
-                        
+            # If chat_id is None, use the default chat ID
+            if chat_id is None and self.allowed_user_ids:
+                chat_id = int(self.allowed_user_ids[0])
+                
+            if not chat_id:
+                logger.error("No chat_id provided and no default available")
+                return False
+                
+            # Ensure the application has a bot
+            if not hasattr(self.application, 'bot') or not self.application.bot:
+                logger.error("Bot not available on application")
+                return False
+                
+            # Send message
+            try:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Error sending message: {str(e)}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error sending Telegram message: {str(e)}")
+            logger.error(f"Error in send_message: {str(e)}")
+            return False
 
     async def send_trade_update(
         self,
@@ -1703,42 +1805,74 @@ Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"""
             return False 
     
     async def show_history_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Display history date selection UI."""
+        """
+        Show the date range selection UI for history viewing.
+        
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
         try:
-            # Create an inline keyboard for date selection
+            # Ensure we have a valid update with a chat
+            if not update or not update.effective_chat:
+                logger.error("Invalid update or missing effective_chat for history selection")
+                return
+                
+            # Create date range options
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             
-            # Predefined periods
+            # Get today's date
+            today = datetime.now().date()
+            
+            # Create keyboard with date range options
             keyboard = [
                 [
-                    InlineKeyboardButton("Last 7 days", callback_data="history:days=7"),
-                    InlineKeyboardButton("Last 30 days", callback_data="history:days=30")
+                    InlineKeyboardButton("Today", callback_data="history_today"),
+                    InlineKeyboardButton("Yesterday", callback_data="history_yesterday")
                 ],
                 [
-                    InlineKeyboardButton("Last 60 days", callback_data="history:days=60"),
-                    InlineKeyboardButton("Last 90 days", callback_data="history:days=90")
+                    InlineKeyboardButton("Last 7 days", callback_data="history_7days"),
+                    InlineKeyboardButton("Last 30 days", callback_data="history_30days")
                 ],
                 [
-                    InlineKeyboardButton("Export to CSV (30 days)", callback_data="history:days=30:csv")
+                    InlineKeyboardButton("This month", callback_data="history_this_month"),
+                    InlineKeyboardButton("Last month", callback_data="history_last_month")
                 ],
                 [
-                    InlineKeyboardButton("Custom range", callback_data="history:custom")
+                    InlineKeyboardButton("All time", callback_data="history_all")
                 ]
             ]
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
+            # Check if the application and bot are initialized
+            if not self.is_initialized() or not self.application or not self.application.bot:
+                logger.error("Bot not initialized for showing history selection")
+                if update.message:
+                    await update.message.reply_text("❌ Bot is not initialized. Please try again later.")
+                return
+                
             # We have direct access to the update here, so we can safely use it
-            if update and update.effective_chat:
-                await self.bot.send_message(
+            if update.effective_chat:
+                await self.application.bot.send_message(
                     chat_id=update.effective_chat.id,
                     text="📅 <b>Select a date range for trade history:</b>",
                     reply_markup=reply_markup,
                     parse_mode="HTML"
                 )
             else:
-                logger.error("Could not show history selection UI: invalid update or missing chat_id")
+                logger.error("Could not show history selection UI: missing chat_id")
                 
         except Exception as e:
             logger.error(f"Error showing history selection UI: {str(e)}")
             logger.error(traceback.format_exc()) 
+
+    def set_trading_bot(self, trading_bot):
+        """
+        Set the trading bot reference after initialization.
+        
+        Args:
+            trading_bot: The trading bot instance
+        """
+        self.trading_bot = trading_bot
+        logger.info("Trading bot reference updated in TelegramBot") 

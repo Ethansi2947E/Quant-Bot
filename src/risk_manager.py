@@ -5,19 +5,25 @@ from datetime import datetime, timedelta, UTC
 import math
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, TYPE_CHECKING
 from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, RISK_MANAGER_CONFIG
 from loguru import logger
 import pandas as pd
 import MetaTrader5 as mt5
 import numpy as np
 
-from src.mt5_handler import MT5Handler
+# Use TYPE_CHECKING for import that's only used for type hints
+if TYPE_CHECKING:
+    from src.mt5_handler import MT5Handler
+from src.utils.indicators import calculate_atr
+
+# Singleton instance for global reference
+_risk_manager_instance = None
 
 class RiskManager:
     """Risk manager handles position sizing, risk control, and trade management."""
 
-    def __init__(self, mt5_handler: Optional[MT5Handler] = None, timeframe: str = "M15"):
+    def __init__(self, mt5_handler = None):
         """
         Initialize the risk manager with a MT5 handler and configuration.
         
@@ -25,16 +31,31 @@ class RiskManager:
             mt5_handler: MetaTrader5 interface instance (optional)
             timeframe: The timeframe to use for risk calculations, defaults to "M15"
         """
+        # Singleton pattern
+        global _risk_manager_instance
+        
+        # If an instance already exists, use it
+        if _risk_manager_instance is not None:
+            logger.info("Using existing RiskManager instance")
+            self.__dict__ = _risk_manager_instance.__dict__
+            return
+            
+        _risk_manager_instance = self
+        
         # Initialize MT5 handler
-        self.mt5_handler = mt5_handler if mt5_handler is not None else MT5Handler()
-        self.mt5 = mt5_handler  # Alias for compatibility
+        self.mt5_handler = mt5_handler
+        if self.mt5_handler is None:
+            # Defer the import to avoid circular imports
+            from src.mt5_handler import MT5Handler
+            self.mt5_handler = MT5Handler()
+            
+        self.mt5 = self.mt5_handler  # Alias for compatibility
         
         # Store timeframe
-        self.timeframe = timeframe
         
         # Get configuration from Risk Manager Config
         from config.config import get_risk_config
-        self.config = get_risk_config(timeframe)
+        self.config = get_risk_config()
         
         # Set risk parameters from config
         self.max_risk_per_trade = self.config.get('max_risk_per_trade', 0.01)
@@ -109,7 +130,6 @@ class RiskManager:
         })
         
         # Log the timeframe-specific parameters
-        logger.info(f"RiskManager initialized with timeframe {timeframe} parameters")
         logger.debug(f"Timeframe-specific risk parameters: max_risk_per_trade={self.max_risk_per_trade}, "
                     f"max_daily_trades={self.max_daily_trades}, max_concurrent_trades={self.max_concurrent_trades}")
         
@@ -201,7 +221,7 @@ class RiskManager:
             logger.error(f"Error getting account info: {str(e)}")
             return {}
             
-    def set_mt5_handler(self, mt5_handler: MT5Handler) -> None:
+    def set_mt5_handler(self, mt5_handler) -> None:
         """
         Set the MT5Handler instance for this RiskManager.
         
@@ -402,7 +422,7 @@ class RiskManager:
         if current_atr is None:
             # If trade object contains a DataFrame, calculate ATR
             if 'df' in trade and isinstance(trade['df'], pd.DataFrame):
-                current_atr = self.indicators.calculate_atr(trade['df']).iloc[-1]
+                current_atr = calculate_atr(trade['df']).iloc[-1]
             else:
                 # Use a percentage of price as fallback
                 current_atr = current_price * 0.001  # 0.1% of price
@@ -600,6 +620,20 @@ class RiskManager:
         if self.use_fixed_lot_size:
             # Use fixed lot size from config
             position_size = min(self.fixed_lot_size, self.max_lot_size)
+            
+            # Check if we have MT5Handler available to get symbol's minimum lot size
+            if self.mt5_handler:
+                # Get minimum lot size for this symbol
+                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                
+                # Make sure fixed lot size is not less than symbol's minimum
+                if position_size < min_lot_size:
+                    position_size = min_lot_size
+                    logger.info(f"Adjusted fixed lot size to symbol's minimum: {position_size}")
+                
+                # Normalize volume according to symbol's volume_step
+                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                
             logger.info(f"Using fixed lot size from config: {position_size}")
         elif requested_size > 0:
             # Use requested size but cap at max lot size
@@ -1297,25 +1331,40 @@ class RiskManager:
         market_condition: str = 'normal'
     ) -> float:
         """
-        Calculate position size based on risk parameters and configuration.
+        Calculate position size based on account balance, risk percentage, and stop loss distance.
         
         Args:
-            account_balance: Account balance
-            risk_per_trade: Risk percentage per trade (0-100)
-            entry_price: Entry price
+            account_balance: Current account balance
+            risk_per_trade: Risk percentage (0-100)
+            entry_price: Entry price of the trade
             stop_loss_price: Stop loss price
             symbol: Trading symbol
-            market_condition: Market condition
+            market_condition: Current market condition (normal, volatile, etc.)
             
         Returns:
-            float: Calculated position size in lots
+            float: Position size in lots
         """
         try:
             # First check if we're using fixed lot size from config
             if self.use_fixed_lot_size:
                 # Use fixed lot size from config
-                logger.info(f"Using fixed lot size of {self.fixed_lot_size} from config")
-                return min(self.fixed_lot_size, self.max_lot_size)
+                position_size = min(self.fixed_lot_size, self.max_lot_size)
+                
+                # If we have MT5Handler, ensure position size respects symbol's constraints
+                if self.mt5_handler:
+                    # Get minimum lot size for this symbol
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    
+                    # Make sure fixed lot size is not less than symbol's minimum
+                    if position_size < min_lot_size:
+                        position_size = min_lot_size
+                        logger.info(f"Adjusted fixed lot size to symbol's minimum: {position_size}")
+                    
+                    # Normalize volume according to symbol's volume_step
+                    position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                
+                logger.info(f"Using fixed lot size of {position_size} from config")
+                return position_size
                 
             # If not using fixed lot size, calculate based on risk
             # Validate inputs first
@@ -1344,29 +1393,27 @@ class RiskManager:
             # Calculate position size based on risk
             position_size = risk_per_pip * 0.0001  # Convert to lots
             
-            # If we have MT5Handler, use it for more accurate calculation
-            if self.mt5_handler and hasattr(self.mt5_handler, 'calculate_position_size'):
-                # Let MT5Handler do the calculation with risk parameters
-                try:
-                    return min(self.mt5_handler.calculate_position_size(
-                        symbol=symbol,
-                        price=entry_price,
-                        risk_percent=adjusted_risk,
-                        entry_price=entry_price,
-                        stop_loss_price=stop_loss_price
-                    ), self.max_lot_size)
-                except Exception as e:
-                    logger.error(f"Error in MT5Handler position sizing: {str(e)}")
-                    # Fall through to our backup calculation
-            
             # Ensure position size doesn't exceed max
             position_size = min(position_size, self.max_lot_size)
             
-            # Ensure minimum position size
-            position_size = max(position_size, 0.01)
-            
-            # Round to 2 decimal places (standard lot precision)
-            position_size = round(position_size, 2)
+            # If we have MT5Handler, ensure position size respects symbol's constraints
+            if self.mt5_handler:
+                # Get minimum lot size for this symbol
+                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                
+                # Make sure position size is not less than symbol's minimum
+                if position_size < min_lot_size:
+                    position_size = min_lot_size
+                    logger.info(f"Adjusted position size to symbol's minimum: {position_size}")
+                
+                # Normalize volume according to symbol's volume_step
+                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+            else:
+                # Ensure minimum position size
+                position_size = max(position_size, 0.01)
+                
+                # Round to 2 decimal places (standard lot precision)
+                position_size = round(position_size, 2)
             
             logger.info(f"Calculated position size: {position_size} lots based on risk")
             return position_size
@@ -1498,4 +1545,12 @@ class RiskManager:
             return self.volatility_metrics[symbol][tf].get('atr')
             
         return None
+        
+    @classmethod
+    def get_instance(cls):
+        """Return the singleton instance, creating it if necessary."""
+        global _risk_manager_instance
+        if _risk_manager_instance is None:
+            _risk_manager_instance = cls()
+        return _risk_manager_instance
         

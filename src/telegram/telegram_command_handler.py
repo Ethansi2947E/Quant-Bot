@@ -417,34 +417,43 @@ class TelegramCommandHandler:
             
     async def handle_daily_command(self, args: List[str]) -> str:
         """
-        Handler for the /daily command to show daily trading summary.
+        Handler for the /daily command.
+        Shows trading history for the current day.
         
         Args:
-            args: Command arguments (unused for this command)
+            args: List of command arguments
             
         Returns:
-            Formatted daily summary information
+            Daily trading history summary
         """
         try:
-            # Get today's date
-            today = datetime.now().strftime('%Y-%m-%d')
+            # Get today's date range
+            today = datetime.now()
+            start_date = today.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = today.replace(hour=23, minute=59, second=59, microsecond=999999)
             
-            # Get trade history for today
-            history_args = [f"from={today}", f"to={today}"]
+            # Format dates for display
+            date_str = today.strftime("%Y-%m-%d")
             
-            # Get today's trades by calling the history handler
-            trades_info = await self.handle_history_command(history_args)
+            # Check if trading bot and necessary components are initialized
+            if not hasattr(self.trading_bot, 'mt5_handler') or self.trading_bot.mt5_handler is None:
+                logger.error("MT5 handler not available")
+                return f"⚠️ <b>Daily Report ({date_str})</b>\n\nMT5 connection not available. Cannot retrieve trading history."
             
-            # If no trades, return a simple message
-            if "No trade history available" in trades_info:
-                return "📅 <b>Daily Summary</b>\n\nNo trades have been executed today."
-                
-            return trades_info
+            # Get history using date range
+            history_text = await self.handle_history_command([start_date.strftime("%Y-%m-%d"), 
+                                                            end_date.strftime("%Y-%m-%d")])
             
+            # If no trades were found, return a specific message
+            if "No trades found" in history_text:
+                return f"📅 <b>Daily Report ({date_str})</b>\n\nNo trades found for today."
+            
+            # Otherwise, prepend with daily header
+            return f"📅 <b>Daily Report ({date_str})</b>\n\n{history_text}"
         except Exception as e:
-            logger.error(f"Error generating daily summary: {str(e)}")
+            logger.error(f"Error generating daily report: {str(e)}")
             logger.error(traceback.format_exc())
-            return f"⚠️ <b>Error retrieving daily summary</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
+            return f"⚠️ <b>Error retrieving daily report</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
     
     async def handle_balance_command(self, args: List[str]) -> str:
         """
@@ -509,9 +518,18 @@ class TelegramCommandHandler:
         Returns:
             Formatted status table or error message
         """
-        positions = self.mt5_handler.get_open_positions() if hasattr(self, 'mt5_handler') else []
+        # Access MT5Handler through the trading bot instead of directly
+        if not hasattr(self.trading_bot, 'mt5_handler') or not self.trading_bot.mt5_handler:
+            logger.error("MT5Handler not available through trading_bot")
+            return "⚠️ Error: MT5 handler not available. Cannot retrieve positions."
+            
+        positions = self.trading_bot.mt5_handler.get_open_positions()
         
         if not positions:
+            # Get connection status to provide better feedback
+            mt5_connected = self.trading_bot.mt5_handler.connected if hasattr(self.trading_bot.mt5_handler, 'connected') else False
+            if not mt5_connected:
+                return "⚠️ MT5 not connected. Please check your connection and try again."
             return "📋 No open positions currently."
         
         # Create a table header
@@ -545,92 +563,185 @@ class TelegramCommandHandler:
     
     async def handle_performance_command(self, args: List[str]) -> str:
         """
-        Handler for the /performance command to show trading performance.
+        Handler for the /performance command.
+        Shows performance summary calculated directly from MT5 trade history.
         
         Args:
-            args: Command arguments (unused for this command)
+            args: Command arguments (optional days parameter, defaults to 30 days)
             
         Returns:
-            Formatted performance analytics
+            Performance summary with key metrics
         """
         try:
-            # This would normally call the metrics handler with additional analytics
-            # For now, call metrics as a base and add more detailed analytics later
-            if hasattr(self.trading_bot, "performance_tracker"):
-                metrics = await self.trading_bot.performance_tracker.update_performance_metrics()
+            # Check if trading bot and MT5 handler are initialized
+            if not hasattr(self, 'trading_bot') or self.trading_bot is None:
+                logger.error("Trading bot not initialized")
+                return "⚠️ <b>Performance Summary</b>\n\nTrading bot is not initialized."
+            
+            if not hasattr(self.trading_bot, 'mt5_handler') or self.trading_bot.mt5_handler is None:
+                logger.error("MT5 handler not available")
+                return "⚠️ <b>Performance Summary</b>\n\nMT5 connection not available. Cannot retrieve performance data."
+            
+            # Parse days parameter (default to 30 days for performance overview)
+            days = 30
+            for arg in args:
+                if arg.lower().startswith("days="):
+                    try:
+                        days = int(arg.split("=")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            # Get trade history using direct MT5 calls for accurate data
+            import MetaTrader5 as mt5
+            
+            # Get deals for the specified period
+            deals = mt5.history_deals_get(start_date, end_date)
+            
+            if not deals or len(deals) == 0:
+                return f"📊 <b>Performance Summary</b>\n\nNo trades found in the last {days} days."
+            
+            # Group deals by position to analyze complete trades
+            position_deals = {}
+            for deal in deals:
+                if deal.position_id not in position_deals:
+                    position_deals[deal.position_id] = []
+                position_deals[deal.position_id].append(deal)
+            
+            # Process each position to calculate metrics
+            completed_trades = []
+            for position_id, position_deals_list in position_deals.items():
+                # Find entry and exit deals
+                entry_deals = [d for d in position_deals_list if d.entry == 0]
+                exit_deals = [d for d in position_deals_list if d.entry == 1]
                 
-                # Calculate win rate and other derived metrics
-                total_trades = metrics.get("total_trades", 0)
-                winning_trades = metrics.get("winning_trades", 0)
-                losing_trades = metrics.get("losing_trades", 0)
-                profit = metrics.get("total_profit", 0.0)
-                max_dd = metrics.get("max_drawdown", 0.0)
+                # Skip if we don't have both entry and exit deals (open position)
+                if not entry_deals or not exit_deals:
+                    continue
+                    
+                entry_deal = sorted(entry_deals, key=lambda d: d.time)[0]
+                exit_deal = sorted(exit_deals, key=lambda d: d.time)[-1]
                 
-                # Handle the case when there are no trades
-                if total_trades == 0:
-                    return "📊 <b>No trading data available yet</b>\n\nPerformance metrics will appear after completed trades."
+                # Calculate profit
+                profit = exit_deal.profit
                 
-                # Calculate win rate and other derived metrics
-                win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-                avg_profit_per_trade = profit / total_trades if total_trades > 0 else 0
-                
-                # Calculate profit factor if there are losing trades
-                avg_win = 0
-                avg_loss = 0
-                profit_factor = 0
+                # Create trade entry
+                trade = {
+                    'id': position_id,
+                    'symbol': entry_deal.symbol,
+                    'type': 'BUY' if entry_deal.type == 0 else 'SELL',
+                    'entry_price': entry_deal.price,
+                    'exit_price': exit_deal.price,
+                    'profit': profit,
+                    'volume': entry_deal.volume,
+                    'entry_time': datetime.fromtimestamp(entry_deal.time),
+                    'exit_time': datetime.fromtimestamp(exit_deal.time)
+                }
+                completed_trades.append(trade)
+            
+            # If no completed trades, return early
+            if not completed_trades:
+                return f"📊 <b>Performance Summary</b>\n\nNo completed trades found in the last {days} days."
+            
+            # Calculate metrics
+            total_trades = len(completed_trades)
+            winning_trades = sum(1 for t in completed_trades if t['profit'] > 0)
+            losing_trades = sum(1 for t in completed_trades if t['profit'] < 0)
+            
+            win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+            total_profit = sum(t['profit'] for t in completed_trades)
+            
+            # Calculate profit factor
+            winning_profits = sum(t['profit'] for t in completed_trades if t['profit'] > 0)
+            losing_profits = sum(abs(t['profit']) for t in completed_trades if t['profit'] < 0)
+            
+            profit_factor = winning_profits / losing_profits if losing_profits > 0 else float('inf')
                 
                 # Calculate average win and loss
-                if winning_trades > 0:
-                    avg_win = metrics.get("total_profit_winning", 0) / winning_trades
+            avg_win = winning_profits / winning_trades if winning_trades > 0 else 0
+            avg_loss = losing_profits / losing_trades if losing_trades > 0 else 0
+            
+            # Calculate drawdown
+            # Sort trades by date
+            sorted_trades = sorted(completed_trades, key=lambda t: t['entry_time'])
+            
+            # Calculate running balance and max drawdown
+            balance = 0
+            peak_balance = 0
+            max_drawdown_pct = 0
+            
+            for trade in sorted_trades:
+                balance += trade['profit']
+                if balance > peak_balance:
+                    peak_balance = balance
+                elif peak_balance > 0:
+                    drawdown_pct = (peak_balance - balance) / peak_balance * 100
+                    max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
+            
+            # Calculate expectancy
+            expectancy = (win_rate/100 * avg_win) - ((100-win_rate)/100 * avg_loss) if avg_loss > 0 else 0
+            
+            # Build the performance summary
+            summary = [
+                f"📊 <b>Performance Summary (Last {days} Days)</b>",
+                "",
+                "<b>📈 Trade Statistics:</b>",
+                f"• Total Trades: <b>{total_trades}</b>",
+                f"• Winning Trades: <b>{winning_trades}</b> ({win_rate:.1f}%)",
+                f"• Losing Trades: <b>{losing_trades}</b> ({100 - win_rate:.1f}%)",
+                "",
+                "<b>💰 Profitability:</b>",
+                f"• Total Profit: <b>{'+'if total_profit > 0 else ''}{total_profit:.2f}</b>",
+                f"• Average Win: <b>+{avg_win:.2f}</b>",
+                f"• Average Loss: <b>-{avg_loss:.2f}</b>",
+                f"• Profit Factor: <b>{profit_factor:.2f}</b>",
+                f"• Expectancy: <b>{'+'if expectancy > 0 else ''}{expectancy:.2f}</b>",
+                "",
+                "<b>⚠️ Risk Metrics:</b>",
+                f"• Max Drawdown: <b>{max_drawdown_pct:.2f}%</b>"
+            ]
+            
+            # Add trade frequency analysis
+            trades_per_day = total_trades / days
+            summary.append("")
+            summary.append("<b>🕒 Trade Frequency:</b>")
+            summary.append(f"• Trades per Day: <b>{trades_per_day:.1f}</b>")
+            
+            # Add top traded symbols if we have enough trades
+            if total_trades >= 5:
+                symbol_counts = {}
+                for trade in completed_trades:
+                    symbol = trade['symbol']
+                    if symbol not in symbol_counts:
+                        symbol_counts[symbol] = {'count': 0, 'profit': 0}
+                    symbol_counts[symbol]['count'] += 1
+                    symbol_counts[symbol]['profit'] += trade['profit']
                 
-                if losing_trades > 0:
-                    avg_loss = abs(metrics.get("total_profit_losing", 0)) / losing_trades
-                    profit_factor = abs(metrics.get("total_profit_winning", 0)) / abs(metrics.get("total_profit_losing", 0))
+                # Get top 3 most traded symbols
+                top_symbols = sorted(symbol_counts.items(), key=lambda x: x[1]['count'], reverse=True)[:3]
                 
-                # Create performance charts (text-based for now)
-                if win_rate >= 80:
-                    win_rate_visual = "🟩🟩🟩🟩🟩"
-                    performance_emoji = "🔥"
-                elif win_rate >= 60:
-                    win_rate_visual = "🟩🟩🟩🟩⬜"
-                    performance_emoji = "📈"
-                elif win_rate >= 40:
-                    win_rate_visual = "🟩🟩🟩⬜⬜"
-                    performance_emoji = "📊"
-                elif win_rate >= 20:
-                    win_rate_visual = "🟩🟩⬜⬜⬜"
-                    performance_emoji = "📉"
-                else:
-                    win_rate_visual = "🟩⬜⬜⬜⬜"
-                    performance_emoji = "❄️"
-                
-                # Create advanced performance analysis
-                performance_text = f"""{performance_emoji} <b>PERFORMANCE ANALYSIS</b> {performance_emoji}
-
-<b>📊 Trade Statistics:</b>
-• Total Trades: <b>{total_trades}</b>
-• Winning: <b>{winning_trades}</b> | Losing: <b>{losing_trades}</b>
-• Win Rate: <b>{win_rate:.1f}%</b> {win_rate_visual}
-
-<b>💰 Profit Analysis:</b>
-• Total P/L: <b>{"+" if profit > 0 else ""}{profit:.2f}</b>
-• Avg Per Trade: <b>{avg_profit_per_trade:.2f}</b>
-• Avg Win: <b>{avg_win:.2f}</b> | Avg Loss: <b>{avg_loss:.2f}</b>
-• Profit Factor: <b>{profit_factor:.2f}</b>
-
-<b>📉 Risk Metrics:</b>
-• Max Drawdown: <b>{max_dd:.2f}%</b>
-• Risk-Reward: <b>{abs(avg_win/avg_loss):.2f}</b> (when avg_loss != 0)
-
-<i>Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>"""
-                
-                return performance_text
-            else:
-                return "⚠️ Performance tracker not available"
+                if top_symbols:
+                    summary.append("")
+                    summary.append("<b>🔣 Top Traded Symbols:</b>")
+                    for symbol, stats in top_symbols:
+                        win_count = sum(1 for t in completed_trades if t['symbol'] == symbol and t['profit'] > 0)
+                        symbol_win_rate = (win_count / stats['count']) * 100
+                        summary.append(f"• {symbol}: <b>{stats['count']}</b> trades, {symbol_win_rate:.1f}% win rate, P/L: <b>{'+'if stats['profit'] > 0 else ''}{stats['profit']:.2f}</b>")
+            
+            # Add timestamp
+            summary.append("")
+            summary.append(f"<i>Analysis from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}</i>")
+            summary.append(f"<i>Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>")
+            
+            return "\n".join(summary)
+        
         except Exception as e:
-            logger.error(f"Error generating performance analysis: {str(e)}")
+            logger.error(f"Error generating performance summary: {str(e)}")
             logger.error(traceback.format_exc())
-            return f"⚠️ <b>Error retrieving performance</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
+            return f"⚠️ <b>Error retrieving performance data</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
     
     async def handle_count_command(self, args: List[str]) -> str:
         """
@@ -740,72 +851,184 @@ class TelegramCommandHandler:
     async def handle_metrics_command(self, args: List[str]) -> str:
         """
         Handler for the /metrics command.
+        Shows trading metrics calculated directly from MT5 data.
         
         Args:
-            args: Command arguments (unused for this command)
+            args: Command arguments (optional days parameter, defaults to today)
             
         Returns:
-            Formatted metrics information
+            Trading metrics summary calculated from recent trades
         """
         try:
-            # Get the latest performance metrics
-            if hasattr(self.trading_bot, "performance_tracker"):
-                metrics = await self.trading_bot.performance_tracker.update_performance_metrics()
+            # Check if trading bot and MT5 handler are initialized
+            if not hasattr(self, 'trading_bot') or self.trading_bot is None:
+                logger.error("Trading bot not initialized")
+                return "⚠️ <b>Trading Metrics</b>\n\nTrading bot is not initialized."
+            
+            if not hasattr(self.trading_bot, 'mt5_handler') or self.trading_bot.mt5_handler is None:
+                logger.error("MT5 handler not available")
+                return "⚠️ <b>Trading Metrics</b>\n\nMT5 connection not available. Cannot retrieve metrics."
+            
+            # Parse days parameter (default to today)
+            days = 1
+            for arg in args:
+                if arg.lower().startswith("days="):
+                    try:
+                        days = int(arg.split("=")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            logger.info(f"Retrieving metrics for period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+            
+            # Get trade history using direct MT5 calls for accurate data
+            import MetaTrader5 as mt5
+            
+            # Connect to MT5 if not already connected
+            if not mt5.terminal_info():
+                logger.info("Initializing MT5 connection")
+                mt5.initialize()
+            
+            # Get deals for the specified period
+            logger.info(f"Requesting MT5 history deals for {days} day(s)")
+            deals = mt5.history_deals_get(start_date, end_date)
+            
+            if deals is None:
+                logger.error("MT5 returned None for history_deals_get")
+                return f"⚠️ <b>Trading Metrics</b>\n\nFailed to retrieve data from MT5. Please check your connection."
+            
+            if not deals or len(deals) == 0:
+                logger.info(f"No deals found in MT5 for the period ({days} day(s))")
+                return f"📏 <b>Trading Metrics</b>\n\nNo trades found in the last {days} day(s). Try increasing the time period with: /metrics days=7"
+            
+            logger.info(f"Found {len(deals)} deals in MT5 history")
+            
+            # Group deals by position to analyze complete trades
+            position_deals = {}
+            for deal in deals:
+                if deal.position_id not in position_deals:
+                    position_deals[deal.position_id] = []
+                position_deals[deal.position_id].append(deal)
+            
+            logger.info(f"Grouped into {len(position_deals)} unique positions")
+            
+            # Process each position to calculate metrics
+            completed_trades = []
+            for position_id, position_deals_list in position_deals.items():
+                # Find entry and exit deals
+                entry_deals = [d for d in position_deals_list if d.entry == 0]
+                exit_deals = [d for d in position_deals_list if d.entry == 1]
                 
-                # Calculate win rate and other derived metrics
-                total_trades = metrics.get("total_trades", 0)
-                winning_trades = metrics.get("winning_trades", 0)
-                losing_trades = metrics.get("losing_trades", 0)
-                profit = metrics.get("total_profit", 0.0)
-                max_dd = metrics.get("max_drawdown", 0.0)
+                # Skip if we don't have both entry and exit deals (open position)
+                if not entry_deals or not exit_deals:
+                    continue
+                    
+                entry_deal = sorted(entry_deals, key=lambda d: d.time)[0]
+                exit_deal = sorted(exit_deals, key=lambda d: d.time)[-1]
                 
-                # Handle the case when there are no trades
-                if total_trades == 0:
-                    return "📊 <b>No trading data available yet</b>\n\nMetrics will appear after completed trades."
+                # Calculate profit
+                profit = exit_deal.profit
                 
-                # Calculate win rate and other derived metrics
-                win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-                avg_profit_per_trade = profit / total_trades if total_trades > 0 else 0
+                # Create trade entry
+                trade = {
+                    'id': position_id,
+                    'symbol': entry_deal.symbol,
+                    'type': 'BUY' if entry_deal.type == 0 else 'SELL',
+                    'entry_price': entry_deal.price,
+                    'exit_price': exit_deal.price,
+                    'profit': profit,
+                    'volume': entry_deal.volume,
+                    'entry_time': datetime.fromtimestamp(entry_deal.time),
+                    'exit_time': datetime.fromtimestamp(exit_deal.time)
+                }
+                completed_trades.append(trade)
+            
+            logger.info(f"Found {len(completed_trades)} completed trades out of {len(position_deals)} positions")
+            
+            # If no completed trades, return early
+            if not completed_trades:
+                return f"📏 <b>Trading Metrics</b>\n\nNo completed trades found in the last {days} day(s). There may be open positions, but no closed trades. Try increasing the time period with: /metrics days=7"
+            
+            # Calculate metrics
+            total_trades = len(completed_trades)
+            winning_trades = sum(1 for t in completed_trades if t['profit'] > 0)
+            losing_trades = sum(1 for t in completed_trades if t['profit'] < 0)
+            
+            win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+            total_profit = sum(t['profit'] for t in completed_trades)
+            
+            # Calculate profit factor and risk-reward
+            winning_profits = sum(t['profit'] for t in completed_trades if t['profit'] > 0)
+            losing_profits = sum(abs(t['profit']) for t in completed_trades if t['profit'] < 0)
+            
+            profit_factor = winning_profits / losing_profits if losing_profits > 0 else float('inf')
+            
+            # Calculate average win and loss
+            avg_win = winning_profits / winning_trades if winning_trades > 0 else 0
+            avg_loss = losing_profits / losing_trades if losing_trades > 0 else 0
+            
+            risk_reward = abs(avg_win / avg_loss) if avg_loss > 0 else float('inf')
+            
+            # Format metrics into categories
+            metrics_sections = {
+                "Returns": [
+                    f"• Total Profit: <b>{'+'if total_profit > 0 else ''}{total_profit:.2f}</b>",
+                    f"• Average Trade: <b>{'+'if total_profit/total_trades > 0 else ''}{total_profit/total_trades:.2f}</b>"
+                ],
+                "Risk": [
+                    f"• Profit Factor: <b>{profit_factor:.2f}</b>",
+                    f"• Risk-Reward: <b>{risk_reward:.2f}</b>"
+                ],
+                "Trade Stats": [
+                    f"• Total Trades: <b>{total_trades}</b>",
+                    f"• Win Rate: <b>{win_rate:.1f}%</b> ({winning_trades} wins, {losing_trades} losses)"
+                ],
+                "Averages": [
+                    f"• Average Win: <b>+{avg_win:.2f}</b>",
+                    f"• Average Loss: <b>-{avg_loss:.2f}</b>"
+                ]
+            }
+            
+            # Add symbols breakdown
+            symbol_stats = {}
+            for trade in completed_trades:
+                symbol = trade['symbol']
+                if symbol not in symbol_stats:
+                    symbol_stats[symbol] = {'count': 0, 'profit': 0, 'wins': 0, 'losses': 0}
                 
-                # Create visual win rate bar
-                if win_rate >= 80:
-                    win_rate_visual = "🟩🟩🟩🟩🟩"
-                    performance_emoji = "🔥"
-                elif win_rate >= 60:
-                    win_rate_visual = "🟩🟩🟩🟩⬜"
-                    performance_emoji = "📈"
-                elif win_rate >= 40:
-                    win_rate_visual = "🟩🟩🟩⬜⬜"
-                    performance_emoji = "📊"
-                elif win_rate >= 20:
-                    win_rate_visual = "🟩🟩⬜⬜⬜"
-                    performance_emoji = "📉"
-                else:
-                    win_rate_visual = "🟩⬜⬜⬜⬜"
-                    performance_emoji = "❄️"
+                symbol_stats[symbol]['count'] += 1
+                symbol_stats[symbol]['profit'] += trade['profit']
                 
-                # Create profit indicator
-                profit_indicator = "📈" if profit > 0 else "📉" if profit < 0 else "➖"
+                if trade['profit'] > 0:
+                    symbol_stats[symbol]['wins'] += 1
+                elif trade['profit'] < 0:
+                    symbol_stats[symbol]['losses'] += 1
+            
+            if len(symbol_stats) > 0:
+                symbols_text = []
+                for symbol, stats in sorted(symbol_stats.items(), key=lambda x: x[1]['count'], reverse=True):
+                    win_rate = (stats['wins'] / stats['count']) * 100 if stats['count'] > 0 else 0
+                    symbols_text.append(f"• {symbol}: <b>{stats['count']}</b> trades, {win_rate:.1f}% win, P/L: <b>{'+'if stats['profit'] > 0 else ''}{stats['profit']:.2f}</b>")
                 
-                metrics_text = f"""{performance_emoji} <b>PERFORMANCE SUMMARY</b> {performance_emoji}
-
-<b>📊 Trade Statistics:</b>
-• Total Trades: <b>{total_trades}</b>
-• Winning: <b>{winning_trades}</b> | Losing: <b>{losing_trades}</b>
-• Win Rate: <b>{win_rate:.1f}%</b> {win_rate_visual}
-
-<b>💰 Profit Analysis:</b>
-• Total P/L: <b>{profit_indicator} {profit:.2f}</b>
-• Avg Per Trade: <b>{avg_profit_per_trade:.2f}</b>
-• Max Drawdown: <b>{max_dd:.2f}%</b>
-
-<i>Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>"""
+                metrics_sections["Symbols"] = symbols_text[:3]  # Top 3 symbols by count
                 
-                return metrics_text
-            else:
-                return "⚠️ Performance tracker not available"
+            # Build the final message
+            period_str = "today" if days == 1 else f"last {days} days"
+            message = [f"📏 <b>Trading Metrics ({period_str})</b>"]
+            
+            for section, items in metrics_sections.items():
+                message.append(f"\n<b>{section}:</b>")
+                message.extend(items)
+            
+            message.append(f"\n<i>Based on {total_trades} completed trades from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}</i>")
+            message.append(f"<i>For a longer period, try /metrics days=7 or /metrics days=30</i>")
+            
+            return "\n".join(message)
         except Exception as e:
-            logger.error(f"Error generating metrics: {str(e)}")
+            logger.error(f"Error generating metrics summary: {str(e)}")
             logger.error(traceback.format_exc())
             return f"⚠️ <b>Error retrieving metrics</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
     
@@ -1399,3 +1622,19 @@ class TelegramCommandHandler:
             logger.error(f"Error retrieving trade history: {str(e)}")
             logger.error(traceback.format_exc())
             return f"⚠️ <b>Error retrieving trade history</b>\n\nPlease try again later. Error: {str(e)[:100]}..." 
+
+    async def register_handlers(self):
+        """
+        Register command handlers with the trading bot's Telegram instance.
+        This method is called during initialization to set up command handlers.
+        """
+        logger.info("Registering command handlers via register_handlers method")
+        
+        if not self.trading_bot or not hasattr(self.trading_bot, 'telegram_bot') or not self.trading_bot.telegram_bot:
+            logger.warning("Cannot register handlers: Telegram bot not available in trading_bot")
+            return False
+            
+        # Register all commands with the Telegram bot
+        await self.register_all_commands(self.trading_bot.telegram_bot)
+        
+        return True

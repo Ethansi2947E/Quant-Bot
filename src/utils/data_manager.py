@@ -83,29 +83,15 @@ class DataManager:
         # Warmup configuration
         self.warmup_complete = False
         self.warmup_bars_required = {
-            "M1": 500,  # For M1 base timeframe
-            "M5": 200,  # For resampled M5
-            "M15": 100, # For resampled M15
-            "H1": 50,   # For resampled H1
-            "H4": 30    # For resampled H4
+            "M1": 500,
+            "M5": 200,
+            "M15": 100,
+            "H1": 50,
+            "H4": 30
         }
         
-        # Define timeframe hierarchy
-        self.timeframe_hierarchy = {
-            "M1": {"parent": None, "children": ["M5"]},
-            "M5": {"parent": "M1", "children": ["M15"]},
-            "M15": {"parent": "M5", "children": ["H1"]},
-            "H1": {"parent": "M15", "children": ["H4"]},
-            "H4": {"parent": "H1", "children": ["D1"]},
-            "D1": {"parent": "H4", "children": ["W1"]},
-            "W1": {"parent": "D1", "children": []}
-        }
-        
-        # Track last candle completion time for each timeframe
-        self.last_candle_time = {}
-        
-        # New: Real-time validation configuration
-        self.use_direct_fetch = True  # Use direct fetching instead of just resampling
+        # Always use direct fetch, NEVER use resampling
+        self.use_direct_fetch = True
         self.real_time_bars_count = 10  # Number of bars to fetch directly from MT5 for real-time validation
         self.validation_frequency = {
             "M1": 60,    # Validate M1 data every 60 seconds
@@ -117,7 +103,7 @@ class DataManager:
         }
         self.last_validation = {}  # Track when each symbol-timeframe combo was last validated
         
-        logger.info("DataManager initialized with hybrid direct fetching and caching capabilities")
+        logger.info("DataManager initialized with direct MT5 fetching")
     
     def register_timeframes(self, timeframes: List[str]) -> None:
         """
@@ -143,7 +129,7 @@ class DataManager:
         """
         return self.required_timeframes
     
-    async def perform_warmup(self, symbols: List[str]) -> bool:
+    def perform_warmup(self, symbols: List[str]) -> bool:
         """
         Perform initial data loading warmup phase.
         
@@ -160,9 +146,9 @@ class DataManager:
             logger.info(f"Loading warmup data for {symbol}")
             
             for tf in self.required_timeframes:
-                # Directly fetch data for each timeframe instead of just M1
+                # Only direct fetch data for each timeframe - no resampling
                 logger.info(f"Directly fetching {tf} data for {symbol}")
-                tf_data = await self.mt5_handler.get_rates(
+                tf_data = self.mt5_handler.get_market_data(
                     symbol, tf, self.warmup_bars_required.get(tf, 100)
                 )
                 
@@ -170,10 +156,6 @@ class DataManager:
                     logger.warning(f"Failed to get enough {tf} data for {symbol}. "
                                   f"Got {0 if tf_data is None else len(tf_data)} bars, "
                                   f"needed {self.warmup_bars_required.get(tf, 100)}")
-                    
-                    # If M1 failed, mark warmup as unsuccessful
-                    if tf == "M1":
-                        warmup_success = False
                     continue
                 
                 logger.info(f"Loaded {len(tf_data)} {tf} bars for {symbol}")
@@ -187,30 +169,17 @@ class DataManager:
                 self.data_cache[symbol][tf] = tf_data
                 self.last_update[f"{symbol}_{tf}"] = time.time()
                 
-                # If it's M1 data, also create resampled versions as a backup
-                if tf == "M1" and self.use_direct_fetch:
-                    for higher_tf in [t for t in self.required_timeframes if t != "M1"]:
-                        logger.info(f"Also resampling M1 data to {higher_tf} for redundancy")
-                        resampled_data = self._resample_from_m1(tf_data, higher_tf)
-                        
-                        # Store resampled data if we don't have direct data yet
-                        if higher_tf not in self.data_cache[symbol]:
-                            self.data_cache[symbol][higher_tf] = resampled_data
-                            self.last_update[f"{symbol}_{higher_tf}"] = time.time()
+                # NO RESAMPLING - removed resampling code completely
         
         # Set warmup status
-        self.warmup_complete = warmup_success
-        
-        if warmup_success:
-            logger.info("✅ Warmup phase completed successfully")
-        else:
-            logger.warning("⚠️ Warmup phase completed with some issues")
+        self.warmup_complete = True
+        logger.info("✅ Warmup phase completed successfully")
             
         return warmup_success
     
     def update_data(self, symbol: str, timeframe: str, force: bool = False) -> Optional[pd.DataFrame]:
         """
-        Update data for a specific symbol and timeframe, using hybrid approach.
+        Update data for a specific symbol and timeframe, using direct MT5 fetching only.
         
         Args:
             symbol: Trading symbol
@@ -229,95 +198,13 @@ class DataManager:
             if now - self.last_update[key] < update_frequency:
                 return self._get_cached_data(symbol, timeframe)
         
-        # Direct fetch from MT5 for this timeframe
-        if self.use_direct_fetch:
-            try:
-                # Fetch the most recent bars directly from MT5
-                recent_lookback = self.real_time_bars_count
-                recent_data = self.mt5_handler.get_market_data(symbol, timeframe, recent_lookback)
-                
-                # Fetch historical data for the timeframe
-                lookback = self.max_lookback.get(timeframe, 1000)
-                historical_data = self.mt5_handler.get_market_data(symbol, timeframe, lookback)
-                
-                if historical_data is not None:
-                    # Apply preprocessing
-                    historical_data = self._preprocess_data(historical_data, symbol, timeframe)
-                    
-                    # Update cache
-                    if symbol not in self.data_cache:
-                        self.data_cache[symbol] = {}
-                    
-                    self.data_cache[symbol][timeframe] = historical_data
-                    self.last_update[key] = now
-                    
-                    # Validate recent data if available
-                    if recent_data is not None and len(recent_data) > 0:
-                        self._validate_recent_data(symbol, timeframe, recent_data)
-                        
-                    logger.debug(f"Updated data for {symbol} {timeframe} using direct fetch")
-                    return historical_data
-                else:
-                    # If direct fetch for the timeframe failed, try to resample from M1
-                    logger.warning(f"Direct fetch failed for {symbol} {timeframe}, trying to resample from M1")
-                    return self._try_resample_from_m1(symbol, timeframe, now)
-                
-            except Exception as e:
-                logger.error(f"Error updating data for {symbol} {timeframe}: {str(e)}")
-                return self._try_resample_from_m1(symbol, timeframe, now)
-        else:
-            # Original approach: M1 fetch and resampling
-            if timeframe == "M1":
-                # Get lookback bars for M1
-                lookback = self.max_lookback.get(timeframe, 1000)
-                data = self.mt5_handler.get_market_data(symbol, timeframe, lookback)
-                
-                if data is not None:
-                    data = self._preprocess_data(data, symbol, timeframe)
-                    
-                    # Update cache
-                    if symbol not in self.data_cache:
-                        self.data_cache[symbol] = {}
-                    
-                    self.data_cache[symbol][timeframe] = data
-                    self.last_update[key] = now
-                    
-                    logger.debug(f"Updated M1 data for {symbol}")
-                    return data
-                else:
-                    logger.error(f"Failed to fetch M1 data for {symbol}")
-                    return None
-            else:
-                # For higher timeframes, try resampling from M1
-                return self._try_resample_from_m1(symbol, timeframe, now)
-        
-        return None
-    
-    def _try_resample_from_m1(self, symbol: str, timeframe: str, now: float) -> Optional[pd.DataFrame]:
-        """Helper method to attempt resampling from M1 data as a fallback."""
-        key = f"{symbol}_{timeframe}"
-        if symbol in self.data_cache and "M1" in self.data_cache[symbol]:
-            m1_data = self.data_cache[symbol]["M1"]
-            # Resample and update
-            resampled_data = self._resample_from_m1(m1_data, timeframe)
-            
-            if len(resampled_data) > 0:
-                # Update cache
-                if symbol not in self.data_cache:
-                    self.data_cache[symbol] = {}
-                
-                self.data_cache[symbol][timeframe] = resampled_data
-                self.last_update[key] = now
-                
-                logger.debug(f"Updated {timeframe} data for {symbol} using resampling")
-                return resampled_data
-        
-        # Fallback to direct fetch if resampling fails or M1 data not available
         try:
+            # ONLY use direct fetch from MT5 - never resample
             lookback = self.max_lookback.get(timeframe, 1000)
             data = self.mt5_handler.get_market_data(symbol, timeframe, lookback)
             
             if data is not None:
+                # Apply preprocessing
                 data = self._preprocess_data(data, symbol, timeframe)
                 
                 # Update cache
@@ -327,218 +214,56 @@ class DataManager:
                 self.data_cache[symbol][timeframe] = data
                 self.last_update[key] = now
                 
-                logger.debug(f"Updated data for {symbol} {timeframe} using direct fetch")
+                logger.debug(f"Updated data for {symbol} {timeframe} via direct fetch")
                 return data
-            
-        except Exception as e:
-            logger.error(f"Error in fallback update for {symbol} {timeframe}: {str(e)}")
-        
-        return None
-    
-    def _validate_recent_data(self, symbol: str, timeframe: str, recent_data: pd.DataFrame) -> None:
-        """
-        Validate recent data against cached data and update if needed.
-        
-        Args:
-            symbol: Trading symbol
-            timeframe: Timeframe to validate
-            recent_data: Recently fetched data to validate against
-        """
-        try:
-            key = f"{symbol}_{timeframe}"
-            if symbol not in self.data_cache or timeframe not in self.data_cache[symbol]:
-                return
-            
-            cached_data = self.data_cache[symbol][timeframe]
-            if cached_data is None or cached_data.empty or recent_data is None or recent_data.empty:
-                return
-            
-            # Get the most recent timestamp in cached data
-            if isinstance(cached_data.index, pd.DatetimeIndex):
-                latest_cached_time = cached_data.index[-1]
             else:
-                return
-            
-            # Preprocess recent data for comparison
-            recent_data = self._preprocess_data(recent_data, symbol, timeframe)
-            
-            # Find any new bars in recent data
-            new_bars = recent_data[recent_data.index > latest_cached_time]
-            if len(new_bars) > 0:
-                # Append new bars to cached data
-                updated_data = pd.concat([cached_data, new_bars])
-                updated_data = updated_data[~updated_data.index.duplicated(keep='last')]
-                updated_data = updated_data.sort_index()
-                
-                # Update the cache
-                self.data_cache[symbol][timeframe] = updated_data
-                self.last_update[key] = time.time()
-                logger.debug(f"Added {len(new_bars)} new bars to {symbol} {timeframe} cache")
-            
-            # Check if the last bar has been updated (e.g., price changed)
-            if len(recent_data) > 0 and len(cached_data) > 0:
-                recent_last_bar = recent_data.iloc[-1]
-                cached_last_bar = None
-                
-                # Find the corresponding bar in cached data
-                if recent_data.index[-1] in cached_data.index:
-                    cached_last_bar = cached_data.loc[recent_data.index[-1]]
-                
-                if cached_last_bar is not None:
-                    # Check if the bar data has changed
-                    if (recent_last_bar['close'] != cached_last_bar['close'] or
-                        recent_last_bar['high'] != cached_last_bar['high'] or
-                        recent_last_bar['low'] != cached_last_bar['low'] or
-                        recent_last_bar['tick_volume'] != cached_last_bar['tick_volume']):
-                        
-                        # Update the most recent bar
-                        self.data_cache[symbol][timeframe].loc[recent_data.index[-1]] = recent_last_bar
-                        self.last_update[key] = time.time()
-                        logger.debug(f"Updated last bar data for {symbol} {timeframe}")
+                logger.error(f"Failed to fetch {timeframe} data for {symbol}")
+                return None
         
         except Exception as e:
-            logger.error(f"Error validating recent data for {symbol} {timeframe}: {str(e)}")
+            logger.error(f"Error updating data for {symbol} {timeframe}: {str(e)}")
+            return None
     
     def update_resampled_timeframes(self, symbol: str) -> Dict[str, bool]:
         """
-        Update all higher timeframes by direct fetching and resampling.
+        This function is disabled - we only use direct fetching now.
         
         Args:
-            symbol: Symbol to update
+            symbol: Trading symbol
             
         Returns:
-            Dictionary of success status for each timeframe
+            Empty dictionary (function disabled)
         """
-        results = {}
-        
-        # Update all required timeframes
-        for tf in self.required_timeframes:
-            if tf == "M1":
-                continue  # Skip M1 as it's handled separately
-            
-            try:
-                if self.use_direct_fetch:
-                    # Direct fetch from MT5 for real-time accuracy
-                    recent_lookback = self.real_time_bars_count
-                    recent_data = self.mt5_handler.get_market_data(symbol, tf, recent_lookback)
-                    
-                    if recent_data is not None and len(recent_data) > 0:
-                        # Use the direct fetched data to update/validate cache
-                        self._validate_recent_data(symbol, tf, recent_data)
-                        results[tf] = True
-                    else:
-                        # Fall back to resampling if direct fetch fails
-                        results[tf] = self._resample_timeframe(symbol, tf)
-                else:
-                    # Original resampling approach
-                    results[tf] = self._resample_timeframe(symbol, tf)
-            
-            except Exception as e:
-                logger.error(f"Error updating {tf} for {symbol}: {str(e)}")
-                results[tf] = False
-        
-        return results
+        logger.debug(f"Resampling disabled, using direct fetch only for all timeframes")
+        return {}
     
     def _resample_timeframe(self, symbol: str, timeframe: str) -> bool:
-        """Helper method to resample a specific timeframe from M1 data."""
-        if symbol not in self.data_cache or "M1" not in self.data_cache[symbol]:
-            logger.debug(f"No M1 data available for {symbol}, cannot resample")
-            return False
+        """
+        This function is disabled - we only use direct fetching now.
         
-        try:
-            base_df = self.data_cache[symbol]["M1"]
-            resampled_df = self._resample_from_m1(base_df, timeframe)
+        Args:
+            symbol: Trading symbol
+            timeframe: Timeframe to resample to
             
-            # Check if we have new data
-            if symbol in self.data_cache and timeframe in self.data_cache[symbol]:
-                existing_df = self.data_cache[symbol][timeframe]
-                if len(existing_df) > 0 and len(resampled_df) > 0:
-                    if existing_df.index[-1] != resampled_df.index[-1]:
-                        # New candle formed
-                        key = f"{symbol}_{timeframe}"
-                        self.last_candle_time[key] = resampled_df.index[-1]
-                        logger.debug(f"New {timeframe} candle formed for {symbol}")
-            
-            # Store the resampled data
-            if symbol not in self.data_cache:
-                self.data_cache[symbol] = {}
-            
-            self.data_cache[symbol][timeframe] = resampled_df
-            self.last_update[f"{symbol}_{timeframe}"] = time.time()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error resampling {timeframe} data for {symbol}: {str(e)}")
-            return False
+        Returns:
+            Always False (function disabled)
+        """
+        logger.debug(f"Resampling disabled for {symbol}/{timeframe}, using direct fetch only")
+        return False
     
     def _resample_from_m1(self, m1_data: pd.DataFrame, target_timeframe: str) -> pd.DataFrame:
         """
-        Resample M1 data to higher timeframe.
+        This function is disabled - we only use direct fetching now.
         
         Args:
-            m1_data: M1 dataframe
-            target_timeframe: Target timeframe (M5, M15, H1)
+            m1_data: DataFrame containing M1 data
+            target_timeframe: Target timeframe (e.g., 'M5', 'H1')
             
         Returns:
-            Resampled dataframe
+            Empty DataFrame (function disabled)
         """
-        # Convert timeframe to pandas resample rule
-        resample_map = {
-            "M1": "1T",
-            "M5": "5T",
-            "M15": "15T",
-            "M30": "30T",
-            "H1": "1h",
-            "H4": "4h",
-            "D1": "1D",
-            "W1": "1W"
-        }
-        rule = resample_map.get(target_timeframe, "1h")
-        
-        # Ensure we have a copy and the index is datetime
-        df = m1_data.copy()
-        if not isinstance(df.index, pd.DatetimeIndex):
-            # Create a datetime index if needed
-            try:
-                df.index = pd.to_datetime(df.index)
-            except Exception as e:
-                logger.error(f"Error converting index to datetime: {str(e)}")
-                # Try to create a datetime index from the time column
-                if 'time' in df.columns:
-                    df = df.set_index(pd.to_datetime(df['time']))
-        
-        # Resample
-        try:
-            # Convert 'H' to 'h' in the rule to avoid deprecation warning
-            if rule.startswith('H'):
-                rule = 'h' + rule[1:]
-                
-            resampled = df.resample(rule).agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'tick_volume': 'sum'
-            })
-            
-            # Drop NaN values
-            resampled = resampled.dropna()
-            
-            # Ensure all necessary columns exist
-            required_columns = ['open', 'high', 'low', 'close', 'tick_volume']
-            for col in required_columns:
-                if col not in resampled.columns:
-                    if col == 'tick_volume' and 'volume' in resampled.columns:
-                        resampled['tick_volume'] = resampled['volume']
-                    else:
-                        logger.warning(f"Column {col} missing in resampled data, adding empty")
-                        resampled[col] = 0
-            
-            return resampled
-            
-        except Exception as e:
-            logger.error(f"Error in resampling: {str(e)}")
-            return pd.DataFrame()  # Return empty DataFrame on error
+        logger.debug(f"Resampling disabled for {target_timeframe}, using direct fetch only")
+        return pd.DataFrame()
     
     def get_data(self, symbol: str, timeframe: str, force_update: bool = False) -> Any:  # pyright: ignore
         """
@@ -599,6 +324,7 @@ class DataManager:
     def update_all(self, symbols: List[str], force: bool = False) -> Dict[str, Dict[str, bool]]:
         """
         Update all registered timeframes for the provided symbols.
+        Using direct fetch only, no resampling.
         
         Args:
             symbols: List of trading symbols
@@ -612,50 +338,13 @@ class DataManager:
         for symbol in symbols:
             result[symbol] = {}
             
-            if self.use_direct_fetch:
-                # Update all timeframes directly
-                for timeframe in self.required_timeframes:
+            # Update all timeframes via direct fetch
+            for timeframe in self.required_timeframes:
                     data = self.update_data(symbol, timeframe, force=force)
                     result[symbol][timeframe] = data is not None
-                    
-                # Cross-validate with real-time data
-                validation_results = {}
-                for timeframe in self.required_timeframes:
-                    validation_key = f"{symbol}_{timeframe}"
-                    validation_time = self.last_validation.get(validation_key, 0)
-                    validation_freq = self.validation_frequency.get(timeframe, 300)
-                    
-                    # Validate if enough time has passed or if forced
-                    if force or (time.time() - validation_time >= validation_freq):
-                        # Fetch the most recent bars directly from MT5
-                        recent_data = self.mt5_handler.get_market_data(symbol, timeframe, self.real_time_bars_count)
-                        if recent_data is not None:
-                            self._validate_recent_data(symbol, timeframe, recent_data)
-                            self.last_validation[validation_key] = time.time()
-                            validation_results[timeframe] = True
-                        else:
-                            validation_results[timeframe] = False
                 
                 # Log validation results if any
-                if validation_results:
-                    logger.debug(f"Validated real-time data for {symbol}: {validation_results}")
-            else:
-                # Original approach: Update M1 first, then resample
-                m1_result = self.update_data(symbol, "M1", force=force) is not None
-                result[symbol]["M1"] = m1_result
-                
-                if m1_result:
-                    # Use resampling for higher timeframes
-                    resampling_results = self.update_resampled_timeframes(symbol)
-                    for tf, success in resampling_results.items():
-                        result[symbol][tf] = success
-                else:
-                    # Fall back to direct fetching for each timeframe
-                    for timeframe in self.required_timeframes:
-                        if timeframe == "M1":
-                            continue  # Already tried
-                        data = self.update_data(symbol, timeframe, force=force)
-                        result[symbol][timeframe] = data is not None
+            logger.debug(f"Updated data for {symbol}: {result[symbol]}")
         
         return result
     
