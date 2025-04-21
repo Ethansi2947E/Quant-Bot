@@ -1,10 +1,14 @@
 import traceback
-from typing import Dict, Any, Tuple
-from datetime import datetime
-from src.mt5_handler import MT5Handler
-from src.risk_manager import RiskManager
-from src.telegram.telegram_bot import TelegramBot
+from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
+import time
+from datetime import datetime, timedelta
+import asyncio
+
+from src.telegram.telegram_bot import TelegramBot
+from src.mt5_handler import MT5Handler
+from src.utils.market_utils import calculate_pip_value, convert_pips_to_price
+from src.risk_manager import RiskManager
 
 class PositionManager:
     """
@@ -197,30 +201,20 @@ class PositionManager:
             
             # Get the trailing step size
             from config.config import TRADE_EXIT_CONFIG
-            trail_step_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_step_pips', 20)
+            # Use trail_points from config (new name) but fall back to trail_step_pips (old name) for backward compatibility
+            trail_step_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_points', 
+                             TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_step_pips', 20))
             
-            # Get pip value for this symbol
-            pip_value = 0.0001  # Default for forex 4-digit pairs
-            
-            # Symbols with 5 digits need different pip values
-            if symbol.startswith("GOLD"):
-                pip_value = 0.01  # For gold
-            elif symbol.startswith("US"):
-                pip_value = 0.01  # For US indices
-            elif symbol.startswith("Crash") or symbol.startswith("Boom"):
-                pip_value = 0.001  # Synthetic indices usually 3 digits
+            # Get pip value for this symbol using the utility function
+            pip_value = calculate_pip_value(symbol, mt5_handler=self.mt5_handler)
             
             # Calculate trailing step in price
             trail_step = trail_step_pips * pip_value
             
             # Get minimum stop level from MT5
             min_stop_distance = self.mt5_handler.get_min_stop_distance(symbol)
-            if min_stop_distance is None:
-                # Fallback to default if we couldn't get the value
-                min_stop_distance = 0.0003  # Default minimum distance
-                logger.warning(f"Could not get minimum stop distance for {symbol}, using default: {min_stop_distance}")
-            else:
-                logger.debug(f"Minimum stop distance for {symbol}: {min_stop_distance}")
+            
+            logger.debug(f"Minimum stop distance for {symbol}: {min_stop_distance}")
             
             # Initialize tracking if needed
             if ticket not in self.trailing_stop_data:
@@ -306,6 +300,9 @@ class PositionManager:
                     
                     # Ensure the stop loss respects minimum distance
                     min_valid_sl = current_price - min_stop_distance
+                    
+                    # For buy positions, stop loss must be below current price but not too close
+                    # If new SL is too close to current price (above min_valid_sl), adjust it down
                     if new_sl > min_valid_sl:
                         logger.debug(f"Adjusted buy SL from {new_sl} to {min_valid_sl} to respect minimum distance ({min_stop_distance})")
                         new_sl = min_valid_sl
@@ -360,6 +357,9 @@ class PositionManager:
                     
                     # Ensure the stop loss respects minimum distance
                     min_valid_sl = current_price + min_stop_distance
+                    
+                    # For sell positions, stop loss must be above current price but not too close
+                    # If new SL is too close to current price (below min_valid_sl), adjust it up
                     if new_sl < min_valid_sl:
                         logger.debug(f"Adjusted sell SL from {new_sl} to {min_valid_sl} to respect minimum distance ({min_stop_distance})")
                         new_sl = min_valid_sl
@@ -433,15 +433,36 @@ class PositionManager:
         activation_factor = trailing_stop_config.get("trailing_activation_factor", 
                              trailing_stop_config.get("activation_ratio", 1.0))
         
+        # Apply reasonable bounds to the activation factor
+        # Ensure it's between 0.2 (20% of risk) and 3.0 (300% of risk)
+        activation_factor = max(0.2, min(3.0, activation_factor))
+        
         logger.debug(f"Calculating activation price: direction={direction}, entry={entry_price}, " 
                     f"stop_loss={stop_loss}, risk={risk}, activation_factor={activation_factor}")
         
+        # Calculate the activation price based on direction
         if direction == "buy":
             activation_price = entry_price + (risk * activation_factor)
+            
+            # Ensure the activation price is reasonable for market conditions
+            # Maximum activation distance should be 5x the risk or 5% of entry price, whichever is smaller
+            max_distance = min(risk * 5, entry_price * 0.05)
+            if activation_price > entry_price + max_distance:
+                activation_price = entry_price + max_distance
+                logger.info(f"Adjusted activation price to be within reasonable bounds: {activation_price:.5f}")
+                
             logger.debug(f"BUY activation price: {activation_price} (entry + risk*factor)")
             return activation_price
         else:
             activation_price = entry_price - (risk * activation_factor)
+            
+            # Ensure the activation price is reasonable for market conditions
+            # Maximum activation distance should be 5x the risk or 5% of entry price, whichever is smaller
+            max_distance = min(risk * 5, entry_price * 0.05)
+            if activation_price < entry_price - max_distance:
+                activation_price = entry_price - max_distance
+                logger.info(f"Adjusted activation price to be within reasonable bounds: {activation_price:.5f}")
+                
             logger.debug(f"SELL activation price: {activation_price} (entry - risk*factor)")
             return activation_price
             

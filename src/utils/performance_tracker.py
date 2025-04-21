@@ -45,7 +45,15 @@ class PerformanceTracker:
             "tp_hits": 0,
             "sl_hits": 0,
             "manual_closures": 0,
-            "tp_hit_rate": 0.0
+            "tp_hit_rate": 0.0,
+            # Add signal quality metrics
+            "avg_signal_quality": 0.0,
+            "high_quality_trades": 0,  # Trades with quality > 80%
+            "medium_quality_trades": 0,  # Trades with quality 50-80%
+            "low_quality_trades": 0,  # Trades with quality < 50%
+            "high_quality_win_rate": 0.0,
+            "medium_quality_win_rate": 0.0,
+            "low_quality_win_rate": 0.0
         }
         
         # Historical performance data
@@ -110,6 +118,7 @@ class PerformanceTracker:
             # Process history entries
             for trade in history:
                 profit = trade.get("profit", 0.0)
+                signal_quality = trade.get("signal_quality", 0.0)
                 
                 if profit > 0:
                     winning_trades += 1
@@ -130,6 +139,22 @@ class PerformanceTracker:
                     sl_hits += 1
                 elif reason == "manual":
                     manual_closures += 1
+                
+                # Track signal quality metrics
+                if signal_quality > 0:
+                    self.metrics["avg_signal_quality"] += signal_quality
+                    if signal_quality >= 0.8:  # 80%+
+                        self.metrics["high_quality_trades"] += 1
+                        if profit > 0:
+                            self.metrics["high_quality_win_rate"] += 1
+                    elif signal_quality >= 0.5:  # 50-80%
+                        self.metrics["medium_quality_trades"] += 1
+                        if profit > 0:
+                            self.metrics["medium_quality_win_rate"] += 1
+                    else:  # < 50%
+                        self.metrics["low_quality_trades"] += 1
+                        if profit > 0:
+                            self.metrics["low_quality_win_rate"] += 1
             
             # Calculate performance metrics
             total_trades = winning_trades + losing_trades
@@ -201,6 +226,10 @@ class PerformanceTracker:
             if tp_hits + sl_hits > 0:
                 self.metrics["tp_hit_rate"] = tp_hits / (tp_hits + sl_hits)
             
+            # Update signal quality metrics
+            if self.metrics["avg_signal_quality"] > 0:
+                self.metrics["avg_signal_quality"] /= (self.metrics["high_quality_trades"] + self.metrics["medium_quality_trades"] + self.metrics["low_quality_trades"])
+            
             logger.info(f"Performance metrics updated: Win rate {self.metrics['win_rate']:.2f}, "
                         f"Profit factor {self.metrics['profit_factor']:.2f}")
             
@@ -223,6 +252,15 @@ class PerformanceTracker:
             weekly_data = {}
             monthly_data = {}
             
+            # Track quality metrics
+            quality_metrics = {
+                "high": {"wins": 0, "total": 0},
+                "medium": {"wins": 0, "total": 0},
+                "low": {"wins": 0, "total": 0}
+            }
+            total_quality = 0.0
+            trades_with_quality = 0
+            
             for trade in history:
                 # Extract datetime and profit
                 close_time = trade.get("close_time")
@@ -230,6 +268,26 @@ class PerformanceTracker:
                     continue
                     
                 profit = trade.get("profit", 0.0)
+                signal_quality = trade.get("signal_quality", 0.0)
+                
+                # Track signal quality metrics
+                if signal_quality > 0:
+                    total_quality += signal_quality
+                    trades_with_quality += 1
+                    
+                    # Categorize trade by quality
+                    if signal_quality >= 0.8:  # 80%+
+                        quality_metrics["high"]["total"] += 1
+                        if profit > 0:
+                            quality_metrics["high"]["wins"] += 1
+                    elif signal_quality >= 0.5:  # 50-80%
+                        quality_metrics["medium"]["total"] += 1
+                        if profit > 0:
+                            quality_metrics["medium"]["wins"] += 1
+                    else:  # < 50%
+                        quality_metrics["low"]["total"] += 1
+                        if profit > 0:
+                            quality_metrics["low"]["wins"] += 1
                 
                 # Create date keys
                 date_key = close_time.strftime("%Y-%m-%d")
@@ -238,21 +296,42 @@ class PerformanceTracker:
                 
                 # Update daily data
                 if date_key not in daily_data:
-                    daily_data[date_key] = {"profit": 0.0, "trades": 0}
+                    daily_data[date_key] = {"profit": 0.0, "trades": 0, "avg_quality": 0.0, "quality_trades": 0}
                 daily_data[date_key]["profit"] += profit
                 daily_data[date_key]["trades"] += 1
+                if signal_quality > 0:
+                    daily_data[date_key]["avg_quality"] = ((daily_data[date_key]["avg_quality"] * daily_data[date_key]["quality_trades"]) + signal_quality) / (daily_data[date_key]["quality_trades"] + 1)
+                    daily_data[date_key]["quality_trades"] += 1
                 
                 # Update weekly data
                 if week_key not in weekly_data:
-                    weekly_data[week_key] = {"profit": 0.0, "trades": 0}
+                    weekly_data[week_key] = {"profit": 0.0, "trades": 0, "avg_quality": 0.0, "quality_trades": 0}
                 weekly_data[week_key]["profit"] += profit
                 weekly_data[week_key]["trades"] += 1
+                if signal_quality > 0:
+                    weekly_data[week_key]["avg_quality"] = ((weekly_data[week_key]["avg_quality"] * weekly_data[week_key]["quality_trades"]) + signal_quality) / (weekly_data[week_key]["quality_trades"] + 1)
+                    weekly_data[week_key]["quality_trades"] += 1
                 
                 # Update monthly data
                 if month_key not in monthly_data:
-                    monthly_data[month_key] = {"profit": 0.0, "trades": 0}
+                    monthly_data[month_key] = {"profit": 0.0, "trades": 0, "avg_quality": 0.0, "quality_trades": 0}
                 monthly_data[month_key]["profit"] += profit
                 monthly_data[month_key]["trades"] += 1
+                if signal_quality > 0:
+                    monthly_data[month_key]["avg_quality"] = ((monthly_data[month_key]["avg_quality"] * monthly_data[month_key]["quality_trades"]) + signal_quality) / (monthly_data[month_key]["quality_trades"] + 1)
+                    monthly_data[month_key]["quality_trades"] += 1
+            
+            # Update metrics with quality statistics
+            if trades_with_quality > 0:
+                self.metrics["avg_signal_quality"] = total_quality / trades_with_quality
+                
+                self.metrics["high_quality_trades"] = quality_metrics["high"]["total"]
+                self.metrics["medium_quality_trades"] = quality_metrics["medium"]["total"]
+                self.metrics["low_quality_trades"] = quality_metrics["low"]["total"]
+                
+                self.metrics["high_quality_win_rate"] = quality_metrics["high"]["wins"] / quality_metrics["high"]["total"] if quality_metrics["high"]["total"] > 0 else 0.0
+                self.metrics["medium_quality_win_rate"] = quality_metrics["medium"]["wins"] / quality_metrics["medium"]["total"] if quality_metrics["medium"]["total"] > 0 else 0.0
+                self.metrics["low_quality_win_rate"] = quality_metrics["low"]["wins"] / quality_metrics["low"]["total"] if quality_metrics["low"]["total"] > 0 else 0.0
             
             # Store the updated data
             self.daily_performance = daily_data
@@ -278,6 +357,21 @@ class PerformanceTracker:
             "daily_performance": dict(sorted(self.daily_performance.items(), reverse=True)[:7]),  # Last 7 days
             "weekly_performance": dict(sorted(self.weekly_performance.items(), reverse=True)[:4]),  # Last 4 weeks
             "monthly_performance": dict(sorted(self.monthly_performance.items(), reverse=True)[:3]),  # Last 3 months
+            "signal_quality_metrics": {
+                "average_quality": self.metrics["avg_signal_quality"] * 100,  # Convert to percentage
+                "high_quality": {
+                    "trades": self.metrics["high_quality_trades"],
+                    "win_rate": self.metrics["high_quality_win_rate"] * 100
+                },
+                "medium_quality": {
+                    "trades": self.metrics["medium_quality_trades"],
+                    "win_rate": self.metrics["medium_quality_win_rate"] * 100
+                },
+                "low_quality": {
+                    "trades": self.metrics["low_quality_trades"],
+                    "win_rate": self.metrics["low_quality_win_rate"] * 100
+                }
+            },
             "generated_at": datetime.now()
         }
         

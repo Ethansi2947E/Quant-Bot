@@ -22,27 +22,27 @@ TRADING_CONFIG = {
     "symbols": [
         # Volatility Indices (common format in Deriv/MT5)
         "Volatility 10 Index",
-        "Volatility 25 Index",
+        # "Volatility 25 Index",
         "Volatility 50 Index",
-        "Volatility 75 Index",
-        "Volatility 100 Index",
+        #"Volatility 75 Index",
+        #"Volatility 100 Index",
         # Crash/Boom Indices
-        "Crash 300 Index",
+        #"Crash 300 Index",
         "Crash 500 Index",
         "Crash 1000 Index",
         "Boom 300 Index",
-        "Boom 500 Index",
+        # "Boom 500 Index",
         "Boom 1000 Index",
         # Jump Indices
-        "Jump 10 Index",
-        "Jump 25 Index",
+        #"Jump 10 Index",
+        #"Jump 25 Index",
         "Jump 50 Index",
         "Jump 75 Index",
-        "Jump 100 Index",
+        #"Jump 100 Index",
         # Step Indices
         "Step Index",
         # Range Break Indices
-        "Range Break 100 Index",
+        #"Range Break 100 Index",
         "Range Break 200 Index",
     ],
     "fixed_lot_size": 0.05,  # Fixed lot size to use if use_fixed_lot_size is true
@@ -69,7 +69,8 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
     
     "signal_generators": [ 
-        "breakout_reversal"  # Your price action strategy is the primary and only strategy
+        #"breakout_reversal",
+        "confluence_price_action"
     ],
 }
 

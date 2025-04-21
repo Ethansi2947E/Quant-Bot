@@ -702,9 +702,23 @@ class SignalProcessor:
             
             # Default to current market price if no entry price specified
             if entry_price == 0:
-                current_tick = self.mt5_handler.get_symbol_tick(symbol)
+                current_tick = self.mt5_handler.get_last_tick(symbol)
                 if current_tick:
-                    entry_price = current_tick.bid if direction.upper() == 'SELL' else current_tick.ask
+                    entry_price = current_tick['bid'] if direction.upper() == 'SELL' else current_tick['ask']
+                    
+            # Get current market price for price deviation check
+            current_tick = self.mt5_handler.get_last_tick(symbol)
+            if current_tick:
+                current_price = current_tick['bid'] if direction.upper() == 'SELL' else current_tick['ask']
+                # Check for significant price deviation (> 0.5%)
+                original_entry = signal.get('entry_price', 0)
+                if original_entry > 0 and abs(current_price - original_entry) / original_entry > 0.005:
+                    # Recalculate TP and SL based on current price
+                    signal = self._recalculate_tp_sl_for_price_deviation(signal, current_price)
+                    # Update local variables with new values
+                    entry_price = signal.get('entry_price', entry_price)
+                    stop_loss = signal.get('stop_loss', stop_loss)
+                    take_profit = signal.get('take_profit', take_profit)
             
             # Get position size (from signal or calculate)
             position_size = signal.get('position_size', 0)
@@ -781,14 +795,48 @@ class SignalProcessor:
                 
                 # Send alert if configured
                 if self.telegram_bot:
+                    # Get detailed reasoning if available, otherwise fall back to reason or N/A
+                    detailed_reason = signal.get('detailed_reasoning', [])
+                    if detailed_reason and isinstance(detailed_reason, list):
+                        reason_text = " | ".join(detailed_reason)
+                    else:
+                        reason_text = signal.get('reason', 'N/A')
+                    
+                    # Get signal quality scores
+                    signal_quality = signal.get('signal_quality', 0.0)
+                    pattern_score = signal.get('pattern_score', 0.0)
+                    confluence_score = signal.get('confluence_score', 0.0)
+                    volume_score = signal.get('volume_score', 0.0)
+                    recency_score = signal.get('recency_score', 0.0)
+                    
+                    # Format scores as percentages
+                    signal_quality_pct = signal_quality * 100
+                    pattern_score_pct = pattern_score * 100
+                    confluence_score_pct = confluence_score * 100
+                    volume_score_pct = volume_score * 100
+                    recency_score_pct = recency_score * 100
+                    
+                    # Add score emojis based on quality
+                    def get_score_emoji(score):
+                        if score >= 80: return "⭐⭐⭐⭐⭐"
+                        elif score >= 60: return "⭐⭐⭐⭐"
+                        elif score >= 40: return "⭐⭐⭐"
+                        elif score >= 20: return "⭐⭐"
+                        else: return "⭐"
+                    
                     trade_details = (
                         f"🔹 Symbol: {symbol}\n"
                         f"🔹 Direction: {direction.upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
-                        f"🔹 Size: {position_size} lots\n"
-                        f"🔹 Reason: {signal.get('reason', 'N/A')}"
+                        f"🔹 Size: {position_size} lots\n\n"
+                        f"📊 Signal Quality: {get_score_emoji(signal_quality_pct)} ({signal_quality_pct:.1f}%)\n"
+                        f"• Pattern: {pattern_score_pct:.1f}% (40% weight)\n"
+                        f"• Confluence: {confluence_score_pct:.1f}% (40% weight)\n"
+                        f"• Volume: {volume_score_pct:.1f}% (10% weight)\n"
+                        f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
+                        f"📝 Analysis:\n{reason_text}"
                     )
                     await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
                 
@@ -1086,11 +1134,75 @@ class SignalProcessor:
 
     def _add_processed_signal(self, signal: Dict) -> None:
         """
-        Add a signal to the processed signals dictionary to prevent duplicates.
+        Add a signal to the processed signals list to avoid duplicates.
         
         Args:
-            signal: The signal dictionary to add
+            signal: The signal dictionary to add to processed list
         """
         signal_hash = self._generate_signal_hash(signal)
+        # Store timestamp for backward compatibility
         self.processed_signals[signal_hash] = time.time()
-        logger.debug(f"Added signal hash {signal_hash} to processed signals") 
+        logger.debug(f"Added signal hash {signal_hash} to processed signals")
+
+    def _recalculate_tp_sl_for_price_deviation(self, signal: Dict, current_price: float) -> Dict:
+        """
+        Recalculate take profit and stop loss when there's a significant deviation between
+        signal price and execution price, while maintaining the original risk-to-reward ratio.
+        
+        Args:
+            signal: The original signal dictionary
+            current_price: The current market price for execution
+            
+        Returns:
+            Dict: Updated signal with recalculated TP and SL
+        """
+        symbol = signal.get("symbol")
+        direction = signal.get("direction")
+        original_entry = signal.get("entry_price")
+        original_sl = signal.get("stop_loss")
+        original_tp = signal.get("take_profit")
+        
+        # Exit early if any essential value is missing
+        if not all([symbol, direction, original_entry, original_sl, original_tp, current_price]):
+            logger.warning(f"Cannot recalculate TP/SL for {symbol} - missing required values")
+            return signal
+            
+        # Calculate original risk and reward in points
+        if direction.lower() == "buy":
+            original_risk = original_entry - original_sl
+            original_reward = original_tp - original_entry
+        else:  # sell
+            original_risk = original_sl - original_entry
+            original_reward = original_entry - original_tp
+            
+        # Calculate original risk-to-reward ratio
+        if original_risk == 0:
+            logger.warning(f"Cannot recalculate TP/SL for {symbol} - original risk is zero")
+            return signal
+            
+        original_rr_ratio = original_reward / original_risk
+        
+        # Calculate new SL and TP based on current price, maintaining the same R:R ratio
+        updated_signal = signal.copy()
+        if direction.lower() == "buy":
+            new_sl = current_price - original_risk
+            new_tp = current_price + (original_risk * original_rr_ratio)
+        else:  # sell
+            new_sl = current_price + original_risk
+            new_tp = current_price - (original_risk * original_rr_ratio)
+            
+        # Log the adjustments
+        price_deviation_pct = abs(current_price - original_entry) / original_entry * 100
+        logger.info(f"Price deviation for {symbol} {direction}: {price_deviation_pct:.2f}% from signal price")
+        logger.info(f"Recalculating TP/SL for {symbol} {direction}:")
+        logger.info(f"  Original entry: {original_entry:.5f}, Current price: {current_price:.5f}")
+        logger.info(f"  Original SL: {original_sl:.5f} → New SL: {new_sl:.5f}")
+        logger.info(f"  Original TP: {original_tp:.5f} → New TP: {new_tp:.5f}")
+        logger.info(f"  Maintaining original R:R ratio of {original_rr_ratio:.2f}")
+        
+        # Update the signal with new values
+        updated_signal["entry_price"] = current_price
+        updated_signal["stop_loss"] = new_sl
+        updated_signal["take_profit"] = new_tp
+        
+        return updated_signal 

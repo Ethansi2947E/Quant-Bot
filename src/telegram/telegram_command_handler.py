@@ -736,6 +736,56 @@ class TelegramCommandHandler:
             summary.append(f"<i>Analysis from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}</i>")
             summary.append(f"<i>Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>")
             
+            # Add signal quality analysis if we have enough trades
+            if total_trades >= 5:
+                summary.append("")
+                summary.append("<b>📊 Signal Quality Analysis:</b>")
+                
+                # Calculate average signal quality
+                total_quality = 0.0
+                trades_with_quality = 0
+                high_quality = {"trades": 0, "wins": 0}
+                medium_quality = {"trades": 0, "wins": 0}
+                low_quality = {"trades": 0, "wins": 0}
+                
+                for trade in completed_trades:
+                    quality = trade.get('signal_quality', 0.0)
+                    if quality > 0:
+                        total_quality += quality
+                        trades_with_quality += 1
+                        
+                        if quality >= 0.8:  # High quality (80%+)
+                            high_quality["trades"] += 1
+                            if trade['profit'] > 0:
+                                high_quality["wins"] += 1
+                        elif quality >= 0.5:  # Medium quality (50-80%)
+                            medium_quality["trades"] += 1
+                            if trade['profit'] > 0:
+                                medium_quality["wins"] += 1
+                        else:  # Low quality (<50%)
+                            low_quality["trades"] += 1
+                            if trade['profit'] > 0:
+                                low_quality["wins"] += 1
+                
+                if trades_with_quality > 0:
+                    avg_quality = total_quality / trades_with_quality * 100
+                    summary.append(f"• Average Signal Quality: <b>{avg_quality:.1f}%</b>")
+                    
+                    # High quality stats
+                    if high_quality["trades"] > 0:
+                        win_rate = high_quality["wins"] / high_quality["trades"] * 100
+                        summary.append(f"• High Quality (80%+): <b>{high_quality['trades']}</b> trades, {win_rate:.1f}% win rate")
+                    
+                    # Medium quality stats
+                    if medium_quality["trades"] > 0:
+                        win_rate = medium_quality["wins"] / medium_quality["trades"] * 100
+                        summary.append(f"• Medium Quality (50-80%): <b>{medium_quality['trades']}</b> trades, {win_rate:.1f}% win rate")
+                    
+                    # Low quality stats
+                    if low_quality["trades"] > 0:
+                        win_rate = low_quality["wins"] / low_quality["trades"] * 100
+                        summary.append(f"• Low Quality (<50%): <b>{low_quality['trades']}</b> trades, {win_rate:.1f}% win rate")
+            
             return "\n".join(summary)
         
         except Exception as e:
@@ -1605,6 +1655,7 @@ class TelegramCommandHandler:
                 history_text += f"""<b>{i}. {result_icon} {symbol}</b> {direction_icon} {volume:.2f}
    P/L: <b>{"+" if pnl > 0 else ""}{pnl:.2f}</b> ({profit_pct}) [{pips_text}]
    {trade_type} {entry:.5f} → {exit_price:.5f} | {duration}
+   {f"📊 Quality: {trade.get('signal_quality', 0.0)*100:.1f}%" if 'signal_quality' in trade else ""}
    {f"📝 {strategy}" if strategy else ""} | {trade_time}
 """
             

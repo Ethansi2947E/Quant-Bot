@@ -862,23 +862,110 @@ class MT5Handler:
             logger.error(f"Error getting spread: {str(e)}")
             return float('inf')
         
-    def get_min_stop_distance(self, symbol: str) -> Optional[float]:
+    def get_min_stop_distance(self, symbol: str) -> float:
         """Calculate and return the minimum stop distance for a symbol based on its current market conditions."""
         try:
+            if not self.connected:
+                logger.warning("MT5 not connected when trying to get minimum stop distance")
+                return self._get_fallback_min_stop_distance(symbol)
+                
+            # Select symbol to ensure it's available
+            if not mt5.symbol_select(symbol, True):
+                logger.warning(f"Failed to select symbol {symbol} for min stop distance check")
+                return self._get_fallback_min_stop_distance(symbol)
+                
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is not None:
                 # If the symbol info has a stops_level, use it multiplied by point
                 if hasattr(symbol_info, "stops_level") and symbol_info.stops_level > 0:
-                    return symbol_info.stops_level * symbol_info.point
-                # Fallback: use 0.1% of the current ask price
+                    min_distance = symbol_info.stops_level * symbol_info.point
+                    logger.debug(f"Using MT5 stops_level for {symbol}: {min_distance}")
+                    return min_distance
+                    
+                # Get current tick for a percentage-based fallback
                 tick = mt5.symbol_info_tick(symbol)
-                if tick is not None:
-                    return tick.ask * 0.001
-            return None
+                if tick is not None and hasattr(tick, "ask") and tick.ask > 0:
+                    # Use 0.1% of current price as fallback
+                    min_distance = tick.ask * 0.001
+                    logger.debug(f"Using percentage-based fallback for {symbol} min stop distance: {min_distance}")
+                    return min_distance
+                    
+            # If we got here, we need to use the fallback
+            return self._get_fallback_min_stop_distance(symbol)
+            
         except Exception as e:
             logger.error(f"Error calculating min_stop_distance for {symbol}: {str(e)}")
-            return None
+            return self._get_fallback_min_stop_distance(symbol)
+            
+    def _get_fallback_min_stop_distance(self, symbol: str) -> float:
+        """
+        Provide a sensible fallback value for minimum stop distance when MT5 data is unavailable.
         
+        Args:
+            symbol: The trading symbol
+            
+        Returns:
+            float: A fallback minimum stop distance
+        """
+        # Assign fallback values based on symbol type and typical price ranges
+        
+        # Precious metals
+        if any(symbol.startswith(prefix) for prefix in ["GOLD", "XAU", "SILVER", "XAG", "PLATINUM", "XPT"]):
+            if "GOLD" in symbol or "XAU" in symbol:
+                return 0.5  # Gold typically needs larger stops (50 cents)
+            elif "SILVER" in symbol or "XAG" in symbol:
+                return 0.02  # Silver has lower price so smaller stop
+            elif "PLATINUM" in symbol or "XPT" in symbol:
+                return 0.5
+            return 0.2  # Default for other metals
+            
+        # Stock indices
+        elif any(symbol.startswith(prefix) for prefix in ["US30", "US500", "USTEC", "SPX", "NDX", "DJI", "DAX", "FTSE"]):
+            if symbol.startswith("US30") or "DJI" in symbol:
+                return 2.0  # Dow Jones-based products (larger value)
+            elif "DAX" in symbol:
+                return 1.0  # DAX Index
+            elif "FTSE" in symbol:
+                return 1.0  # FTSE Index
+            return 0.5  # Default for other indices
+            
+        # Synthetic/Deriv indices
+        elif any(symbol.startswith(prefix) for prefix in ["Crash", "Boom", "Jump", "Volatility", "Range", "Step"]):
+            # Get first digits from symbol name
+            digits_part = ''.join(filter(str.isdigit, symbol))
+            if digits_part:
+                index_value = int(digits_part[:3])  # Take first three digits
+                if index_value >= 500:
+                    return 0.10  # Higher index values need larger stops
+                elif index_value >= 100:
+                    return 0.05  # Medium index values
+                else:
+                    return 0.02  # Smaller index values
+            # Default for synthetic indices if no digits found
+            if "Crash" in symbol or "Boom" in symbol:
+                return 0.05
+            elif "Jump" in symbol or "Volatility" in symbol:
+                return 0.02
+            return 0.03  # Default for other synthetic indices
+            
+        # Cryptocurrency pairs
+        elif any(crypto in symbol for crypto in ["BTC", "ETH", "LTC", "XRP", "DOGE", "BCH", "XMR"]):
+            if "BTC" in symbol:
+                return 50.0  # Bitcoin needs large stops
+            elif "ETH" in symbol:
+                return 5.0  # Ethereum
+            return 1.0  # Default for other cryptos
+            
+        # Currency pairs
+        elif symbol.endswith("JPY") or "JPY" in symbol:
+            return 0.01  # JPY pairs typically use 2 decimal places
+        elif any(symbol.startswith(prefix) for prefix in ["USD", "EUR", "GBP", "AUD", "NZD", "CAD", "CHF"]):
+            # Regular forex pairs with 4-5 decimal places
+            return 0.0003
+            
+        # Default fallback if none of the above patterns match
+        return 0.0003  # Conservative default for unknown symbols
+
     def execute_trade(self, trade_params: Dict[str, Any]) -> Optional[List[int]]:
         """
         Execute a trade with the given parameters.

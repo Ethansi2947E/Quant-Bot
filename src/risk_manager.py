@@ -11,11 +11,14 @@ from loguru import logger
 import pandas as pd
 import MetaTrader5 as mt5
 import numpy as np
+import traceback
+import asyncio
 
 # Use TYPE_CHECKING for import that's only used for type hints
 if TYPE_CHECKING:
     from src.mt5_handler import MT5Handler
 from src.utils.indicators import calculate_atr
+from src.utils.market_utils import calculate_pip_value, convert_pips_to_price
 
 # Singleton instance for global reference
 _risk_manager_instance = None
@@ -998,71 +1001,9 @@ class RiskManager:
         Returns:
             float: The value of one pip in account currency
         """
-        try:
-            # Get symbol information from MT5
-            symbol_info = self.mt5_handler.get_symbol_info(symbol)
-            
-            if not symbol_info:
-                logger.error(f"Failed to get symbol info for {symbol}")
-                # Fallback calculation
-                if symbol.endswith('JPY') or 'JPY' in symbol:
-                    pip_size = 0.01
-                elif symbol.startswith('XAU'):
-                    pip_size = 0.1
-                elif symbol.startswith('XAG'):
-                    pip_size = 0.01
-                # Special handling for cryptocurrency pairs
-                elif symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
-                    pip_size = 1.0
-                else:
-                    pip_size = 0.0001  # Default for most forex pairs
-                return 0.1  # Return a default conversion factor
-            
-            # Determine pip size based on digits
-            digits = symbol_info.digits
-            
-            # Special handling for cryptocurrency pairs regardless of digits
-            if symbol.endswith('USDm') or symbol.endswith('USDT') or symbol.endswith('USD') and any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'DOGE']):
-                pip_size = 1.0  # For cryptocurrencies, define 1 unit as 1 pip
-            elif digits == 3 or digits == 5:
-                pip_size = 0.0001  # 4-digit pricing (standard forex)
-            elif digits == 2:
-                pip_size = 0.01    # 2-digit pricing (JPY pairs)
-            elif digits == 1:
-                pip_size = 0.1     # 1-digit pricing
-            elif digits == 0:
-                pip_size = 1.0     # 0-digit pricing
-            else:
-                pip_size = 0.0001  # Default to standard forex pip size
-            
-            # Get contract size (standard lot is typically 100,000 units)
-            contract_size = symbol_info.trade_contract_size
-            
-            # The pip value calculation depends on the account currency
-            # For simplicity, we're assuming account currency is USD
-            # For USD-based account:
-            
-            # Case 1: USD is the quote currency (e.g., EUR/USD)
-            if symbol.endswith('USD'):
-                pip_value = pip_size * contract_size
-            
-            # Case 2: USD is the base currency (e.g., USD/JPY)
-            elif symbol.startswith('USD'):
-                pip_value = (pip_size * contract_size) / price
-            
-            # Case 3: Neither currency is USD (e.g., EUR/GBP)
-            # For this, we would need to know the USD/quote_currency rate
-            # For simplicity, we'll use a default calculation
-            else:
-                pip_value = pip_size * 10  # Simplified assumption
-            
-            logger.debug(f"Calculated pip value for {symbol}: {pip_value}")
-            return pip_value
-            
-        except Exception as e:
-            logger.error(f"Error calculating pip value: {str(e)}")
-            # Fallback to a reasonable default if error occurs
-            return 0.1  # Default conversion factor
+        # Use the utility function from market_utils for consistent pip calculation
+        from src.utils.market_utils import calculate_pip_value as get_pip_value
+        return get_pip_value(symbol, mt5_handler=self.mt5_handler)
 
     def get_account_history(self, days: int = 1) -> Optional[List[Dict]]:
         """
