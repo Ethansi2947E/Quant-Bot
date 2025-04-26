@@ -830,7 +830,8 @@ Details: {str(context.error)}"""
             return
             
         user_id = update.effective_user.id
-        if str(user_id) in TELEGRAM_CONFIG["allowed_users"]:
+        # Use the bot's allowed_user_ids (already converted to strings)
+        if str(user_id) in self.allowed_user_ids:
             try:
                 # Calculate performance stats with safety checks
                 total_trades = self.performance_metrics.get('total_trades', 0)

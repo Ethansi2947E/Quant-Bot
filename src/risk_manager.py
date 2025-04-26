@@ -1495,3 +1495,10 @@ class RiskManager:
             _risk_manager_instance = cls()
         return _risk_manager_instance
         
+    def get_account_balance(self) -> float:
+        """Return the current account balance from MT5, or 0.0 if unavailable."""
+        account_info = self._get_account_info()
+        if not account_info:
+            return 0.0
+        return account_info.get('balance', 0.0)
+        

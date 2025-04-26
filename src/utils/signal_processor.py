@@ -793,44 +793,68 @@ class SignalProcessor:
                 # Success
                 logger.info(f"✅ Trade executed: {symbol} {direction} {position_size} lots")
                 
-                # Send alert if configured
-                if self.telegram_bot:
-                    # Get detailed reasoning if available, otherwise fall back to reason or N/A
-                    detailed_reason = signal.get('detailed_reasoning', [])
-                    if detailed_reason and isinstance(detailed_reason, list):
-                        reason_text = " | ".join(detailed_reason)
-                    else:
-                        reason_text = signal.get('reason', 'N/A')
-                    
-                    # Get signal quality scores
-                    signal_quality = signal.get('signal_quality', 0.0)
-                    pattern_score = signal.get('pattern_score', 0.0)
-                    confluence_score = signal.get('confluence_score', 0.0)
-                    volume_score = signal.get('volume_score', 0.0)
-                    recency_score = signal.get('recency_score', 0.0)
-                    
-                    # Format scores as percentages
-                    signal_quality_pct = signal_quality * 100
-                    pattern_score_pct = pattern_score * 100
-                    confluence_score_pct = confluence_score * 100
-                    volume_score_pct = volume_score * 100
-                    recency_score_pct = recency_score * 100
-                    
-                    # Add score emojis based on quality
-                    def get_score_emoji(score):
-                        if score >= 80: return "⭐⭐⭐⭐⭐"
-                        elif score >= 60: return "⭐⭐⭐⭐"
-                        elif score >= 40: return "⭐⭐⭐"
-                        elif score >= 20: return "⭐⭐"
-                        else: return "⭐"
-                    
+                # Build notification with strategy and detailed score breakdown
+                strategy_name = signal.get('source', signal.get('generator', 'Unknown'))
+                # Prepare analysis text
+                detailed_reason = signal.get('detailed_reasoning', [])
+                if detailed_reason and isinstance(detailed_reason, list):
+                    reason_text = " | ".join(detailed_reason)
+                else:
+                    reason_text = signal.get('reason', 'N/A')
+                # Helper for emoji ratings
+                def get_score_emoji(score):
+                    if score >= 80: return "⭐⭐⭐⭐⭐"
+                    elif score >= 60: return "⭐⭐⭐⭐"
+                    elif score >= 40: return "⭐⭐⭐"
+                    elif score >= 20: return "⭐⭐"
+                    else: return "⭐"
+                # Check for breakout-style score details
+                if 'score' in signal and isinstance(signal.get('score_details'), dict):
+                    sd = signal['score_details']
+                    final_score_pct = signal.get('score', 0.0) * 100
+                    level_strength_pct = sd.get('level_strength', 0.0) * 100
+                    volume_quality_pct = sd.get('volume_quality', 0.0) * 100
+                    pattern_reliability_pct = sd.get('pattern_reliability', 0.0) * 100
+                    trend_alignment_pct = sd.get('trend_alignment', 0.0) * 100
+                    risk_reward_pct = sd.get('risk_reward', 0.0) * 100
                     trade_details = (
+                        f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
                         f"🔹 Direction: {direction.upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
                         f"🔹 Size: {position_size} lots\n\n"
+                        f"📊 Score: {get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
+                        f"• Level Strength: {level_strength_pct:.1f}% (30% weight)\n"
+                        f"• Volume Quality: {volume_quality_pct:.1f}% (20% weight)\n"
+                        f"• Pattern Reliability: {pattern_reliability_pct:.1f}% (20% weight)\n"
+                        f"• Trend Alignment: {trend_alignment_pct:.1f}% (20% weight)\n"
+                        f"• Risk-Reward: {risk_reward_pct:.1f}% (10% weight)\n\n"
+                        f"📝 Analysis:\n{reason_text}"
+                    )
+                else:
+                    # Confluence-style notification
+                    signal_quality = signal.get('signal_quality', 0.0)
+                    pattern_score = signal.get('pattern_score', 0.0)
+                    confluence_score = signal.get('confluence_score', 0.0)
+                    volume_score = signal.get('volume_score', 0.0)
+                    recency_score = signal.get('recency_score', 0.0)
+                    # Format as percentages
+                    signal_quality_pct = signal_quality * 100
+                    pattern_score_pct = pattern_score * 100
+                    confluence_score_pct = confluence_score * 100
+                    volume_score_pct = volume_score * 100
+                    recency_score_pct = recency_score * 100
+                    trade_details = (
+                        f"🔸 Strategy: {strategy_name}\n"
+                        f"🔹 Symbol: {symbol}\n"
+                        f"🔹 Direction: {direction.upper()}\n"
+                        f"🔹 Entry: {entry_price}\n"
+                        f"🔹 Stop Loss: {stop_loss}\n"
+                        f"🔹 Take Profit: {take_profit}\n"
+                        f"🔹 Size: {position_size} lots\n\n"
+                        f"📊 Confidence: {signal.get('confidence', 0) * 100:.1f}%\n"
                         f"📊 Signal Quality: {get_score_emoji(signal_quality_pct)} ({signal_quality_pct:.1f}%)\n"
                         f"• Pattern: {pattern_score_pct:.1f}% (40% weight)\n"
                         f"• Confluence: {confluence_score_pct:.1f}% (40% weight)\n"
@@ -838,7 +862,8 @@ class SignalProcessor:
                         f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
                         f"📝 Analysis:\n{reason_text}"
                     )
-                    await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
+                # Send notification
+                await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
                 
                 return {
                     'status': 'success',

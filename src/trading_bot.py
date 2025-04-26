@@ -1089,7 +1089,7 @@ class TradingBot:
                     logger.info("Data fetch task cancelled")
                     
             # Cancel the queue processor task if it's running
-            if self.queue_processor_task:
+            if hasattr(self, 'queue_processor_task') and self.queue_processor_task:
                 logger.info("Cancelling analysis queue processor...")
                 self.queue_processor_task.cancel()
                 try:

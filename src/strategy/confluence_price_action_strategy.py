@@ -10,7 +10,7 @@ from loguru import logger
 from datetime import datetime
 
 from src.trading_bot import SignalGenerator
-from src.utils.indicators import calculate_atr
+from src.utils.indicators import calculate_atr, calculate_adx
 from config.config import TRADING_CONFIG, get_pattern_detector_config, get_risk_manager_config
 from src.risk_manager import RiskManager
 
@@ -40,12 +40,16 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     """
 
     def __init__(self,
-                 primary_timeframe: str = "M5",
+                 primary_timeframe: str = "M15",
                  higher_timeframe: str = "H1",
                  ma_period: int = 21,
                  fib_levels=(0.5, 0.618),
                  risk_percent: float = 0.01,
                  min_risk_reward: float = 2.0,
+                 partial_profit_rr: float = 1.0,
+                 partial_profit_pct: float = 0.5,
+                 max_bars_till_exit: int = 5,
+                 trailing_stop_atr_mult: float = 2.0,
                  **kwargs):
         super().__init__(**kwargs)
         self.name = "ConfluencePriceActionStrategy"
@@ -65,6 +69,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         self.fib_levels = fib_levels
         self.risk_percent = risk_percent
         self.min_risk_reward = min_risk_reward
+        # Dynamic exit parameters
+        self.partial_profit_rr = partial_profit_rr  # Take partial profit at this R:R
+        self.partial_profit_pct = partial_profit_pct  # Percentage of position to close at first target
+        self.max_bars_till_exit = max_bars_till_exit  # Exit if no target hit within this many bars
+        self.trailing_stop_atr_mult = trailing_stop_atr_mult  # ATR multiplier for trailing stop
         # Override price tolerance from global config if set
         data_mgmt = TRADING_CONFIG.get('data_management', {})
         self.price_tolerance = data_mgmt.get('price_tolerance', kwargs.get('price_tolerance', 0.002))
@@ -148,6 +157,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             logger.debug(f"{sym}: Higher timeframe trend is {trend}")
             if trend == 'neutral':
                 logger.debug(f"{sym}: Skipping due to neutral trend")
+                continue
+            
+            # Regime filter - skip if market regime is not favorable
+            if not self._is_favorable_regime(primary):
+                logger.debug(f"{sym}: Unfavorable market regime, skipping.")
                 continue
             
             # 2. Key levels on higher timeframe
@@ -273,6 +287,17 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     reward_pips = abs(tp - entry)
                     risk_reward_ratio = reward_pips / risk_pips if risk_pips > 0 else 0
                     
+                    # Calculate dynamic exit targets
+                    exits = self._calculate_dynamic_exits(
+                        primary=primary,
+                        direction=direction,
+                        entry=entry, 
+                        stop=stop,
+                        risk_pips=risk_pips,
+                        level=level,
+                        candle_idx=idx
+                    )
+                    
                     # Delegate position sizing to RiskManager
                     size = rm.calculate_position_size(
                         account_balance=balance,
@@ -285,7 +310,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     # Calculate additional metrics for score/ranking
                     recency_score = (idx - start + 1) / (len(primary) - start) if len(primary) > start else 0.5
                     
-                    # Calculate volume analysis if volume column exists
+                    # Calculate advanced volume analysis with wick-based confirmation
                     volume_score = 0.0
                     volume_details = {}
                     if 'volume' in primary.columns or 'tick_volume' in primary.columns:
@@ -293,11 +318,24 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         current_vol = candle[vol_col]
                         avg_vol = primary[vol_col].rolling(window=20).mean().iloc[-1]
                         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
-                        volume_score = min(1.0, vol_ratio / 2.0)  # Scale 0-2x average to 0-1 score
+                        # Compute wick ratio: measure opposing wick length relative to candle range
+                        total_range = candle['high'] - candle['low'] if candle['high'] != candle['low'] else 1
+                        if direction == 'buy':
+                            # upper wick is selling pressure on bullish candles
+                            wick_ratio = (candle['high'] - max(candle['open'], candle['close'])) / total_range
+                        else:
+                            # lower wick is buying pressure on bearish candles
+                            wick_ratio = (min(candle['open'], candle['close']) - candle['low']) / total_range
+                        # base volume score scaled to 0-1 range
+                        base_vol_score = min(1.0, vol_ratio / 2.0)
+                        # reward low opposing wick: cap wick_ratio at 0.3
+                        wick_factor = 1.0 - min(wick_ratio, 0.3) / 0.3
+                        volume_score = base_vol_score * wick_factor
                         volume_details = {
                             'current_volume': current_vol,
                             'average_volume': avg_vol,
-                            'volume_ratio': vol_ratio
+                            'volume_ratio': vol_ratio,
+                            'wick_ratio': wick_ratio
                         }
                     
                     # Score pattern strength
@@ -329,9 +367,8 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         (volume_score * 0.1) +
                         (recency_score * 0.1)
                     )
-                    
-                    # Scale to confidence value between 0.5-0.95
-                    confidence = 0.5 + (signal_quality * 0.45)
+                    # Standardized confidence: direct mapping, clamped to [0, 1]
+                    confidence = max(0.0, min(1.0, signal_quality))
                     
                     # Build detailed reasoning
                     reasoning = [
@@ -400,6 +437,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         "entry_price": entry,
                         "stop_loss": stop,
                         "take_profit": tp,
+                        "dynamic_exits": exits,
                         "size": size,
                         "timeframe": self.primary_timeframe,
                         "confidence": confidence,
@@ -495,7 +533,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     # -- Candlestick pattern checks --
     def _is_pin_bar(self, candle: pd.Series, level: float, direction: str) -> bool:
-        """Detect a pin bar touching `level` with a long wick"""
+        """Detect a pin bar touching `level` with a long wick and body in the correct third of the range"""
         body = abs(candle['close'] - candle['open'])
         total = candle['high'] - candle['low']
         if total <= 0:
@@ -503,11 +541,19 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         tol_val = level * self.price_tolerance
         if direction == 'bullish':
             lower_wick = candle['open'] - candle['low']
-            if lower_wick > body * 2 and abs(candle['low'] - level) <= tol_val:
+            # Ensure lower wick is >2x body, touches level, and body is in upper third
+            body_top = max(candle['open'], candle['close'])
+            if (lower_wick > body * 2 and
+                abs(candle['low'] - level) <= tol_val and
+                body_top > candle['low'] + 2 * total / 3):
                 return True
         else:
             upper_wick = candle['high'] - candle['open']
-            if upper_wick > body * 2 and abs(candle['high'] - level) <= tol_val:
+            # Ensure upper wick is >2x body, touches level, and body is in lower third
+            body_bottom = min(candle['open'], candle['close'])
+            if (upper_wick > body * 2 and
+                abs(candle['high'] - level) <= tol_val and
+                body_bottom < candle['high'] - 2 * total / 3):
                 return True
         return False
 
@@ -632,3 +678,113 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         alignment['alignment_score'] = aligned_count / len(alignment) if alignment else 0.0
         
         return alignment 
+
+    def _is_favorable_regime(self, df: pd.DataFrame) -> bool:
+        """Check if market regime is favorable (trending, normal volatility, not ranging)."""
+        if df is None or len(df) < 20:
+            return False
+        # ATR-based volatility filter
+        atr_series = calculate_atr(df, period=14)
+        if not isinstance(atr_series, pd.Series) or atr_series.empty:
+            return False
+        atr = atr_series.iloc[-1]
+        avg_atr = atr_series.rolling(window=20).mean().iloc[-1]
+        # ADX filter for trend strength
+        adx_series, _, _ = calculate_adx(df, period=14)
+        adx = adx_series.iloc[-1] if isinstance(adx_series, pd.Series) and not adx_series.empty else None
+        # Range filter
+        context = self._analyze_market_context(df)
+        # Check all conditions
+        return (adx is not None and adx > 25 and
+                0.5 * avg_atr < atr < 2 * avg_atr and
+                not context.get('is_ranging', False)) 
+
+    def _calculate_dynamic_exits(self, primary: pd.DataFrame, direction: str, entry: float, 
+                                stop: float, risk_pips: float, level: float, candle_idx: int) -> dict:
+        """
+        Calculate dynamic exit strategies including:
+        1. Partial profit target (at 1:1 R:R)
+        2. Time-based exit (after max_bars_till_exit)
+        3. Trailing stop parameters (based on ATR)
+        """
+        # Find the next support/resistance level for extended target
+        higher_levels = self._find_next_key_level(primary, entry, direction)
+        
+        # Calculate partial profit target at 1:1 R:R
+        partial_tp = None
+        if direction == 'buy':
+            partial_tp = entry + (risk_pips * self.partial_profit_rr)
+        else:
+            partial_tp = entry - (risk_pips * self.partial_profit_rr)
+        
+        # Calculate time-based exit (bar index to exit if targets not reached)
+        time_exit_bar = candle_idx + self.max_bars_till_exit
+        
+        # Calculate ATR-based trailing stop
+        atr_value = 0
+        if len(primary) >= 14:
+            atr_series = calculate_atr(primary, period=14)
+            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                atr_value = atr_series.iloc[-1]
+            else:
+                atr_value = atr_series if atr_value > 0 else risk_pips / 2  # Fallback if ATR is not a series
+        else:
+            atr_value = risk_pips / 2  # If not enough data for ATR, use half risk_pips
+            
+        # Only activate trailing stop after partial profit hit
+        trailing_activation = partial_tp
+        trailing_distance = atr_value * self.trailing_stop_atr_mult
+        
+        return {
+            "partial_profit": {
+                "price": partial_tp,
+                "pct": self.partial_profit_pct,
+                "r_multiple": self.partial_profit_rr
+            },
+            "time_exit": {
+                "bar_idx": time_exit_bar,
+                "bars_from_entry": self.max_bars_till_exit,
+                "timeframe": self.primary_timeframe
+            },
+            "trailing_stop": {
+                "activation_price": trailing_activation,
+                "atr_value": atr_value,
+                "distance": trailing_distance,
+                "atr_multiple": self.trailing_stop_atr_mult
+            },
+            "next_key_level": higher_levels
+        }
+
+    def _find_next_key_level(self, df: pd.DataFrame, price: float, direction: str) -> dict:
+        """Find the next key support/resistance level beyond the entry price"""
+        # Get full level lists
+        supports, resistances = self._find_key_levels(df)
+        
+        # Format: (level, distance, level_type)
+        if direction == 'buy':
+            # For buy signals, find the next resistance level above entry
+            higher_resistances = [r for r in resistances if r > price]
+            if higher_resistances:
+                next_level = min(higher_resistances)
+                distance = next_level - price
+                return {
+                    "price": next_level,
+                    "distance": distance,
+                    "distance_r": distance / ((price - next_level) / 2) if price != next_level else 0,
+                    "type": "resistance"
+                }
+        else:
+            # For sell signals, find the next support level below entry
+            lower_supports = [s for s in supports if s < price]
+            if lower_supports:
+                next_level = max(lower_supports)
+                distance = price - next_level
+                return {
+                    "price": next_level,
+                    "distance": distance,
+                    "distance_r": distance / ((next_level - price) / 2) if price != next_level else 0,
+                    "type": "support"
+                }
+        
+        # If no level found, return empty dict
+        return {}

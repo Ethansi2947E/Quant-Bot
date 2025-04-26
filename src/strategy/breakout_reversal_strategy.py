@@ -31,6 +31,7 @@ import traceback
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr
+from src.risk_manager import RiskManager
 
 # Strategy parameter profiles for different timeframes
 TIMEFRAME_PROFILES = {
@@ -85,6 +86,260 @@ TIMEFRAME_PROFILES = {
         "volume_percentile": 80  # 80th percentile for volume threshold
     }
 }
+
+# Module-level helper: dict→DataFrame conversion logic
+def _to_dataframe(raw_data: Any, timeframe: str) -> Optional[pd.DataFrame]:
+    """
+    Centralize all of your dict→DataFrame conversion logic in one place.
+    """
+    df: Optional[pd.DataFrame] = None
+    try:
+        if isinstance(raw_data, pd.DataFrame):
+            df = raw_data.copy()
+        elif isinstance(raw_data, dict):
+            for key in [timeframe] + ['data','candles','ohlc'] + ['M1','M5','M15','H1','1m','5m','15m','1h']:
+                if key in raw_data and isinstance(raw_data[key], pd.DataFrame):
+                    df = raw_data[key].copy()
+                    break
+            if df is None and all(k in raw_data for k in ['open','high','low','close']):
+                df = pd.DataFrame({
+                    'open': raw_data['open'],
+                    'high': raw_data['high'],
+                    'low': raw_data['low'],
+                    'close': raw_data['close'],
+                })
+                vol = raw_data.get('tick_volume', raw_data.get('volume', None))
+                if vol is not None:
+                    df['tick_volume'] = vol
+                if 'time' in raw_data:
+                    df.index = pd.to_datetime(raw_data['time'])
+        if df is not None and 'tick_volume' not in df.columns:
+            df['tick_volume'] = df.get('volume', 1)
+    except Exception:
+        df = None
+    return df
+
+# Module-level helper: ensure DatetimeIndex logic
+def _ensure_datetime_index(df: Optional[pd.DataFrame], timeframe: str) -> Optional[pd.DataFrame]:
+    """
+    Centralize synthetic-index or 'time'→DatetimeIndex logic.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'time' in df.columns:
+            try:
+                df['time'] = pd.to_datetime(df['time'])
+                df.set_index('time', inplace=True)
+            except Exception:
+                pass
+        if not isinstance(df.index, pd.DatetimeIndex):
+            now = datetime.now()
+            minutes = int(timeframe[1:]) if timeframe.startswith('M') and timeframe[1:].isdigit() else 1
+            df.index = pd.DatetimeIndex([
+                now - timedelta(minutes=minutes * i)
+                for i in range(len(df)-1, -1, -1)
+            ])
+    return df
+
+class _TrendLineAnalyzer:
+    """Encapsulate trend-line machinery into a reusable analyzer."""
+    def __init__(self, df: pd.DataFrame, strategy: 'BreakoutReversalStrategy'):
+        self.df = df
+        self.strategy = strategy
+        self.params = {
+            'min_points': strategy.trend_line_min_points,
+            'max_angle': strategy.trend_line_max_angle,
+            'r_squared_threshold': 0.5,
+            'touches_threshold': 2,
+            'cluster': {
+                'angle_tolerance': 5.0,
+                'intercept_pct_tolerance': 0.0015,
+                'slope_tolerance': 0.00005
+            },
+            'max_trend_lines': 12
+        }
+
+    def find_swings(self) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+        highs = self.strategy._find_swing_highs(self.df)
+        lows = self.strategy._find_swing_lows(self.df)
+        return highs, lows
+
+    def fit_lines(self, swing_highs: List[Tuple[int, float]], swing_lows: List[Tuple[int, float]], skip_plots: bool=False) -> Tuple[List[Dict], List[Dict]]:
+        bullish = self.strategy._identify_trend_lines(self.df, swing_lows, 'bullish', skip_plots)
+        bearish = self.strategy._identify_trend_lines(self.df, swing_highs, 'bearish', skip_plots)
+        return bullish, bearish
+
+    def validate_and_cluster(self, lines: List[Dict]) -> List[Dict]:
+        clustered = self.strategy._cluster_trend_lines(lines)
+        return sorted(clustered, key=lambda x: x['quality_score'], reverse=True)[:self.params['max_trend_lines']]
+
+    def get_trend_lines(self, skip_plots: bool=False) -> Tuple[List[Dict], List[Dict]]:
+        swing_highs, swing_lows = self.find_swings()
+        bullish, bearish = self.fit_lines(swing_highs, swing_lows, skip_plots)
+        bullish = self.validate_and_cluster(bullish)
+        bearish = self.validate_and_cluster(bearish)
+        return bullish, bearish
+
+    def get_support_lines(self, skip_plots: bool=False) -> List[Dict]:
+        """Return only bullish (support) trend lines."""
+        _, swing_lows = self.find_swings()
+        bullish, _ = self.fit_lines([], swing_lows, skip_plots)
+        return self.validate_and_cluster(bullish)
+
+    def get_resistance_lines(self, skip_plots: bool=False) -> List[Dict]:
+        """Return only bearish (resistance) trend lines."""
+        swing_highs, _ = self.find_swings()
+        _, bearish = self.fit_lines(swing_highs, [], skip_plots)
+        return self.validate_and_cluster(bearish)
+
+class _SignalScorer:
+    """Encapsulate volume analysis and signal scoring."""
+    def __init__(self, strategy: 'BreakoutReversalStrategy'):
+        self.strategy = strategy
+
+    def analyze_volume_quality(self, candle: pd.Series, threshold: float) -> float:
+        """
+        Analyze the quality of volume based on candle structure and wick analysis.
+        Returns a score indicating volume quality (-2 to +2).
+        """
+        try:
+            if 'tick_volume' not in candle:
+                if 'volume' in candle:
+                    tick_volume = candle['volume']
+                    self.strategy.logger.debug("Using 'volume' instead of missing 'tick_volume' for volume analysis")
+                else:
+                    self.strategy.logger.debug("Using default volume value as neither 'tick_volume' nor 'volume' exists")
+                    tick_volume = threshold * 0.8
+            else:
+                tick_volume = candle['tick_volume']
+            volume_ratio = tick_volume / threshold
+            self.strategy.logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
+            if volume_ratio < 0.6:
+                return 0
+            is_bullish = candle['close'] > candle['open']
+            total_range = candle['high'] - candle['low']
+            body = abs(candle['close'] - candle['open'])
+            if total_range == 0 or total_range < 0.00001:
+                self.strategy.logger.debug("Doji or very small candle - neutral volume")
+                return 0
+            if is_bullish:
+                upper_wick = candle['high'] - candle['close']
+                lower_wick = candle['open'] - candle['low']
+                upper_wick_ratio = upper_wick / total_range
+                lower_wick_ratio = lower_wick / total_range
+                body_ratio = body / total_range
+                self.strategy.logger.debug(f"Bullish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
+                if body_ratio > 0.6 and lower_wick_ratio < 0.2:
+                    return 2.0
+                elif body_ratio > 0.4 and lower_wick_ratio < upper_wick_ratio:
+                    return 1.0
+                elif upper_wick_ratio > 0.6:
+                    return -0.5
+                else:
+                    return 0.5
+            else:
+                upper_wick = candle['high'] - candle['open']
+                lower_wick = candle['close'] - candle['low']
+                upper_wick_ratio = upper_wick / total_range
+                lower_wick_ratio = lower_wick / total_range
+                body_ratio = body / total_range
+                self.strategy.logger.debug(f"Bearish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
+                if body_ratio > 0.6 and upper_wick_ratio < 0.2:
+                    return -2.0
+                elif body_ratio > 0.4 and upper_wick_ratio < lower_wick_ratio:
+                    return -1.0
+                elif lower_wick_ratio > 0.6:
+                    return 0.5
+                else:
+                    return -0.5
+        except Exception as e:
+            self.strategy.logger.error(f"Error in volume analysis: {str(e)}")
+            return 0
+
+    def score_signal(self, signal: dict, df: pd.DataFrame, higher_df: pd.DataFrame) -> dict:
+        """
+        Score a signal dictionary based on multiple weighted factors, with a more optimistic approach.
+        Pattern and volume are emphasized, and recency is rewarded. Final score is clamped to [0, 1].
+        """
+        symbol = signal.get('symbol')
+        direction = signal['direction']
+        level = signal.get('level')
+        entry = signal['entry_price']
+        stop = signal['stop_loss']
+        tp = signal['take_profit']
+        # Determine higher timeframe trend
+        higher_trend = self.strategy._determine_higher_timeframe_trend(higher_df)
+        # 1. Level Strength (reduced weight)
+        level_strength = 0
+        if level is not None:
+            levels = (self.strategy.support_levels if direction=='buy' else self.strategy.resistance_levels).get(symbol, [])
+            if levels:
+                closest = min(levels, key=lambda x: abs(x-level))
+                tol = level * self.strategy.price_tolerance * 1.5
+                if abs(closest-level) < tol:
+                    touches = self.strategy._count_level_touches(df, closest, 'support' if direction=='buy' else 'resistance')
+                    level_strength = max(0.3, min(touches/5,1.0))
+                    # recency bonus
+                    recent = df.iloc[-20:]
+                    if any((abs((recent['low'] if direction=='buy' else recent['high'])-closest) <= closest*self.strategy.price_tolerance)):
+                        level_strength = min(level_strength+0.2,1.0)
+        # 2. Volume Quality (increased weight)
+        try:
+            lookback = min(50,len(df)-1)
+            vol_thresh = np.percentile(df['tick_volume'].iloc[-lookback:], self.strategy.volume_percentile)
+        except:
+            avg_vol = df['tick_volume'].rolling(20).mean().iloc[-1]
+            vol_thresh = avg_vol * self.strategy.volume_threshold
+        candle = df.iloc[-1]
+        vol_quality = self.analyze_volume_quality(candle, vol_thresh)
+        vol_score = max(0, (vol_quality/2) if direction=='buy' else (-vol_quality/2))
+        # 3. Pattern Reliability (allow up to 1.0)
+        reliability_map = {'bullish engulfing':1.0,'bearish engulfing':1.0,'morning star':1.0,'evening star':1.0,
+                           'hammer':0.9,'shooting star':0.9,'breakout':0.8,'breakdown':0.8,'trend line breakout':0.9,
+                           'trend line breakdown':0.9,'retest':1.0}
+        reason = signal.get('reason','').lower()
+        pattern_score = next((score for pat,score in reliability_map.items() if pat in reason),0.6)
+        # 4. Trend Alignment (reduced weight)
+        if direction=='buy':
+            trend_score = 1.0 if higher_trend=='bullish' else 0.5 if higher_trend=='neutral' else 0.0
+        else:
+            trend_score = 1.0 if higher_trend=='bearish' else 0.5 if higher_trend=='neutral' else 0.0
+        # 5. Recency Score (new)
+        # If signal is for the most recent candle, recency_score=1.0, else decays linearly over last 20 bars
+        recency_score = 0.0
+        if hasattr(df, 'index') and len(df) > 0 and 'entry_price' in signal:
+            # Try to find the index of the entry price in the DataFrame
+            try:
+                idx = df.index.get_loc(df.index[-1])  # Most recent bar
+                recency_score = 1.0  # Default to 1.0 for most recent
+            except Exception:
+                recency_score = 0.5  # Fallback
+        # 6. Risk-Reward Bonus (optional, small bonus for R:R > 2)
+        risk = (entry-stop) if direction=='buy' else (stop-entry)
+        reward = (tp-entry) if direction=='buy' else (entry-tp)
+        rr_ratio = (reward/risk) if risk > 0 else 0
+        rr_bonus = 0.05 if rr_ratio >= 2.0 else 0.0
+        # Final score (more optimistic, pattern/volume emphasized)
+        final = (
+            level_strength * 0.15 +
+            vol_score * 0.3 +
+            pattern_score * 0.3 +
+            trend_score * 0.15 +
+            recency_score * 0.1 +
+            rr_bonus
+        )
+        final = max(0, min(1, final))
+        signal['score'] = final
+        # Add detailed scoring fields for downstream consumers (e.g., Telegram)
+        signal['pattern_score'] = pattern_score
+        signal['volume_score'] = vol_score
+        signal['level_strength'] = level_strength
+        signal['trend_score'] = trend_score
+        signal['recency_score'] = recency_score
+        signal['rr_bonus'] = rr_bonus
+        signal['signal_quality'] = final
+        return signal
 
 class BreakoutReversalStrategy(SignalGenerator):
     """
@@ -229,6 +484,8 @@ class BreakoutReversalStrategy(SignalGenerator):
             'consolidation_bars': self.consolidation_bars
         }
         logger.debug(f"📊 Strategy parameters: {params}")
+        self._scorer = _SignalScorer(self)
+        self.risk_manager = RiskManager.get_instance()
     
     def _load_timeframe_profile(self):
         """Load timeframe-specific parameters from the appropriate profile."""
@@ -271,6 +528,32 @@ class BreakoutReversalStrategy(SignalGenerator):
         logger.info(f"🔌 Initializing {self.name}")
         # No specific initialization needed
         return True
+    
+    def _to_dataframe(self, raw_data, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """
+        Convert raw market_data (dict or DataFrame) into a standardized DataFrame with
+        columns ['open','high','low','close','tick_volume'] and return None if conversion fails.
+        """
+        # Delegate conversion to module-level helper
+        return _to_dataframe(raw_data, timeframe)
+    
+    def _ensure_datetime_index(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """
+        Ensure df.index is a DatetimeIndex; if not, use 'time' column or synthesize it.
+        Also logs structure and sample rows once.
+        """
+        # Retain logging for shape and sample rows
+        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+            logger.debug(f"📊 {timeframe} DataFrame for {symbol}: shape={df.shape}, cols={list(df.columns)}")
+            try:
+                sample_n = min(3, len(df))
+                for i in range(-sample_n, 0):
+                    c = df.iloc[i]
+                    logger.debug(f"   {i}: O={c['open']:.5f},H={c['high']:.5f},L={c['low']:.5f},C={c['close']:.5f},Vol={c['tick_volume']}")
+            except Exception:
+                pass
+        # Delegate index normalization to module-level helper
+        return _ensure_datetime_index(df, timeframe)
     
     async def generate_signals(self, market_data=None, symbol=None, timeframe=None, debug_visualize=False, force_trendlines=False, skip_plots=False, **kwargs):
         """
@@ -322,219 +605,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"⏩ Missing required timeframes for {symbol}: {missing_tfs}, skipping")
                 continue
                 
-            # Get data for each timeframe and convert to DataFrame if needed
-            primary_data = market_data[symbol][self.primary_timeframe]
-            higher_data = market_data[symbol][self.higher_timeframe]
-            
-            # Initialize DataFrames to None
-            primary_df = None
-            higher_df = None
-            
-            # Convert to DataFrame if it's a dictionary - important when receiving data from MT5
-            if isinstance(primary_data, dict):
-                logger.debug(f"Converting dictionary to DataFrame for {symbol}/{self.primary_timeframe}")
-                try:
-                    # Try to convert dict to DataFrame
-                    if 'M1' in primary_data and isinstance(primary_data['M1'], pd.DataFrame):
-                        primary_df = primary_data['M1'].copy()
-                    elif self.primary_timeframe in primary_data and isinstance(primary_data[self.primary_timeframe], pd.DataFrame):
-                        primary_df = primary_data[self.primary_timeframe].copy()
-                    else:
-                        # Try to extract from other common format keys
-                        for key in ['M1', 'M5', 'M15', 'H1', '1m', '5m', '15m', '1h', 'data', 'candles', 'ohlc']:
-                            if key in primary_data and isinstance(primary_data[key], pd.DataFrame):
-                                primary_df = primary_data[key].copy()
-                                logger.debug(f"Found DataFrame in key '{key}'")
-                                break
-                        else:
-                            # Direct creation from OHLC values if available at root level
-                            if all(k in primary_data for k in ['open', 'high', 'low', 'close']):
-                                try:
-                                    logger.debug(f"Attempting to create DataFrame directly from OHLC keys in root")
-                                    primary_df = pd.DataFrame({
-                                        'open': primary_data['open'],
-                                        'high': primary_data['high'],
-                                        'low': primary_data['low'],
-                                        'close': primary_data['close'],
-                                    })
-                                    if 'tick_volume' in primary_data:
-                                        primary_df['tick_volume'] = primary_data['tick_volume']
-                                    elif 'volume' in primary_data:
-                                        primary_df['tick_volume'] = primary_data['volume']
-                                        
-                                    # Attempt to create datetime index if time data exists
-                                    if 'time' in primary_data:
-                                        primary_df.index = pd.to_datetime(primary_data['time'])
-                                    
-                                    logger.debug(f"Successfully created DataFrame from OHLC values with shape {primary_df.shape}")
-                                except Exception as e:
-                                    logger.debug(f"Failed to create DataFrame from OHLC: {str(e)}")
-                                    primary_df = None
-                            else:
-                                # If no DataFrame found, log data structure and skip
-                                logger.debug(f"Dictionary structure for {symbol}/{self.primary_timeframe}: {list(primary_data.keys())}")
-                                
-                                # Inspect the dictionary structure more deeply
-                                for key, value in primary_data.items():
-                                    if isinstance(value, pd.DataFrame):
-                                        logger.debug(f"  Key '{key}' contains DataFrame with shape {value.shape} and columns {list(value.columns)}")
-                                    elif isinstance(value, dict):
-                                        logger.debug(f"  Key '{key}' contains nested dictionary with keys: {list(value.keys())}")
-                                        # Check if this nested dict has OHLC values
-                                        if all(k in value for k in ['open', 'high', 'low', 'close']):
-                                            try:
-                                                logger.debug(f"Attempting to create DataFrame from OHLC in nested key '{key}'")
-                                                primary_df = pd.DataFrame({
-                                                    'open': value['open'],
-                                                    'high': value['high'],
-                                                    'low': value['low'],
-                                                    'close': value['close'],
-                                                })
-                                                if 'tick_volume' in value:
-                                                    primary_df['tick_volume'] = value['tick_volume']
-                                                elif 'volume' in value:
-                                                    primary_df['tick_volume'] = value['volume']
-                                                
-                                                # Attempt to create datetime index if time data exists
-                                                if 'time' in value:
-                                                    primary_df.index = pd.to_datetime(value['time'])
-                                                
-                                                logger.debug(f"Successfully created DataFrame from nested OHLC with shape {primary_df.shape}")
-                                                break
-                                            except Exception as e:
-                                                logger.debug(f"Failed to create DataFrame from nested OHLC: {str(e)}")
-                                                continue
-                                        
-                                        # Check one level deeper
-                                        for subkey, subvalue in value.items():
-                                            if isinstance(subvalue, pd.DataFrame):
-                                                logger.debug(f"    Subkey '{subkey}' contains DataFrame with shape {subvalue.shape}")
-                                    else:
-                                        logger.debug(f"  Key '{key}' contains {type(value).__name__}")
-                                        
-                                if primary_df is None:
-                                    logger.debug(f"Could not extract DataFrame from dictionary")
-                                    primary_df = None
-                except Exception as e:
-                    logger.debug(f"Error converting primary data to DataFrame: {str(e)}")
-                    primary_df = None
-            else:
-                # If it's already a DataFrame
-                primary_df = primary_data
-            
-            # Same for higher timeframe
-            if isinstance(higher_data, dict):
-                logger.debug(f"Converting dictionary to DataFrame for {symbol}/{self.higher_timeframe}")
-                try:
-                    # Try to convert dict to DataFrame
-                    if 'M15' in higher_data and isinstance(higher_data['M15'], pd.DataFrame):
-                        higher_df = higher_data['M15'].copy()
-                    elif self.higher_timeframe in higher_data and isinstance(higher_data[self.higher_timeframe], pd.DataFrame):
-                        higher_df = higher_data[self.higher_timeframe].copy()
-                    else:
-                        # Try to extract from other common format keys
-                        for key in ['M1', 'M5', 'M15', 'H1', '1m', '5m', '15m', '1h', 'data', 'candles', 'ohlc']:
-                            if key in higher_data and isinstance(higher_data[key], pd.DataFrame):
-                                higher_df = higher_data[key].copy()
-                                logger.debug(f"Found DataFrame in key '{key}'")
-                                break
-                        else:
-                            # Direct creation from OHLC values if available at root level
-                            if all(k in higher_data for k in ['open', 'high', 'low', 'close']):
-                                try:
-                                    logger.debug(f"Attempting to create higher DataFrame directly from OHLC keys in root")
-                                    higher_df = pd.DataFrame({
-                                        'open': higher_data['open'],
-                                        'high': higher_data['high'],
-                                        'low': higher_data['low'],
-                                        'close': higher_data['close'],
-                                    })
-                                    if 'tick_volume' in higher_data:
-                                        higher_df['tick_volume'] = higher_data['tick_volume']
-                                    elif 'volume' in higher_data:
-                                        higher_df['tick_volume'] = higher_data['volume']
-                                        
-                                    # Attempt to create datetime index if time data exists
-                                    if 'time' in higher_data:
-                                        higher_df.index = pd.to_datetime(higher_data['time'])
-                                    
-                                    logger.debug(f"Successfully created higher DataFrame from OHLC values with shape {higher_df.shape}")
-                                except Exception as e:
-                                    logger.debug(f"Failed to create higher DataFrame from OHLC: {str(e)}")
-                                    higher_df = None
-                            else:
-                                # If no DataFrame found, log data structure and skip
-                                logger.debug(f"Dictionary structure for {symbol}/{self.higher_timeframe}: {list(higher_data.keys())}")
-                                
-                                # Inspect the dictionary structure more deeply
-                                for key, value in higher_data.items():
-                                    if isinstance(value, pd.DataFrame):
-                                        logger.debug(f"  Key '{key}' contains DataFrame with shape {value.shape} and columns {list(value.columns)}")
-                                    elif isinstance(value, dict):
-                                        logger.debug(f"  Key '{key}' contains nested dictionary with keys: {list(value.keys())}")
-                                        # Check if this nested dict has OHLC values
-                                        if all(k in value for k in ['open', 'high', 'low', 'close']):
-                                            try:
-                                                logger.debug(f"Attempting to create higher DataFrame from OHLC in nested key '{key}'")
-                                                higher_df = pd.DataFrame({
-                                                    'open': value['open'],
-                                                    'high': value['high'],
-                                                    'low': value['low'],
-                                                    'close': value['close'],
-                                                })
-                                                if 'tick_volume' in value:
-                                                    higher_df['tick_volume'] = value['tick_volume']
-                                                elif 'volume' in value:
-                                                    higher_df['tick_volume'] = value['volume']
-                                                
-                                                # Attempt to create datetime index if time data exists
-                                                if 'time' in value:
-                                                    higher_df.index = pd.to_datetime(value['time'])
-                                                
-                                                logger.debug(f"Successfully created higher DataFrame from nested OHLC with shape {higher_df.shape}")
-                                                break
-                                            except Exception as e:
-                                                logger.debug(f"Failed to create higher DataFrame from nested OHLC: {str(e)}")
-                                                continue
-                                        
-                                        # Check one level deeper
-                                        for subkey, subvalue in value.items():
-                                            if isinstance(subvalue, pd.DataFrame):
-                                                logger.debug(f"    Subkey '{subkey}' contains DataFrame with shape {subvalue.shape}")
-                                    else:
-                                        logger.debug(f"  Key '{key}' contains {type(value).__name__}")
-                                        
-                                if higher_df is None:
-                                    logger.debug(f"Could not extract DataFrame from dictionary")
-                                    higher_df = None
-                except Exception as e:
-                    logger.debug(f"Error converting higher data to DataFrame: {str(e)}")
-                    higher_df = None
-            else:
-                # If it's already a DataFrame
-                higher_df = higher_data
-            
-            # Log a sample of the data we received
-            try:
-                if primary_df is not None and not isinstance(primary_df, dict) and len(primary_df) > 0:
-                    # Log DataFrame structure
-                    logger.debug(f"📊 Primary timeframe ({self.primary_timeframe}) DataFrame structure for {symbol}:")
-                    logger.debug(f"   Shape: {primary_df.shape}")
-                    logger.debug(f"   Columns: {list(primary_df.columns)}")
-                    logger.debug(f"   Index type: {type(primary_df.index).__name__}")
-                    logger.debug(f"   Index range: {primary_df.index[0]} to {primary_df.index[-1]}")
-                    
-                    # Log a few sample rows
-                    sample_rows = min(3, len(primary_df))
-                    logger.debug(f"📉 Primary timeframe ({self.primary_timeframe}) sample for {symbol}:")
-                    for i in range(-sample_rows, 0):
-                        try:
-                            candle = primary_df.iloc[i]
-                            logger.debug(f"   {i}: O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}, Vol={candle['volume']}")
-                        except Exception as e:
-                            logger.debug(f"   Error accessing candle {i}: {str(e)}")
-            except Exception as e:
-                logger.debug(f"Error logging data sample: {str(e)}")
+            # Prepare dataframes for primary and higher timeframes
+            primary_df, higher_df = self._prepare_dataframes(market_data[symbol], symbol)
             
             # Check if DataFrames are None or empty
             primary_df_len = len(primary_df) if primary_df is not None and hasattr(primary_df, '__len__') else 0
@@ -550,114 +622,6 @@ class BreakoutReversalStrategy(SignalGenerator):
             if not isinstance(primary_df, pd.DataFrame) or not isinstance(higher_df, pd.DataFrame):
                 logger.warning(f"Expected DataFrames but got: primary={type(primary_df)}, higher={type(higher_df)}")
                 continue
-            
-            # Ensure DataFrame has datetime index
-            if not isinstance(primary_df.index, pd.DatetimeIndex):
-                logger.debug(f"Converting index to DatetimeIndex for {symbol}")
-                # Check if we have a 'time' column that can be used as index
-                if 'time' in primary_df.columns:
-                    try:
-                        # Try to convert 'time' column to datetime and set as index
-                        primary_df['time'] = pd.to_datetime(primary_df['time'])
-                        primary_df.set_index('time', inplace=True)
-                        logger.debug(f"Set DatetimeIndex from 'time' column for {symbol}")
-                    except Exception as e:
-                        logger.warning(f"Failed to set DatetimeIndex from 'time' column: {e}")
-                else:
-                    # If no time column, create a synthetic datetime index
-                    logger.debug(f"No 'time' column found, creating synthetic DatetimeIndex for {symbol}")
-                    current_time = datetime.now()
-                    try:
-                        if self.primary_timeframe.startswith('M'):
-                            # Extract minutes from timeframe (e.g., 'M5' -> 5)
-                            try:
-                                minutes = int(self.primary_timeframe[1:])
-                                # Create timestamps going back from current time
-                                timestamps = []
-                                for i in range(len(primary_df)-1, -1, -1):
-                                    timestamps.append(current_time - timedelta(minutes=minutes * i))
-                                
-                                # Create DatetimeIndex with safer approach
-                                logger.debug(f"Converting {len(timestamps)} timestamps to DatetimeIndex")
-                                primary_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                                logger.debug(f"Created synthetic DatetimeIndex using {minutes} minute intervals")
-                            except ValueError:
-                                logger.warning(f"Could not parse timeframe {self.primary_timeframe}, using default 5 minutes")
-                                timestamps = []
-                                for i in range(len(primary_df)-1, -1, -1):
-                                    timestamps.append(current_time - timedelta(minutes=5 * i))
-                                primary_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                        else:
-                            # Default to 5-minute intervals if timeframe format is unknown
-                            timestamps = []
-                            for i in range(len(primary_df)-1, -1, -1):
-                                timestamps.append(current_time - timedelta(minutes=5 * i))
-                            primary_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                            logger.debug(f"Created synthetic DatetimeIndex using default 5 minute intervals")
-                    except SystemError as e:
-                        logger.error(f"SystemError when creating DatetimeIndex: {str(e)}")
-                        logger.warning(f"Falling back to RangeIndex for {symbol}")
-                        # Fall back to a simple RangeIndex if DatetimeIndex creation fails
-                        primary_df.index = pd.RangeIndex(start=0, stop=len(primary_df))
-                    except Exception as e:
-                        logger.error(f"Error creating DatetimeIndex: {str(e)}")
-                        logger.warning(f"Falling back to RangeIndex for {symbol}")
-                        # Fall back to a simple RangeIndex if DatetimeIndex creation fails
-                        primary_df.index = pd.RangeIndex(start=0, stop=len(primary_df))
-            
-            # Do the same for higher timeframe DataFrame
-            if not isinstance(higher_df.index, pd.DatetimeIndex):
-                logger.debug(f"Converting index to DatetimeIndex for higher timeframe data of {symbol}")
-                # Check if we have a 'time' column that can be used as index
-                if 'time' in higher_df.columns:
-                    try:
-                        # Try to convert 'time' column to datetime and set as index
-                        higher_df['time'] = pd.to_datetime(higher_df['time'])
-                        higher_df.set_index('time', inplace=True)
-                        logger.debug(f"Set DatetimeIndex from 'time' column for higher timeframe")
-                    except Exception as e:
-                        logger.warning(f"Failed to set DatetimeIndex from 'time' column for higher timeframe: {e}")
-                else:
-                    # If no time column, create a synthetic datetime index
-                    logger.debug(f"No 'time' column found, creating synthetic DatetimeIndex for higher timeframe")
-                    current_time = datetime.now()
-                    try:
-                        if self.higher_timeframe.startswith('M'):
-                            # Extract minutes from timeframe (e.g., 'M15' -> 15)
-                            try:
-                                minutes = int(self.higher_timeframe[1:])
-                                # Create timestamps going back from current time
-                                timestamps = []
-                                for i in range(len(higher_df)-1, -1, -1):
-                                    timestamps.append(current_time - timedelta(minutes=minutes * i))
-                                
-                                # Create DatetimeIndex with safer approach
-                                logger.debug(f"Converting {len(timestamps)} timestamps to DatetimeIndex for higher timeframe")
-                                higher_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                                logger.debug(f"Created synthetic DatetimeIndex using {minutes} minute intervals for higher timeframe")
-                            except ValueError:
-                                logger.warning(f"Could not parse timeframe {self.higher_timeframe}, using default 15 minutes")
-                                timestamps = []
-                                for i in range(len(higher_df)-1, -1, -1):
-                                    timestamps.append(current_time - timedelta(minutes=15 * i))
-                                higher_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                        else:
-                            # Default to 15-minute intervals if timeframe format is unknown
-                            timestamps = []
-                            for i in range(len(higher_df)-1, -1, -1):
-                                timestamps.append(current_time - timedelta(minutes=15 * i))
-                            higher_df.index = pd.DatetimeIndex(pd.Series(timestamps))
-                            logger.debug(f"Created synthetic DatetimeIndex using default 15 minute intervals for higher timeframe")
-                    except SystemError as e:
-                        logger.error(f"SystemError when creating DatetimeIndex for higher timeframe: {str(e)}")
-                        logger.warning(f"Falling back to RangeIndex for higher timeframe")
-                        # Fall back to a simple RangeIndex if DatetimeIndex creation fails
-                        higher_df.index = pd.RangeIndex(start=0, stop=len(higher_df))
-                    except Exception as e:
-                        logger.error(f"Error creating DatetimeIndex for higher timeframe: {str(e)}")
-                        logger.warning(f"Falling back to RangeIndex for higher timeframe")
-                        # Fall back to a simple RangeIndex if DatetimeIndex creation fails
-                        higher_df.index = pd.RangeIndex(start=0, stop=len(higher_df))
             
             # Update key levels and trend lines
             try:
@@ -686,15 +650,9 @@ class BreakoutReversalStrategy(SignalGenerator):
             if reversal_signals:
                 symbol_signals.extend(reversal_signals)
                 
-            # Score and enhance each signal
-            for signal in symbol_signals:
-                # Add symbol to the signal dict for identification later
-                signal['original_symbol'] = symbol
-                
-                # Calculate and add score
-                h1_trend = self._determine_h1_trend(higher_df)
-                signal = self._score_signal(signal, symbol, primary_df, higher_df, h1_trend)
-                
+            # Score signals using helper
+            symbol_signals = self._score_signals(symbol_signals, primary_df, higher_df)
+            
             # For each symbol, return the best signal immediately if requested
             if process_immediately and symbol_signals:
                 # Find best signal for this symbol
@@ -765,303 +723,6 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.info("📭 No signals generated - returning empty list")
         
         return signals
-    
-    def _score_signal(self, signal, symbol, df, h1_df, h1_trend):
-        """
-        Score a signal based on multiple weighted factors to determine its quality.
-        Uses a comprehensive scoring system with 5 main components:
-        - Level Strength (30%): Number of touches and recency
-        - Volume Quality (20%): Volume characteristics
-        - Pattern Reliability (20%): Effectiveness of the pattern
-        - Trend Alignment (20%): Alignment with higher timeframe trend
-        - Risk-Reward Ratio (10%): Potential reward vs risk
-        
-        Args:
-            signal: The signal dictionary to score
-            symbol: Trading symbol
-            df: Price dataframe for the primary timeframe
-            h1_df: Price dataframe for the higher timeframe
-            h1_trend: Current trend on the higher timeframe
-            
-        Returns:
-            Signal dictionary with score added
-        """
-        # Initialize score components
-        level_strength_score = 0
-        volume_quality_score = 0
-        pattern_reliability_score = 0
-        trend_alignment_score = 0
-        risk_reward_score = 0
-        
-        # Extract signal details
-        signal_direction = signal['direction']
-        level = signal.get('level', None)
-        entry_price = signal['entry_price']
-        stop_loss = signal['stop_loss']
-        take_profit = signal['take_profit']
-        
-        # 1. Level Strength (30%) - based on number of touches and quality
-        if level is not None:
-            # Add debugging info
-            logger.debug(f"Scoring level {level:.5f} for {symbol} ({signal_direction})")
-            
-            # Check which type of level we're dealing with
-            if signal_direction == 'buy':
-                # Support level for buy signals
-                if symbol in self.support_levels and self.support_levels[symbol]:
-                    # Find the closest support level
-                    closest_level = min(self.support_levels[symbol], key=lambda x: abs(x - level)) if self.support_levels[symbol] else None
-                    
-                    # More lenient tolerance and added debugging
-                    level_tolerance = level * self.price_tolerance * 1.5  # 50% more lenient
-                    level_diff = abs(closest_level - level) if closest_level is not None else float('inf')
-                    logger.debug(f"Closest support: {closest_level:.5f}, diff: {level_diff:.5f}, tolerance: {level_tolerance:.5f}")
-                    
-                    if closest_level is not None and level_diff < level_tolerance:
-                        # Count touches for this level
-                        touches = self._count_level_touches(df, closest_level, 'support')
-                        logger.debug(f"Level touches: {touches}")
-                        
-                        # Scale touches to a 0-1 range, with diminishing returns after 5 touches
-                        # A level with 5+ touches gets a high score, but not much benefit beyond that
-                        # Give minimum score of 0.3 even for a single touch
-                        level_strength_score = max(0.3, min(touches / 5, 1.0))
-                        
-                        # Add bonus for recent level formation (if we can determine it)
-                        # This rewards fresher levels that may be more relevant
-                        try:
-                            # Check if the level was touched in the recent past
-                            recent_bars = df.iloc[-20:]  # Look at last 20 bars
-                            recent_touch = False
-                            
-                            for i in range(len(recent_bars)):
-                                if abs(recent_bars['low'].iloc[i] - closest_level) <= closest_level * self.price_tolerance:
-                                    recent_touch = True
-                                    break
-                                    
-                            if recent_touch:
-                                # Add a bonus for recent touch (up to 0.2 extra)
-                                level_strength_score = min(level_strength_score + 0.2, 1.0)
-                                logger.debug(f"Added recency bonus for support level at {closest_level:.5f}")
-                        except Exception as e:
-                            logger.debug(f"Error calculating level recency: {str(e)}")
-                    else:
-                        logger.debug(f"No matching support level found within tolerance")
-                else:
-                    logger.debug(f"No support levels found for {symbol}")
-            else:
-                # Resistance level for sell signals
-                if symbol in self.resistance_levels and self.resistance_levels[symbol]:
-                    # Find the closest resistance level
-                    closest_level = min(self.resistance_levels[symbol], key=lambda x: abs(x - level)) if self.resistance_levels[symbol] else None
-                    
-                    # More lenient tolerance and added debugging
-                    level_tolerance = level * self.price_tolerance * 1.5  # 50% more lenient
-                    level_diff = abs(closest_level - level) if closest_level is not None else float('inf')
-                    logger.debug(f"Closest resistance: {closest_level:.5f}, diff: {level_diff:.5f}, tolerance: {level_tolerance:.5f}")
-                    
-                    if closest_level is not None and level_diff < level_tolerance:
-                        # Count touches for this level
-                        touches = self._count_level_touches(df, closest_level, 'resistance')
-                        logger.debug(f"Level touches: {touches}")
-                        
-                        # Scale touches to a 0-1 range, with diminishing returns after 5 touches
-                        # Give minimum score of 0.3 even for a single touch
-                        level_strength_score = max(0.3, min(touches / 5, 1.0))
-                        
-                        # Add bonus for recent level formation
-                        try:
-                            # Check if the level was touched in the recent past
-                            recent_bars = df.iloc[-20:]  # Look at last 20 bars
-                            recent_touch = False
-                            
-                            for i in range(len(recent_bars)):
-                                if abs(recent_bars['high'].iloc[i] - closest_level) <= closest_level * self.price_tolerance:
-                                    recent_touch = True
-                                    break
-                                    
-                            if recent_touch:
-                                # Add a bonus for recent touch (up to 0.2 extra)
-                                level_strength_score = min(level_strength_score + 0.2, 1.0)
-                                logger.debug(f"Added recency bonus for resistance level at {closest_level:.5f}")
-                        except Exception as e:
-                            logger.debug(f"Error calculating level recency: {str(e)}")
-                    else:
-                        logger.debug(f"No matching resistance level found within tolerance")
-                else:
-                    logger.debug(f"No resistance levels found for {symbol}")
-        
-        # 2. Volume Quality (20%)
-        # Try to extract volume quality from signal reason if available
-        reason = signal.get('reason', '').lower()
-        
-        if 'strong' in reason and 'volume' in reason:
-            volume_quality_score = 1.0
-        elif 'adequate' in reason and 'volume' in reason:
-            volume_quality_score = 0.7
-        else:
-            # If volume quality not mentioned in reason, calculate it from the last candle
-            try:
-                # Get the candle that triggered the signal (latest candle)
-                candle = df.iloc[-1]
-                
-                # Calculate volume threshold
-                lookback_bars = min(50, len(df) - 1)
-                volume_threshold = np.percentile(df['tick_volume'].iloc[-lookback_bars:], self.volume_percentile)
-                
-                # Analyze volume quality
-                vol_quality = self._analyze_volume_quality(candle, volume_threshold)
-                
-                # Convert from -2 to +2 scale to 0 to 1 scale for scoring
-                # For buy signals, positive values are good; for sell signals, negative values are good
-                if signal_direction == 'buy':
-                    volume_quality_score = max(0, vol_quality / 2)  # Scale from 0 to 1
-                else:
-                    volume_quality_score = max(0, -vol_quality / 2)  # Scale from 0 to 1
-            except Exception as e:
-                logger.debug(f"Error calculating volume quality score: {str(e)}")
-                # Default value if we can't extract or calculate
-                volume_quality_score = 0.5
-        
-        # 3. Pattern Reliability (20%)
-        # Define reliability scores for different patterns
-        pattern_reliability = {
-            'bullish engulfing': 0.8,
-            'bearish engulfing': 0.8,
-            'morning star': 0.9,
-            'evening star': 0.9,
-            'hammer': 0.7,
-            'shooting star': 0.7,
-            'breakout': 0.6,
-            'breakdown': 0.6,
-            'trend line breakout': 0.75,
-            'trend line breakdown': 0.75,
-            'retest': 0.85  # Retests are considered more reliable
-        }
-        
-        # Check for patterns in the reason
-        for pattern, score in pattern_reliability.items():
-            if pattern in reason.lower():
-                pattern_reliability_score = score
-                break
-        else:
-            # Default if no recognized pattern
-            pattern_reliability_score = 0.5
-        
-        # 4. Trend Alignment (20%)
-        # Check if the signal aligns with the higher timeframe trend
-        if signal_direction == 'buy':
-            if h1_trend == 'bullish':
-                trend_alignment_score = 1.0  # Perfect alignment
-            elif h1_trend == 'neutral':
-                trend_alignment_score = 0.5  # Partial alignment
-            else:
-                trend_alignment_score = 0.0  # Counter-trend
-        else:  # sell
-            if h1_trend == 'bearish':
-                trend_alignment_score = 1.0  # Perfect alignment
-            elif h1_trend == 'neutral':
-                trend_alignment_score = 0.5  # Partial alignment
-            else:
-                trend_alignment_score = 0.0  # Counter-trend
-        
-        # 5. Risk-Reward Ratio (10%)
-        # Calculate the risk-reward ratio and score it
-        if signal_direction == 'buy':
-            risk = entry_price - stop_loss
-            reward = take_profit - entry_price
-        else:
-            risk = stop_loss - entry_price
-            reward = entry_price - take_profit
-            
-        if risk > 0:
-            rr_ratio = reward / risk
-            
-            # Score RR ratio, with diminishing returns above 3:1
-            # 1:1 = 0.33, 2:1 = 0.67, 3:1 or higher = 1.0
-            risk_reward_score = min(rr_ratio / 3, 1.0)
-        else:
-            risk_reward_score = 0
-        
-        # ATR context - examine if the stop loss is reasonable relative to volatility (bonus factor)
-        # This helps filter out signals with too tight or too wide stops
-        atr = None  # Initialize atr variable
-        atr_bonus = 0  # Default value
-        try:
-            atr_series = calculate_atr(df, self.atr_period)
-            # Get the last ATR value from the series
-            if isinstance(atr_series, pd.Series) and not atr_series.empty:
-                atr = atr_series.iloc[-1]  # Get the most recent ATR value
-            # Properly handle all possible types with explicit checks
-            atr_is_valid = (atr is not None and 
-                           not pd.isna(atr) and
-                           np.isscalar(float(atr)) and 
-                           float(atr) > 0)
-            
-            if atr_is_valid:
-                # Calculate the ratio of risk (stop distance) to ATR
-                stop_atr_ratio = risk / float(atr)
-                
-                # Ideal ratio is between 0.5x and 3x ATR
-                stop_atr_ratio_value = float(stop_atr_ratio)
-                # Explicit comparisons to avoid pandas/numpy Series boolean issues
-                is_above_min = stop_atr_ratio_value >= 0.5
-                is_below_max = stop_atr_ratio_value <= 3.0
-                if is_above_min and is_below_max:
-                    # Add a small bonus to the overall score (up to 10%)
-                    atr_bonus = 0.1
-                    self.logger.debug(f"Stop is {stop_atr_ratio_value:.1f}x ATR - appropriate size, adding bonus")
-                else:
-                    # Penalize stops that are too tight or too wide
-                    atr_bonus = -0.1
-                    is_too_tight = stop_atr_ratio_value < 0.5
-                    self.logger.debug(f"Stop is {stop_atr_ratio_value:.1f}x ATR - {'too tight' if is_too_tight else 'too wide'}")
-            else:
-                atr_bonus = 0
-                self.logger.debug(f"Invalid ATR value: {atr}")
-        except Exception as e:
-            self.logger.debug(f"Error calculating ATR context: {str(e)}")
-            atr_bonus = 0
-        
-        # Calculate final weighted score
-        final_score = (
-            (level_strength_score * 0.3) +  # 30% weight
-            (volume_quality_score * 0.2) +  # 20% weight
-            (pattern_reliability_score * 0.2) +  # 20% weight
-            (trend_alignment_score * 0.2) +  # 20% weight
-            (risk_reward_score * 0.1)  # 10% weight
-        )
-        
-        # Apply the ATR context bonus/penalty
-        final_score = max(0, min(1, final_score + atr_bonus))
-        
-        # Consolidation context - give bonus to reversals in ranging markets
-        try:
-            if 'reversal' in reason.lower() and symbol in self.last_consolidation_ranges:
-                is_consolidation = self.last_consolidation_ranges[symbol].get('is_consolidation', False)
-                if is_consolidation:
-                    # Add a small bonus for reversals in confirmed consolidation zones
-                    consolidation_bonus = 0.05
-                    final_score = min(1, final_score + consolidation_bonus)
-                    logger.debug(f"Added consolidation context bonus for reversal signal")
-        except Exception as e:
-            logger.debug(f"Error applying consolidation context: {str(e)}")
-        
-        # Add score to signal
-        signal['score'] = final_score
-        signal['score_details'] = {
-            'level_strength': level_strength_score,
-            'volume_quality': volume_quality_score,
-            'pattern_reliability': pattern_reliability_score,
-            'trend_alignment': trend_alignment_score,
-            'risk_reward': risk_reward_score,
-            'final_score': final_score
-        }
-        
-        logger.info(f"Signal scored {final_score:.2f} - Level: {level_strength_score:.2f}, Volume: {volume_quality_score:.2f}, " +
-                   f"Pattern: {pattern_reliability_score:.2f}, Trend: {trend_alignment_score:.2f}, R:R: {risk_reward_score:.2f}")
-        
-        return signal
     
     def _update_key_levels(self, symbol: str, df: pd.DataFrame, debug_force_update: bool = False) -> None:
         """
@@ -1160,177 +821,106 @@ class BreakoutReversalStrategy(SignalGenerator):
     def _find_trend_lines(self, symbol: str, df: pd.DataFrame, debug_force_update: bool = False, skip_plots: bool = False) -> None:
         """
         Find and validate trend lines for a given symbol.
-        
-        Args:
-            symbol: Trading symbol
-            df: Price dataframe
-            debug_force_update: Force update regardless of time interval
-            skip_plots: Whether to skip creating debug plots
         """
-        # Check if it's time to update trend lines
         current_time = datetime.now()
         last_update_time = self.last_updated.get('trend_lines', {}).get(symbol, None)
         force_update = debug_force_update
-        
+
         if (not force_update and last_update_time is not None and 
             (current_time - last_update_time).total_seconds() < self.trend_line_update_interval * 3600):
-            # Skip update if it's not time yet
             logger.debug(f"⏭️ Skipping trend line update for {symbol} - last update: {last_update_time}")
             return
-            
+
         logger.info(f"🔍 Finding trend lines for {symbol}")
-        
-        # Find swing highs and lows for trend line analysis
-        swing_highs = self._find_swing_highs(df)
-        swing_lows = self._find_swing_lows(df)
-        
-        logger.info(f"🔍 Found {len(swing_highs)} swing highs and {len(swing_lows)} swing lows for {symbol}")
-        
-        # Calculate trend lines
-        bullish_trend_lines = self._identify_trend_lines(df, swing_lows, 'bullish', skip_plots)
-        bearish_trend_lines = self._identify_trend_lines(df, swing_highs, 'bearish', skip_plots)
-        
-        # Store trend lines
+        analyzer = _TrendLineAnalyzer(df, self)
+        bullish_trend_lines = analyzer.get_support_lines(skip_plots)
+        bearish_trend_lines = analyzer.get_resistance_lines(skip_plots)
         self.bullish_trend_lines[symbol] = bullish_trend_lines
         self.bearish_trend_lines[symbol] = bearish_trend_lines
-        
-        # Log summary info
+
         if bullish_trend_lines:
             logger.info(f"📈 Found {len(bullish_trend_lines)} bullish trend lines for {symbol}")
         if bearish_trend_lines:
             logger.info(f"📉 Found {len(bearish_trend_lines)} bearish trend lines for {symbol}")
-        
-        # Skip plot creation if skip_plots is True
+
         if skip_plots:
-            # Log info about trendlines without creating plots
             if bullish_trend_lines:
                 logger.debug(f"📈 BULLISH TREND LINES for {symbol} (skipping plots)")
                 for i, line in enumerate(bullish_trend_lines):
-                    logger.debug(f"  📈 Bullish Line #{i+1}: Angle={line['angle']:.2f}°, r²={line['r_squared']:.3f}, Touches={line['touches']}")
-            
+                    logger.debug(f"  📈 Bullish Line #{{i+1}}: Angle={{line['angle']:.2f}}°, r²={{line['r_squared']:.3f}}, Touches={{line['touches']}}")
             if bearish_trend_lines:
                 logger.debug(f"📉 BEARISH TREND LINES for {symbol} (skipping plots)")
                 for i, line in enumerate(bearish_trend_lines):
-                    logger.debug(f"  📉 Bearish Line #{i+1}: Angle={line['angle']:.2f}°, r²={line['r_squared']:.3f}, Touches={line['touches']}")
-            
-            # Update last updated timestamp and return
+                    logger.debug(f"  📉 Bearish Line #{{i+1}}: Angle={{line['angle']:.2f}}°, r²={{line['r_squared']:.3f}}, Touches={{line['touches']}}")
             self.last_updated['trend_lines'][symbol] = current_time
             return
-            
         # Create debug plots directory if it doesn't exist
         debug_dir = Path("debug_plots")
         debug_dir.mkdir(exist_ok=True)
-        
-        # Create a plot to visualize price, swing points, and trend lines
         plt.figure(figsize=(15, 10))
-        
-        # Plot price data (using the last 200 candles for clarity)
         plot_range = min(200, len(df))
         x_indices = list(range(len(df) - plot_range, len(df)))
         plt.plot(x_indices, df['close'].iloc[-plot_range:], color='blue', alpha=0.5, label='Close Price')
         plt.plot(x_indices, df['high'].iloc[-plot_range:], color='green', alpha=0.3, label='High')
         plt.plot(x_indices, df['low'].iloc[-plot_range:], color='red', alpha=0.3, label='Low')
-        
         # Plot swing highs and lows
+        swing_highs, swing_lows = analyzer.find_swings()
         if swing_highs:
             high_x = [x for x, y in swing_highs if x >= len(df) - plot_range]
             high_y = [y for x, y in swing_highs if x >= len(df) - plot_range]
             plt.scatter(high_x, high_y, color='green', marker='^', s=50, label='Swing Highs')
-            
-            # Connect consecutive swing highs with dashed lines for better visualization
             if len(high_x) >= 2:
                 for i in range(len(high_x) - 1):
-                    plt.plot([high_x[i], high_x[i+1]], [high_y[i], high_y[i+1]], 
-                             color='lightgreen', linestyle='--', alpha=0.5)
-        
+                    plt.plot([high_x[i], high_x[i+1]], [high_y[i], high_y[i+1]], color='lightgreen', linestyle='--', alpha=0.5)
         if swing_lows:
             low_x = [x for x, y in swing_lows if x >= len(df) - plot_range]
             low_y = [y for x, y in swing_lows if x >= len(df) - plot_range]
             plt.scatter(low_x, low_y, color='red', marker='v', s=50, label='Swing Lows')
-            
-            # Connect consecutive swing lows with dashed lines for better visualization
             if len(low_x) >= 2:
                 for i in range(len(low_x) - 1):
-                    plt.plot([low_x[i], low_x[i+1]], [low_y[i], low_y[i+1]], 
-                             color='lightcoral', linestyle='--', alpha=0.5)
-        
+                    plt.plot([low_x[i], low_x[i+1]], [low_y[i], low_y[i+1]], color='lightcoral', linestyle='--', alpha=0.5)
         # Plot bullish trend lines (support)
-        for i, line in enumerate(bullish_trend_lines[:8]):  # Limit to top 8 for clarity
+        for i, line in enumerate(bullish_trend_lines[:8]):
             start_idx = max(line['start_idx'], len(df) - plot_range)
             end_idx = min(line['end_idx'], len(df) - 1)
-            
             if start_idx >= end_idx:
                 continue
-                
             x_line = np.linspace(start_idx, end_idx, 100)
             y_line = line['slope'] * x_line + line['intercept']
-            
-            plt.plot(x_line, y_line, color='green', linewidth=2, alpha=0.7, 
-                    label=f"Support: Angle={line['angle']:.1f}°, Touches={line['touches']}")
-            
-            # Add annotation for top trend lines
-            if i < 3:  # Only annotate top 3 lines
+            plt.plot(x_line, y_line, color='green', linewidth=2, alpha=0.7, label=f"Support: Angle={line['angle']:.1f}°, Touches={line['touches']}")
+            if i < 3:
                 midpoint_x = (start_idx + end_idx) / 2
                 midpoint_y = line['slope'] * midpoint_x + line['intercept']
-                plt.annotate(f"Support #{i+1}: {line['touches']} touches", 
-                            xy=(midpoint_x, midpoint_y),
-                            xytext=(-30, -20),
-                            textcoords="offset points",
-                            bbox=dict(boxstyle="round", fc="white", alpha=0.7),
-                            arrowprops=dict(arrowstyle="->"))
-        
+                plt.annotate(f"Support #{i+1}: {line['touches']} touches", xy=(midpoint_x, midpoint_y), xytext=(-30, -20), textcoords="offset points", bbox=dict(boxstyle="round", fc="white", alpha=0.7), arrowprops=dict(arrowstyle="->"))
         # Plot bearish trend lines (resistance)
-        for i, line in enumerate(bearish_trend_lines[:8]):  # Limit to top 8 for clarity
+        for i, line in enumerate(bearish_trend_lines[:8]):
             start_idx = max(line['start_idx'], len(df) - plot_range)
             end_idx = min(line['end_idx'], len(df) - 1)
-            
             if start_idx >= end_idx:
                 continue
-                
             x_line = np.linspace(start_idx, end_idx, 100)
             y_line = line['slope'] * x_line + line['intercept']
-            
-            plt.plot(x_line, y_line, color='red', linewidth=2, alpha=0.7, 
-                    label=f"Resistance: Angle={line['angle']:.1f}°, Touches={line['touches']}")
-            
-            # Add annotation for top trend lines
-            if i < 3:  # Only annotate top 3 lines
+            plt.plot(x_line, y_line, color='red', linewidth=2, alpha=0.7, label=f"Resistance: Angle={line['angle']:.1f}°, Touches={line['touches']}")
+            if i < 3:
                 midpoint_x = (start_idx + end_idx) / 2
                 midpoint_y = line['slope'] * midpoint_x + line['intercept']
-                plt.annotate(f"Resistance #{i+1}: {line['touches']} touches", 
-                            xy=(midpoint_x, midpoint_y),
-                            xytext=(-30, 20),
-                            textcoords="offset points",
-                            bbox=dict(boxstyle="round", fc="white", alpha=0.7),
-                            arrowprops=dict(arrowstyle="->"))
-        
-        # Add horizontal support and resistance levels for reference
+                plt.annotate(f"Resistance #{i+1}: {line['touches']} touches", xy=(midpoint_x, midpoint_y), xytext=(-30, 20), textcoords="offset points", bbox=dict(boxstyle="round", fc="white", alpha=0.7), arrowprops=dict(arrowstyle="->"))
         support_levels = self.support_levels.get(symbol, [])
         for level in support_levels:
             plt.axhline(y=level, color='green', linestyle='-', alpha=0.3)
-            
         resistance_levels = self.resistance_levels.get(symbol, [])
         for level in resistance_levels:
             plt.axhline(y=level, color='red', linestyle='-', alpha=0.3)
-            
-        # Finalize and save the plot
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         plt.title(f'Trend Line Analysis for {symbol}')
         plt.xlabel('Candle Index')
         plt.ylabel('Price')
         plt.grid(True, alpha=0.3)
-        
-        # Handle large legends by using a smaller font size and good positioning
         plt.legend(loc='upper left', fontsize='small')
-        
-        # Save the plot
         file_path = debug_dir / f"{symbol}_trend_lines_{timestamp}.png"
         plt.savefig(file_path)
         plt.close()
-        
         logger.info(f"📊 Saved trend line visualization to {file_path}")
-        
-        # Update last updated timestamp
         self.last_updated['trend_lines'][symbol] = current_time
     
     def _find_swing_highs(self, df: pd.DataFrame) -> List[Tuple[int, float]]:
@@ -2249,28 +1839,10 @@ class BreakoutReversalStrategy(SignalGenerator):
         resistance_levels = self.resistance_levels[symbol]
         support_levels = self.support_levels[symbol]
         
-        # Ensure we have the required columns
-        # Check if 'tick_volume' exists, if not check for 'volume', if neither exists create a default
-        if 'tick_volume' not in df.columns:
-            if 'volume' in df.columns:
-                logger.debug(f"Using 'volume' column instead of missing 'tick_volume' for {symbol}")
-                df['tick_volume'] = df['volume']
-            else:
-                logger.debug(f"Creating default 'tick_volume' column for {symbol} as neither 'tick_volume' nor 'volume' exists")
-                # Create a default volume column with values of 1
-                df['tick_volume'] = 1
-        
-        # Log a sample of recent candles for debugging
-        candles_to_log = min(5, len(df))
-        if candles_to_log > 0:
-            logger.debug(f"🕯️ {symbol}: Last {candles_to_log} candles data sample:")
-            try:
-                for i in range(-candles_to_log, 0):
-                    candle = df.iloc[i]
-                    logger.debug(f"   {df.index[i]}: O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}, Vol={candle['tick_volume']}")
-            except KeyError as e:
-                logger.warning(f"Error logging candle data for {symbol}: {str(e)}")
-                logger.debug(f"DataFrame columns: {df.columns.tolist()}")
+        # Prepare volume and debug information
+        self._ensure_tick_volume(df, symbol)
+        self._log_candle_samples(df, symbol, count=5)
+        volume_threshold = self._compute_volume_threshold(df)
         
         # Get trend lines if available
         trend_lines = self.bullish_trend_lines.get(symbol, []) + self.bearish_trend_lines.get(symbol, [])
@@ -2282,38 +1854,9 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Get recent candles - use candles_to_check from timeframe profile
         candles_to_check = min(self.candles_to_check, len(df) - 1)
         
-        # Calculate volume threshold using percentile-based approach
-        try:
-            # Get lookback window for volume analysis
-            lookback_bars = min(50, len(df) - 1)  # Use last 50 bars or as many as available
-            
-            # Extract volume data
-            volume_series = df['tick_volume'].iloc[-lookback_bars:].copy()
-            
-            # Calculate the percentile threshold
-            volume_threshold = np.percentile(volume_series, self.volume_percentile)
-            
-            logger.debug(f"📊 {symbol}: Using {self.volume_percentile}th percentile volume threshold: {volume_threshold:.1f}")
-        except Exception as e:
-            logger.warning(f"Error calculating volume percentile threshold for {symbol}: {str(e)}")
-            # Fallback to old method with fixed multiplier
-            try:
-                avg_volume_series = df['tick_volume'].rolling(window=20).mean()
-                # Ensure we have a pandas Series
-                if not isinstance(avg_volume_series, pd.Series):
-                    avg_volume_series = pd.Series(avg_volume_series, index=df.index[-20:])
-                avg_volume = float(avg_volume_series.iloc[-1])
-                volume_threshold = avg_volume * self.volume_threshold
-                
-                logger.debug(f"📊 {symbol}: Fallback to avg volume: {avg_volume:.1f}, threshold: {volume_threshold:.1f}")
-            except Exception as e2:
-                logger.warning(f"Fallback volume calculation also failed: {str(e2)}")
-                volume_threshold = 1.0  # Default threshold if all calculations fail
-                avg_volume = 1.0
-        
         # Get higher timeframe trend
-        h1_trend = self._determine_h1_trend(h1_df)
-        logger.info(f"📈 {symbol}: H1 trend is {h1_trend}")
+        h1_trend = self._determine_higher_timeframe_trend(h1_df)
+        logger.info(f"📈 {symbol}: {self.higher_timeframe} trend is {h1_trend}")
         
         # Check for retest confirmations first
         if (symbol in self.retest_tracking and 
@@ -2363,12 +1906,19 @@ class BreakoutReversalStrategy(SignalGenerator):
                     "stop_loss": retest_stop,
                     "take_profit": take_profit,
                     "timeframe": self.primary_timeframe,
-                    "confidence": 0.8,  # Higher confidence due to retest confirmation
                     "source": self.name,
                     "generator": self.name,
-                    "reason": f"Retest confirmed: {retest_reason}"
+                    "reason": f"Retest confirmed: {retest_reason}",
+                    "size": self.risk_manager.calculate_position_size(
+                        account_balance=self.risk_manager.get_account_balance(),
+                        risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                        entry_price=retest_entry,
+                        stop_loss_price=retest_stop,
+                        symbol=symbol
+                    )
                 }
-                
+                scored = self._scorer.score_signal(signal, df, df)
+                signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                 signals.append(signal)
                 logger.info(f"🟢 RETEST BUY: {symbol} at {retest_entry:.5f} | SL: {retest_stop:.5f} | TP: {take_profit:.5f}")
                 
@@ -2406,12 +1956,19 @@ class BreakoutReversalStrategy(SignalGenerator):
                     "stop_loss": retest_stop,
                     "take_profit": take_profit,
                     "timeframe": self.primary_timeframe,
-                    "confidence": 0.8,  # Higher confidence due to retest confirmation
                     "source": self.name,
                     "generator": self.name,
-                    "reason": f"Retest confirmed: {retest_reason}"
+                    "reason": f"Retest confirmed: {retest_reason}",
+                    "size": self.risk_manager.calculate_position_size(
+                        account_balance=self.risk_manager.get_account_balance(),
+                        risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                        entry_price=retest_entry,
+                        stop_loss_price=retest_stop,
+                        symbol=symbol
+                    )
                 }
-                
+                scored = self._scorer.score_signal(signal, df, df)
+                signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                 signals.append(signal)
                 logger.info(f"🔴 RETEST SELL: {symbol} at {retest_entry:.5f} | SL: {retest_stop:.5f} | TP: {take_profit:.5f}")
                 
@@ -2445,9 +2002,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                     
                     # Place stop under the breakout candle's low
                     stop_loss = min(current_candle['low'], previous_candle['low'])
-                    
-                    # Risk calculation (rest of code unchanged)
-                    # ...
                     
                     # Log the breakout regardless of whether we generate a signal
                     logger.info(f"👀 Detected potential breakout for {symbol} at level {level:.5f}")
@@ -2523,12 +2077,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.75,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": reason
+                            "reason": reason,
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
                         
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🟢 TREND LINE BREAKOUT BUY: {symbol} at {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
         
@@ -2593,12 +2156,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.75,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": reason
+                            "reason": reason,
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
                         
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🔴 BREAKDOWN SELL: {symbol} at {entry_price:.5f} | Level: {level:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
             
@@ -2651,12 +2223,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.75,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": reason
+                            "reason": reason,
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
                         
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🔴 TREND LINE BREAKDOWN SELL: {symbol} at {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
         
@@ -2688,58 +2269,22 @@ class BreakoutReversalStrategy(SignalGenerator):
         logger.debug(f"🔍 {symbol}: Checking reversals with {len(resistance_levels)} resistance and {len(support_levels)} support levels")
         
         # Determine the trend context from the higher timeframe
-        h1_trend = self._determine_h1_trend(h1_df)
+        h1_trend = self._determine_higher_timeframe_trend(h1_df)
         is_downtrend = h1_trend == 'bearish'
         
-        # Ensure we have the required columns
-        # Check if 'tick_volume' exists, if not check for 'volume', if neither exists create a default
-        if 'tick_volume' not in df.columns:
-            if 'volume' in df.columns:
-                logger.debug(f"Using 'volume' column instead of missing 'tick_volume' for {symbol} in reversal signals")
-                df['tick_volume'] = df['volume']
-            else:
-                logger.debug(f"Creating default 'tick_volume' column for {symbol} as neither 'tick_volume' nor 'volume' exists in reversal signals")
-                # Create a default volume column with values of 1
-                df['tick_volume'] = 1
+        # Prepare volume data and debug logs
+        self._ensure_tick_volume(df, symbol)
+        self._log_candle_samples(df, symbol, count=5)
+        volume_threshold = self._compute_volume_threshold(df)
         
-        # Get trend lines if available
+        # Define number of recent candles to check for patterns
+        candles_to_check = 10
+        
+        # Prepare trend line lists
         trend_lines = self.bullish_trend_lines.get(symbol, []) + self.bearish_trend_lines.get(symbol, [])
-        bullish_trend_lines = [line for line in trend_lines if line['angle'] < 60]  # Increased from 45
-        bearish_trend_lines = [line for line in trend_lines if line['angle'] > -60]  # Increased from -45
-        
-        logger.debug(f"🔍 {symbol}: Found {len(bullish_trend_lines)} bullish and {len(bearish_trend_lines)} bearish trend lines for reversal checks")
-        
-        # Use candles_to_check from timeframe profile
-        candles_to_check = min(self.candles_to_check, len(df) - 1)
-        
-        # Calculate volume threshold using percentile-based approach
-        try:
-            # Get lookback window for volume analysis
-            lookback_bars = min(50, len(df) - 1)  # Use last 50 bars or as many as available
-            
-            # Extract volume data
-            volume_series = df['tick_volume'].iloc[-lookback_bars:].copy()
-            
-            # Calculate the percentile threshold
-            volume_threshold = np.percentile(volume_series, self.volume_percentile)
-            
-            logger.debug(f"📊 {symbol}: Using {self.volume_percentile}th percentile volume threshold: {volume_threshold:.1f}")
-        except Exception as e:
-            logger.warning(f"Error calculating volume percentile threshold for {symbol}: {str(e)}")
-            # Fallback to old method with fixed multiplier
-            try:
-                avg_volume_series = df['tick_volume'].rolling(window=20).mean()
-                # Ensure we have a pandas Series
-                if not isinstance(avg_volume_series, pd.Series):
-                    avg_volume_series = pd.Series(avg_volume_series, index=df.index[-20:])
-                avg_volume = float(avg_volume_series.iloc[-1])
-                volume_threshold = avg_volume * self.volume_threshold
-                
-                logger.debug(f"📊 {symbol}: Fallback to avg volume: {avg_volume:.1f}, threshold: {volume_threshold:.1f}")
-            except Exception as e2:
-                logger.warning(f"Fallback volume calculation also failed: {str(e2)}")
-                volume_threshold = 1.0  # Default threshold if all calculations fail
-        
+        bullish_trend_lines = [line for line in trend_lines if line['angle'] < 60]
+        bearish_trend_lines = [line for line in trend_lines if line['angle'] > -60]
+
         # Check for reversal at support (bullish patterns)
         for i in range(-candles_to_check, 0):
             current_candle = df.iloc[i]
@@ -2760,50 +2305,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"✓ {symbol}: Price near support: {is_near_support} (Low: {current_candle['low']:.5f}, Support: {level:.5f}, Tolerance: {level * self.price_tolerance:.5f})")
                 
                 if is_near_support:
-                    # Check for bullish reversal patterns
-                    pattern_type = None
-                    
-                    # Updated hammer check with trend context and confirmation
-                    is_hammer_pattern = self._is_hammer(
-                        current_candle, 
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        df=df, 
-                        idx=i, 
-                        require_confirmation=True
-                    )
-                    
-                    # Add inverted hammer check with trend context and confirmation
-                    is_inverted_hammer_pattern = self._is_inverted_hammer(
-                        current_candle, 
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        df=df, 
-                        idx=i, 
-                        require_confirmation=True
-                    )
-                    
-                    is_bullish_engulfing = self._is_bullish_engulfing(
-                        candles=df,
-                        idx=i,
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        require_confirmation=True
-                    )
-                    is_morning_star = self._is_morning_star(df, i)
-                    
-                    logger.debug(f"📈 {symbol}: Pattern checks - Hammer: {is_hammer_pattern}, Inverted Hammer: {is_inverted_hammer_pattern}, Bullish Engulfing: {is_bullish_engulfing}, Morning Star: {is_morning_star}")
-                    
-                    if is_hammer_pattern:
-                        pattern_type = "Hammer"
-                    elif is_inverted_hammer_pattern:
-                        pattern_type = "Inverted Hammer"
-                    elif is_bullish_engulfing:
-                        pattern_type = "Bullish Engulfing"
-                    elif is_morning_star:
-                        pattern_type = "Morning Star"
-                    
-                    # Initialize volume_desc here
+                    # Detect bullish reversal pattern
+                    pattern_type = self._detect_bullish_reversal_pattern(df, i, is_downtrend)
                     volume_desc = "strong bullish volume" if volume_quality > 1 else "adequate volume"
                     
-                    if pattern_type and volume_quality > 0:  # Bullish volume characteristics
+                    if pattern_type:
                         logger.info(f"⚡ {symbol}: Detected bullish reversal pattern ({pattern_type}) at support {level:.5f}")
                         
                         # Generate buy signal
@@ -2850,12 +2356,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.7,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": f"Bullish reversal ({pattern_type}) at support {level:.5f} with {volume_desc}"
+                            "reason": f"Bullish reversal ({pattern_type}) at support {level:.5f} with {volume_desc}",
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
                         
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🟢 REVERSAL BUY: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | Level: {level:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
                     else:
@@ -2876,50 +2391,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"✓ {symbol}: Price near trend line: {is_near_trendline} (Low: {current_candle['low']:.5f}, Trend line: {line_value:.5f})")
                 
                 if is_near_trendline:
-                    # Check for bullish reversal patterns
-                    pattern_type = None
-                    
-                    # Updated hammer check with trend context and confirmation
-                    is_hammer_pattern = self._is_hammer(
-                        current_candle, 
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        df=df, 
-                        idx=i, 
-                        require_confirmation=True
-                    )
-                    
-                    # Add inverted hammer check with trend context and confirmation
-                    is_inverted_hammer_pattern = self._is_inverted_hammer(
-                        current_candle, 
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        df=df, 
-                        idx=i, 
-                        require_confirmation=True
-                    )
-                    
-                    is_bullish_engulfing = self._is_bullish_engulfing(
-                        candles=df,
-                        idx=i,
-                        in_downtrend=is_downtrend,  # Use the detected trend
-                        require_confirmation=True
-                    )
-                    is_morning_star = self._is_morning_star(df, i)
-                    
-                    logger.debug(f"📈 {symbol}: Pattern checks - Hammer: {is_hammer_pattern}, Inverted Hammer: {is_inverted_hammer_pattern}, Bullish Engulfing: {is_bullish_engulfing}, Morning Star: {is_morning_star}")
-                    
-                    if is_hammer_pattern:
-                        pattern_type = "Hammer"
-                    elif is_inverted_hammer_pattern:
-                        pattern_type = "Inverted Hammer"
-                    elif is_bullish_engulfing:
-                        pattern_type = "Bullish Engulfing"
-                    elif is_morning_star:
-                        pattern_type = "Morning Star"
-                    
-                    # Initialize volume_desc here
+                    # Detect bullish reversal pattern
+                    pattern_type = self._detect_bullish_reversal_pattern(df, i, is_downtrend)
                     volume_desc = "strong bullish volume" if volume_quality > 1 else "adequate volume"
                     
-                    if pattern_type and volume_quality > 0:  # Bullish volume characteristics
+                    if pattern_type:
                         logger.info(f"⚡ {symbol}: Detected bullish reversal pattern ({pattern_type}) at trend line with {volume_desc}")
                         
                         # Generate buy signal
@@ -2966,12 +2442,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.7,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": f"Bullish reversal ({pattern_type}) at trend line with {volume_desc}"
+                            "reason": f"Bullish reversal ({pattern_type}) at trend line with {volume_desc}",
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
                         
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🟢 TREND LINE REVERSAL BUY: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
                     else:
@@ -2992,67 +2477,25 @@ class BreakoutReversalStrategy(SignalGenerator):
             for level in resistance_levels:
                 # Price near resistance
                 if abs(current_candle['high'] - level) <= level * self.price_tolerance:
-                    # Check for bearish reversal patterns
-                    pattern_type = None
-                    
-                    # Use inverted hammer function with in_downtrend=False to detect shooting stars
-                    is_shooting_star = self._is_shooting_star(
-                        candles=df,
-                        idx=i,
-                        in_uptrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        require_confirmation=True
-                    )
-                    
-                    # Use hammer function with in_downtrend=False to detect hanging man
-                    is_hanging_man = self._is_hammer(
-                        current_candle,
-                        in_downtrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        df=df,
-                        idx=i,
-                        require_confirmation=True
-                    )
-                    
-                    # Updated bearish engulfing call using the new signature
-                    is_bearish_engulfing = self._is_bearish_engulfing(
-                        candles=df,
-                        idx=i,
-                        in_uptrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        require_confirmation=True
-                    )
-                    is_evening_star = self._is_evening_star(df, i)
-                    
-                    logger.debug(f"📉 {symbol}: Pattern checks - Shooting Star: {is_shooting_star}, Hanging Man: {is_hanging_man}, Bearish Engulfing: {is_bearish_engulfing}, Evening Star: {is_evening_star}")
-                    
-                    if is_shooting_star:
-                        pattern_type = "Shooting Star"
-                    elif is_hanging_man:
-                        pattern_type = "Hanging Man"
-                    elif is_bearish_engulfing:
-                        pattern_type = "Bearish Engulfing"
-                    elif is_evening_star:
-                        pattern_type = "Evening Star"
-                    
-                    if pattern_type and volume_quality < 0:  # Bearish volume characteristics
+                    # Detect bearish reversal pattern
+                    pattern_type = self._detect_bearish_reversal_pattern(df, i, is_downtrend)
+                    volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
+
+                    if pattern_type:
                         # Generate sell signal
                         entry_price = current_candle['close']
-                        
                         # Stop loss above the reversal candle high
                         stop_loss = current_candle['high'] + (level * self.price_tolerance)
-                        
                         # Target: Either next support or at least 2x risk
                         risk = stop_loss - entry_price
-                        
                         # Advanced target calculation - find nearest support below
                         next_support = self._find_next_support(df, entry_price, support_levels)
-                        
                         if next_support and (entry_price - next_support) >= (risk * self.min_risk_reward):
                             take_profit = next_support
                         else:
                             take_profit = entry_price - (risk * self.min_risk_reward)
-                        
                         # Volume description
                         volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
-                        
                         # Create signal
                         signal = {
                             "symbol": symbol,
@@ -3061,83 +2504,54 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.7,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": f"Bearish reversal ({pattern_type}) at resistance {level:.5f} with {volume_desc}"
+                            "reason": f"Bearish reversal ({pattern_type}) at resistance {level:.5f} with {volume_desc}",
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
-                        
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
                         logger.info(f"🔴 REVERSAL SELL: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | Level: {level:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
+                    else:
+                        if not pattern_type:
+                            logger.debug(f"❌ {symbol}: No bearish pattern detected")
+                        if volume_quality >= 0:
+                            logger.debug(f"❌ {symbol}: Insufficient bearish volume (quality: {volume_quality:.1f})")
             
             # Check for reversal at bearish trend lines
             for trend_line in bearish_trend_lines:
                 # Calculate trend line value at current position
                 line_value = self._calculate_trend_line_value(trend_line, i)
-                
                 # Price near trend line
                 if abs(current_candle['high'] - line_value) <= current_candle['close'] * self.price_tolerance:
-                    # Check for bearish reversal patterns
-                    pattern_type = None
-                    
-                    # Use inverted hammer function with in_downtrend=False to detect shooting stars
-                    is_shooting_star = self._is_shooting_star(
-                        candles=df,
-                        idx=i,
-                        in_uptrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        require_confirmation=True
-                    )
-                    
-                    # Use hammer function with in_downtrend=False to detect hanging man
-                    is_hanging_man = self._is_hammer(
-                        current_candle,
-                        in_downtrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        df=df,
-                        idx=i,
-                        require_confirmation=True
-                    )
-                    
-                    # Updated bearish engulfing call using the new signature
-                    is_bearish_engulfing = self._is_bearish_engulfing(
-                        candles=df,
-                        idx=i,
-                        in_uptrend=not is_downtrend,  # Opposite of the detected trend for bearish patterns
-                        require_confirmation=True
-                    )
-                    is_evening_star = self._is_evening_star(df, i)
-                    
-                    logger.debug(f"📉 {symbol}: Pattern checks - Shooting Star: {is_shooting_star}, Hanging Man: {is_hanging_man}, Bearish Engulfing: {is_bearish_engulfing}, Evening Star: {is_evening_star}")
-                    
-                    if is_shooting_star:
-                        pattern_type = "Shooting Star"
-                    elif is_hanging_man:
-                        pattern_type = "Hanging Man"
-                    elif is_bearish_engulfing:
-                        pattern_type = "Bearish Engulfing"
-                    elif is_evening_star:
-                        pattern_type = "Evening Star"
-                    
-                    if pattern_type and volume_quality < 0:  # Bearish volume characteristics
+                    # Detect bearish reversal pattern
+                    pattern_type = self._detect_bearish_reversal_pattern(df, i, is_downtrend)
+                    volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
+
+                    if pattern_type:
                         # Generate sell signal
                         entry_price = current_candle['close']
-                        
                         # Stop loss above the reversal candle high
                         stop_loss = current_candle['high'] + (line_value * self.price_tolerance)
-                        
                         # Target: Either next support or at least 2x risk
                         risk = stop_loss - entry_price
-                        
                         # Advanced target calculation - find nearest support below
                         next_support = self._find_next_support(df, entry_price, support_levels)
-                        
                         if next_support and (entry_price - next_support) >= (risk * self.min_risk_reward):
                             take_profit = next_support
                         else:
                             take_profit = entry_price - (risk * self.min_risk_reward)
-                        
                         # Volume description
                         volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
-                        
                         # Create signal
                         signal = {
                             "symbol": symbol,
@@ -3146,115 +2560,30 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
-                            "confidence": 0.7,
+                            "confidence": 0.0,  # placeholder, will update after scoring
                             "source": self.name,
                             "generator": self.name,
-                            "reason": f"Bearish reversal ({pattern_type}) at trend line with {volume_desc}"
+                            "reason": f"Bearish reversal ({pattern_type}) at trend line with {volume_desc}",
+                            "size": self.risk_manager.calculate_position_size(
+                                account_balance=self.risk_manager.get_account_balance(),
+                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                                entry_price=entry_price,
+                                stop_loss_price=stop_loss,
+                                symbol=symbol
+                            )
                         }
-                        
+                        scored = self._scorer.score_signal(signal, df, df)
+                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
                         signals.append(signal)
-                        logger.info(f"🔴 TREND LINE REVERSAL SELL: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        logger.info(f"🔴 TREND LINE REVERSAL SELL: {symbol} at {entry_price:.5f} | {pattern_type} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
+                    else:
+                        if not pattern_type:
+                            logger.debug(f"❌ {symbol}: No bearish pattern detected")
+                        if volume_quality >= 0:
+                            logger.debug(f"❌ {symbol}: Insufficient bearish volume (quality: {volume_quality:.1f})")
         
         return signals
-    
-    def _analyze_volume_quality(self, candle: pd.Series, threshold: float) -> float:
-        """
-        Analyze the quality of volume based on candle structure and wick analysis.
-        Returns a score indicating volume quality (-2 to +2):
-        - Positive values indicate bullish volume characteristics
-        - Negative values indicate bearish volume characteristics
-        - Magnitude indicates strength (2=strong, 1=moderate, 0=neutral/insufficient)
-        
-        Args:
-            candle: Candle data
-            threshold: Minimum volume threshold for consideration
-            
-        Returns:
-            Volume quality score
-        """
-        try:
-            # Check if 'tick_volume' column exists, if not use 'volume', if neither exists use a default
-            if 'tick_volume' not in candle:
-                if 'volume' in candle:
-                    tick_volume = candle['volume']
-                    logger.debug(f"Using 'volume' instead of missing 'tick_volume' for volume analysis")
-                else:
-                    logger.debug(f"Using default volume value as neither 'tick_volume' nor 'volume' exists")
-                    tick_volume = threshold * 0.8  # Default to 80% of threshold as a reasonable value
-            else:
-                tick_volume = candle['tick_volume']
-                
-            # First check if volume is even significant - using a less strict threshold
-            # If candle volume is less than 60% of threshold, consider it insufficient
-            volume_ratio = tick_volume / threshold
-            logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
-            
-            if volume_ratio < 0.6:  # More lenient check
-                logger.debug(f"Insufficient volume: {tick_volume} < 60% of threshold {threshold:.1f}")
-                return 0  # Insufficient volume
-                
-            # Calculate components
-            is_bullish = candle['close'] > candle['open']
-            total_range = candle['high'] - candle['low']
-            body = abs(candle['close'] - candle['open'])
-            
-            if total_range == 0 or total_range < 0.00001:  # Guard against division by zero
-                logger.debug("Doji or very small candle - neutral volume")
-                return 0  # Doji or similar
-                
-            # Analyze wick structure
-            if is_bullish:
-                upper_wick = candle['high'] - candle['close']
-                lower_wick = candle['open'] - candle['low']
-                
-                upper_wick_ratio = upper_wick / total_range
-                lower_wick_ratio = lower_wick / total_range
-                body_ratio = body / total_range
-                
-                # Debug information
-                logger.debug(f"Bullish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
-                
-                # Bullish cases
-                if body_ratio > 0.6 and lower_wick_ratio < 0.2:
-                    # Strong buying pressure - high quality bullish volume
-                    return 2.0
-                elif body_ratio > 0.4 and lower_wick_ratio < upper_wick_ratio:
-                    # Good buying pressure - moderate quality bullish volume
-                    return 1.0
-                elif upper_wick_ratio > 0.6:
-                    # Large upper wick - poor quality for bulls despite green candle
-                    return -0.5
-                else:
-                    # Average quality bullish volume
-                    return 0.5
-            else:
-                # Bearish candle
-                upper_wick = candle['high'] - candle['open']
-                lower_wick = candle['close'] - candle['low']
-                
-                upper_wick_ratio = upper_wick / total_range
-                lower_wick_ratio = lower_wick / total_range
-                body_ratio = body / total_range
-                
-                # Debug information
-                logger.debug(f"Bearish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
-                
-                # Bearish cases
-                if body_ratio > 0.6 and upper_wick_ratio < 0.2:
-                    # Strong selling pressure - high quality bearish volume
-                    return -2.0
-                elif body_ratio > 0.4 and upper_wick_ratio < lower_wick_ratio:
-                    # Good selling pressure - moderate quality bearish volume
-                    return -1.0
-                elif lower_wick_ratio > 0.6:
-                    # Large lower wick - poor quality for bears despite red candle
-                    return 0.5
-                else:
-                    # Average quality bearish volume
-                    return -0.5
-        except Exception as e:
-            logger.error(f"Error in volume analysis: {str(e)}")
-            return 0  # Safe default
     
     def _find_next_resistance(self, df: pd.DataFrame, current_price: float, 
                              resistance_levels: List[float]) -> Optional[float]:
@@ -3307,203 +2636,98 @@ class BreakoutReversalStrategy(SignalGenerator):
         return max(levels_below)
     
     def _is_morning_star(self, candles: pd.DataFrame, idx: int, in_downtrend: bool = None, require_confirmation: bool = False) -> bool:
-        """
-        Check if the pattern at idx is a morning star pattern with optional trend context and confirmation.
-        
-        A morning star is a three-candle bullish reversal pattern consisting of:
-        1. A large bearish candle
-        2. A small bodied candle (star) that gaps down (or has small/no overlap with first candle)
-        3. A bullish candle that closes well into the first candle's body
-        
-        Args:
-            candles: DataFrame containing price data
-            idx: Index to check for pattern (this is the index of the LAST candle in the pattern)
-            in_downtrend: If True, validates pattern in downtrend (more reliable). If None, only checks pattern shape.
-            require_confirmation: Whether to require confirmation from the next candle
-            
-        Returns:
-            True if a valid morning star with the specified context and confirmation
-        """
-        # Ensure we have enough candles to check the pattern
+        logger.debug(f"Checking morning star pattern at index {idx}")
         if idx < 2 or idx >= len(candles) - (1 if require_confirmation else 0):
+            logger.debug("Not enough candles for morning star pattern")
             return False
-        
-        # Get the three candles for the pattern
-        first = candles.iloc[idx-2]  # First candle (bearish)
-        middle = candles.iloc[idx-1]  # Middle candle (star)
-        last = candles.iloc[idx]     # Last candle (bullish)
-        
-        # Calculate candle bodies and ranges
+
+        first = candles.iloc[idx-2]
+        middle = candles.iloc[idx-1]
+        last = candles.iloc[idx]
+
         first_body = abs(first['close'] - first['open'])
         middle_body = abs(middle['close'] - middle['open'])
         last_body = abs(last['close'] - last['open'])
-        
-        # 1. First candle must be bearish (close < open)
+        logger.debug(f"MorningStar: first_body={first_body}, middle_body={middle_body}, last_body={last_body}")
+
         is_first_bearish = first['close'] < first['open']
-        
-        # 2. Last candle must be bullish (close > open)
         is_last_bullish = last['close'] > last['open']
-        
-        # 3. Middle candle should have a small body
-        # Calculate average body size for recent candles
+        if not is_first_bearish:
+            logger.debug(f"MorningStar: First candle not bearish (open={first['open']}, close={first['close']})")
+        if not is_last_bullish:
+            logger.debug(f"MorningStar: Last candle not bullish (open={last['open']}, close={last['close']})")
+
         lookback = min(14, idx)
-        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx-lookback, idx+1)]
+        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx - lookback, idx + 1)]
         avg_body_size = sum(recent_bodies) / len(recent_bodies)
-        
-        # Make the middle body threshold more stringent (30% instead of 50%)
+        logger.debug(f"MorningStar: avg_body_size={avg_body_size}")
+
         is_middle_small = middle_body < 0.3 * avg_body_size
-        
-        # 4. Check for a gap down or minimal overlap
-        # In forex, true gaps are rare, so we check for minimal overlap
+        if not is_middle_small:
+            logger.debug(f"MorningStar: Middle candle body not small (middle_body={middle_body}, threshold={0.3 * avg_body_size})")
+
         first_low = min(first['open'], first['close'])
         middle_high = max(middle['open'], middle['close'])
-        
-        # Allow for some flexibility in the gap requirement
         is_gap_down = middle_high <= first_low
         has_minimal_overlap = middle_high <= first_low + 0.3 * first_body
-        
-        # 5. Last candle should close well into first candle's body (showing recovery)
-        first_range = first['high'] - first['low']
-        first_midpoint = first['open'] - (first['open'] - first['close']) / 2
-        
-        # Enhanced recovery requirement - close above 61.8% of first candle body
+        if not (is_gap_down or has_minimal_overlap):
+            logger.debug(f"MorningStar: Gap condition not met (middle_high={middle_high}, first_low={first_low})")
+
         first_61_8_level = first['open'] - 0.618 * first_body
         good_recovery = last['close'] > first_61_8_level
-        
-        # 6. Check overall pattern size relative to market volatility
-        # Calculate average range (ATR approximation)
-        recent_ranges = [candles.iloc[i]['high'] - candles.iloc[i]['low'] for i in range(idx-lookback, idx+1)]
-        avg_range = sum(recent_ranges) / len(recent_ranges)
-        
-        # Overall pattern height (high to low)
-        pattern_high = max(first['high'], middle['high'], last['high'])
-        pattern_low = min(first['low'], middle['low'], last['low'])
-        pattern_height = pattern_high - pattern_low
-        
-        # Pattern should be significant relative to recent volatility
-        is_significant_pattern = pattern_height >= 0.8 * avg_range
-        
-        # Combine all conditions for the pattern
-        is_pattern = (is_first_bearish and is_last_bullish and is_middle_small and
-                     (is_gap_down or has_minimal_overlap) and good_recovery and
-                     is_significant_pattern)
-        
-        # If no pattern, return False
-        if not is_pattern:
-            return False
-        
-        # Check trend context if specified
-        if in_downtrend is not None:
-            # Morning star is a bullish reversal pattern and should appear in downtrends
-            if not in_downtrend:
-                return False
-        
-        # Check confirmation if required
-        if require_confirmation and idx < len(candles) - 1:
-            confirmation = candles.iloc[idx+1]
-            if confirmation['close'] <= last['close']:
-                return False
-                
-        return True
+        if not good_recovery:
+            logger.debug(f"MorningStar: Recovery not sufficient (last_close={last['close']}, required > {first_61_8_level})")
+
+        result = is_first_bearish and is_last_bullish and is_middle_small and (is_gap_down or has_minimal_overlap) and good_recovery
+        logger.debug(f"MorningStar: Pattern result = {result}")
+        return result
     
     def _is_evening_star(self, candles: pd.DataFrame, idx: int, in_uptrend: bool = None, require_confirmation: bool = False) -> bool:
-        """
-        Check if the pattern at idx is an evening star pattern with optional trend context and confirmation.
-        
-        An evening star is a three-candle bearish reversal pattern consisting of:
-        1. A large bullish candle
-        2. A small bodied candle (star) that gaps up (or has small/no overlap with first candle)
-        3. A bearish candle that closes well into the first candle's body
-        
-        Args:
-            candles: DataFrame containing price data
-            idx: Index to check for pattern (this is the index of the LAST candle in the pattern)
-            in_uptrend: If True, validates pattern in uptrend (more reliable). If None, only checks pattern shape.
-            require_confirmation: Whether to require confirmation from the next candle
-            
-        Returns:
-            True if a valid evening star with the specified context and confirmation
-        """
-        # Ensure we have enough candles to check the pattern
+        logger.debug(f"Checking evening star pattern at index {idx}")
         if idx < 2 or idx >= len(candles) - (1 if require_confirmation else 0):
+            logger.debug("Not enough candles for evening star pattern")
             return False
-        
-        # Get the three candles for the pattern
-        first = candles.iloc[idx-2]  # First candle (bullish)
-        middle = candles.iloc[idx-1]  # Middle candle (star)
-        last = candles.iloc[idx]     # Last candle (bearish)
-        
-        # Calculate candle bodies and ranges
+
+        first = candles.iloc[idx-2]
+        middle = candles.iloc[idx-1]
+        last = candles.iloc[idx]
+
         first_body = abs(first['close'] - first['open'])
         middle_body = abs(middle['close'] - middle['open'])
         last_body = abs(last['close'] - last['open'])
-        
-        # 1. First candle must be bullish (close > open)
+        logger.debug(f"EveningStar: first_body={first_body}, middle_body={middle_body}, last_body={last_body}")
+
         is_first_bullish = first['close'] > first['open']
-        
-        # 2. Last candle must be bearish (close < open)
         is_last_bearish = last['close'] < last['open']
-        
-        # 3. Middle candle should have a small body
-        # Calculate average body size for recent candles
+        if not is_first_bullish:
+            logger.debug(f"EveningStar: First candle not bullish (open={first['open']}, close={first['close']})")
+        if not is_last_bearish:
+            logger.debug(f"EveningStar: Last candle not bearish (open={last['open']}, close={last['close']})")
+
         lookback = min(14, idx)
-        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx-lookback, idx+1)]
+        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx - lookback, idx + 1)]
         avg_body_size = sum(recent_bodies) / len(recent_bodies)
-        
-        # Make the middle body threshold more stringent (30% instead of 50%)
+        logger.debug(f"EveningStar: avg_body_size={avg_body_size}")
+
         is_middle_small = middle_body < 0.3 * avg_body_size
-        
-        # 4. Check for a gap up or minimal overlap
-        # In forex, true gaps are rare, so we check for minimal overlap
+        if not is_middle_small:
+            logger.debug(f"EveningStar: Middle candle body not small (middle_body={middle_body}, threshold={0.3 * avg_body_size})")
+
         first_high = max(first['open'], first['close'])
         middle_low = min(middle['open'], middle['close'])
-        
-        # Allow for some flexibility in the gap requirement
         is_gap_up = middle_low >= first_high
         has_minimal_overlap = middle_low >= first_high - 0.3 * first_body
-        
-        # 5. Last candle should close well into first candle's body (showing decline)
-        first_midpoint = first['open'] + (first['close'] - first['open']) / 2
-        
-        # Enhanced decline requirement - close below 61.8% of first candle body
+        if not (is_gap_up or has_minimal_overlap):
+            logger.debug(f"EveningStar: Gap condition not met (middle_low={middle_low}, first_high={first_high})")
+
         first_61_8_level = first['open'] + 0.618 * first_body
         good_decline = last['close'] < first_61_8_level
-        
-        # 6. Check overall pattern size relative to market volatility
-        # Calculate average range (ATR approximation)
-        recent_ranges = [candles.iloc[i]['high'] - candles.iloc[i]['low'] for i in range(idx-lookback, idx+1)]
-        avg_range = sum(recent_ranges) / len(recent_ranges)
-        
-        # Overall pattern height (high to low)
-        pattern_high = max(first['high'], middle['high'], last['high'])
-        pattern_low = min(first['low'], middle['low'], last['low'])
-        pattern_height = pattern_high - pattern_low
-        
-        # Pattern should be significant relative to recent volatility
-        is_significant_pattern = pattern_height >= 0.8 * avg_range
-        
-        # Combine all conditions for the pattern
-        is_pattern = (is_first_bullish and is_last_bearish and is_middle_small and
-                     (is_gap_up or has_minimal_overlap) and good_decline and
-                     is_significant_pattern)
-        
-        # If no pattern, return False
-        if not is_pattern:
-            return False
-        
-        # Check trend context if specified
-        if in_uptrend is not None:
-            # Evening star is a bearish reversal pattern and should appear in uptrends
-            if not in_uptrend:
-                return False
-        
-        # Check confirmation if required
-        if require_confirmation and idx < len(candles) - 1:
-            confirmation = candles.iloc[idx+1]
-            if confirmation['close'] >= last['close']:
-                return False
-                
-        return True
+        if not good_decline:
+            logger.debug(f"EveningStar: Decline not sufficient (last_close={last['close']}, required < {first_61_8_level})")
+
+        result = is_first_bullish and is_last_bearish and is_middle_small and (is_gap_up or has_minimal_overlap) and good_decline
+        logger.debug(f"EveningStar: Pattern result = {result}")
+        return result
     
     def _is_strong_candle(self, candle: pd.Series) -> bool:
         """
@@ -3526,338 +2750,195 @@ class BreakoutReversalStrategy(SignalGenerator):
         return bool(body_percentage > 0.5)
     
     def _is_hammer(self, candle: pd.Series, in_downtrend: bool = None, df: pd.DataFrame = None, idx: int = None, require_confirmation: bool = False, atr_filter: bool = True) -> bool:
-        """
-        Check if a candle is a hammer pattern (bullish reversal in downtrend) or 
-        hanging man (bearish reversal in uptrend), with optional confirmation check.
-        
-        Args:
-            candle: Candle data
-            in_downtrend: If True, validates as hammer (bullish). If False, validates as hanging man (bearish).
-                         If None, only checks shape without context.
-            df: DataFrame containing all candles (required for confirmation check)
-            idx: Index of the current candle in df (required for confirmation check)
-            require_confirmation: Whether to require confirmation from the next candle
-            atr_filter: Whether to filter out hammers that are too small compared to ATR
-        
-        Returns:
-            True if it's a hammer/hanging man with the specified context and confirmation (if required)
-        """
-        # Shape detection logic
         total_range = candle['high'] - candle['low']
-        
-        if total_range == 0 or self._is_invalid_or_zero(total_range):
+        if total_range == 0:
             return False
-            
-        # Calculate components regardless of color
         body = abs(candle['close'] - candle['open'])
-        
-        # Find upper and lower wicks correctly regardless of candle color
-        if candle['close'] >= candle['open']:  # Bullish candle
+        if candle['close'] > candle['open']:
             upper_wick = candle['high'] - candle['close']
             lower_wick = candle['open'] - candle['low']
-        else:  # Bearish candle
+        else:
             upper_wick = candle['high'] - candle['open']
             lower_wick = candle['close'] - candle['low']
-        
-        # Hammer criteria: small body, little/no upper wick, long lower wick
         body_percentage = body / total_range
         upper_wick_percentage = upper_wick / total_range
         lower_wick_percentage = lower_wick / total_range
-        
-        # More flexible body threshold based on market conditions
-        # For high volatility periods, allow slightly larger bodies up to 0.4
-        # For normal markets, use standard 0.3 threshold
-        max_body_pct = 0.35  # Slightly more flexible than the strict 0.3
-        
-        # ATR Check - ensure the hammer is significant compared to average volatility
-        # Only perform this check if requested and we have the necessary data
+        logger.debug(f"Hammer: total_range={total_range}, body={body}, upper_wick={upper_wick}, lower_wick={lower_wick}")
+        logger.debug(f"Hammer percentages: body={body_percentage:.2f}, upper_wick={upper_wick_percentage:.2f}, lower_wick={lower_wick_percentage:.2f}")
+        max_body_pct = 0.35
         is_significant_size = True
         if atr_filter and df is not None and idx is not None:
             try:
-                # Calculate ATR for the recent period
-                atr_period = 14
-                if len(df) >= atr_period + 1:
-                    atr_series = calculate_atr(df.iloc[max(0, idx-atr_period):idx+1], atr_period)
-                    
-                    # Get the last ATR value from the series if it's a pandas Series
-                    if isinstance(atr_series, pd.Series) and not atr_series.empty:
-                        atr = atr_series.iloc[-1]  # Get the most recent ATR value as a scalar
-                    else:
-                        atr = atr_series  # It might already be a scalar
-                    
-                    # Ensure atr is a valid scalar value
-                    if not self._is_invalid_or_zero(atr):
-                        # Hammer should be at least 70% of ATR to be significant
-                        is_significant_size = float(total_range) >= (float(atr) * 0.7)
-                        
-                        # Adjust body threshold based on volatility
-                        volatility_ratio = float(total_range) / float(atr)
-                        # More volatile markets (larger candles relative to ATR) can have slightly larger bodies
-                        if volatility_ratio > 1.5:
-                            max_body_pct = 0.4  # Allow larger bodies in volatile conditions
-                        elif volatility_ratio < 0.8:
-                            max_body_pct = 0.25  # Require smaller bodies for less significant hammers
-                        
-                        logger.debug(f"Hammer ATR check: candle range {float(total_range):.5f}, ATR {float(atr):.5f}, "
-                                    f"significant: {is_significant_size}, adjusted body threshold: {max_body_pct:.2f}")
-                    else:
-                        logger.debug(f"Invalid ATR value: {atr}")
+                atr_series = calculate_atr(df.iloc[max(0, idx-14):idx+1], 14)
+                if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                    atr = atr_series.iloc[-1]
+                else:
+                    atr = atr_series
+                if not self._is_invalid_or_zero(atr):
+                    is_significant_size = float(total_range) >= (float(atr) * 0.7)
+                    logger.debug(f"Hammer ATR check: total_range={total_range}, ATR={atr}, significant_size={is_significant_size}")
+                else:
+                    logger.debug("Hammer ATR check failed: invalid ATR")
             except Exception as e:
-                logger.debug(f"Error during ATR calculation for hammer: {str(e)}")
-                # Continue with default parameters if ATR calculation fails
-        
-        # Shape detection with more flexible criteria and size check
-        is_hammer_shape = (
-            body_percentage < max_body_pct and  # More flexible body threshold
-            upper_wick_percentage < 0.15 and    # Slightly more lenient on upper wick
-            lower_wick_percentage > 0.55 and    # Slightly more lenient on lower wick
-            is_significant_size                 # Ensure the hammer is significant compared to ATR
-        )
-
-        # If it's not a hammer shape, return False immediately
+                logger.debug(f"Hammer ATR check exception: {e}")
+        is_hammer_shape = (body_percentage < max_body_pct and upper_wick_percentage < 0.15 and lower_wick_percentage > 0.55 and is_significant_size)
         if not is_hammer_shape:
-            return False
-        
-        # If no trend context provided or we're not requiring confirmation, return shape detection result
-        if in_downtrend is None or (not require_confirmation):
-            return is_hammer_shape
-        
-        # Confirmation check (if required)
-        if require_confirmation:
-            # Ensure we have the necessary data for confirmation
-            if df is None or idx is None or idx >= len(df) - 1:
-                return False
-            
-            # Get the confirmation candle
-            confirmation_candle = df.iloc[idx + 1]
-            
+            logger.debug(f"Hammer condition not met: body_pct={body_percentage:.2f} (<{max_body_pct}), upper_wick_pct={upper_wick_percentage:.2f} (<0.15), lower_wick_pct={lower_wick_percentage:.2f} (>{0.55})")
+        if require_confirmation and df is not None and idx is not None and idx < len(df)-1:
+            confirmation_candle = df.iloc[idx+1]
             if in_downtrend:
-                # Bullish confirmation for hammer
-                return confirmation_candle['close'] > candle['close']
+                if confirmation_candle['close'] <= candle['close']:
+                    logger.debug("Hammer confirmation failed in downtrend")
+                    return False
             else:
-                # Bearish confirmation for hanging man
-                return confirmation_candle['close'] < candle['close']
-        
-        # If we got here, it's a hammer shape with the right context but no confirmation required
-        return True
+                if confirmation_candle['close'] >= candle['close']:
+                    logger.debug("Hanging Man confirmation failed in uptrend")
+                    return False
+        return is_hammer_shape
     
     def _is_shooting_star(self, candles: pd.DataFrame, idx: int, in_uptrend: bool = None, require_confirmation: bool = False) -> bool:
-        """
-        Check if the pattern at the given index is a shooting star.
-        A shooting star is essentially an inverted hammer that appears in an uptrend.
-        
-        Both shooting stars and inverted hammers have the same candlestick shape:
-        - Small body near the bottom of the range
-        - Long upper shadow
-        - Little to no lower shadow
-        
-        The key difference is the market context:
-        - Shooting star: appears in an uptrend and is a bearish reversal signal
-        - Inverted hammer: appears in a downtrend and is a bullish reversal signal
-        
-        Args:
-            candles: DataFrame containing the candle data
-            idx: Index of the candle to check
-            in_uptrend: Whether we're in an uptrend (True), downtrend (False), or unknown (None)
-            require_confirmation: Whether to require confirmation from the next candle
-            
-        Returns:
-            bool: True if the pattern is a valid shooting star, False otherwise
-        """
-        # For a shooting star to be valid, we must be in an uptrend
-        if in_uptrend is False:
-            # Not in an uptrend, so this can't be a shooting star
-            logger.debug(f"Not a shooting star at idx {idx}: not in uptrend")
-            return False
-            
-        # Get the specific candle
-        if idx >= len(candles) or idx < 0:
-            return False
-            
-        candle = candles.iloc[idx]
-        
-        # A shooting star is an inverted hammer in an uptrend (bearish context)
-        # We pass in_downtrend=False to indicate we're NOT in a downtrend (i.e., we are in an uptrend)
-        is_pattern = self._is_inverted_hammer(
-            candle=candle,
-            in_downtrend=False,  # Not in downtrend = in uptrend for shooting star
-            df=candles,
-            idx=idx,
-            require_confirmation=require_confirmation,
-            atr_filter=True
-        )
-        
-        if is_pattern and in_uptrend is None:
-            # Pattern matches but we don't know the trend context
-            logger.warning(f"Shooting star detected at idx {idx} but trend context unknown")
-                
-        return is_pattern
+        logger.debug(f"Checking shooting star pattern at index {idx} with in_uptrend={in_uptrend}")
+        result = self._is_inverted_hammer(candle=candles.iloc[idx], in_downtrend=False, df=candles, idx=idx, require_confirmation=require_confirmation)
+        logger.debug(f"ShootingStar: Pattern result = {result}")
+        return result
     
     def _is_bullish_engulfing(self, candles: pd.DataFrame, idx: int, in_downtrend: bool = None, require_confirmation: bool = False) -> bool:
-        """
-        Check if the pattern at idx is a bullish engulfing pattern with optional trend context and confirmation.
-        
-        A bullish engulfing pattern consists of a bearish candle followed by a bullish candle
-        that completely engulfs the body of the previous candle.
-        
-        Args:
-            candles: DataFrame containing price data
-            idx: Index to check for pattern
-            in_downtrend: If True, validates pattern in downtrend (more reliable). If None, only checks pattern shape.
-            require_confirmation: Whether to require confirmation from the next candle
-            
-        Returns:
-            True if a valid bullish engulfing with the specified context and confirmation
-        """
-        # Ensure we have enough candles to check the pattern
+        logger.debug(f"Checking bullish engulfing pattern at index {idx}")
         if idx <= 0 or idx >= len(candles) - (1 if require_confirmation else 0):
+            logger.debug("Not enough candles for bullish engulfing pattern")
             return False
-            
         current = candles.iloc[idx]
         previous = candles.iloc[idx-1]
-        
-        # Basic pattern check - current candle must be bullish
         is_current_bullish = current['close'] > current['open']
         is_previous_bearish = previous['close'] < previous['open']
-        
-        # Calculate candle bodies and ranges for size comparisons
         current_body = abs(current['close'] - current['open'])
         previous_body = abs(previous['close'] - previous['open'])
-        
-        current_range = current['high'] - current['low']
-        previous_range = previous['high'] - previous['low']
-        
-        # Check if current candle body engulfs previous candle body
-        engulfs_body = (current['open'] <= previous['close'] and 
-                current['close'] >= previous['open'])
-    
-        # New checks for stronger pattern identification
-        # 1. Minimum size requirement - engulfing candle should be significant
-        # Calculate average range for recent candles as a simple ATR approximation
+        engulfs_body = (current['open'] <= previous['close'] and current['close'] >= previous['open'])
+        if not engulfs_body:
+            logger.debug(f"Bullish Engulfing fails: current does not engulf previous (current open={current['open']}, previous close={previous['close']}, current close={current['close']}, previous open={previous['open']})")
         lookback = min(14, idx)
-        if lookback > 0:
-            recent_ranges = [candles.iloc[i]['high'] - candles.iloc[i]['low'] for i in range(idx-lookback, idx+1)]
-            avg_range = sum(recent_ranges) / len(recent_ranges)
-        else:
-            avg_range = current_range
-            
-        min_body_size = 0.5 * avg_range  # Engulfing body should be at least 50% of average range
+        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx - lookback, idx + 1)]
+        avg_body = sum(recent_bodies) / len(recent_bodies) if recent_bodies else 0
+        min_body_size = 0.5 * avg_body
         has_significant_size = current_body >= min_body_size
-        
-        # 2. Relative body size check - engulfing candle should be larger
         relative_body_ratio = current_body / previous_body if previous_body > 0 else 2.0
-        has_larger_body = relative_body_ratio >= 1.3  # At least 30% larger
-        
-        # Combine basic and advanced checks
-        is_pattern = (is_current_bullish and is_previous_bearish and 
-                     engulfs_body and has_significant_size and has_larger_body)
-        
-        # Check trend context if specified
-        if in_downtrend is not None and is_pattern:
-            # Only valid in downtrend for reversal context
-            if not in_downtrend:
-                return False
-                
-        # Check confirmation if required
-        if require_confirmation and is_pattern and idx < len(candles) - 1:
+        has_larger_body = relative_body_ratio >= 1.3
+        logger.debug(f"Bullish Engulfing: current_body={current_body}, avg_body={avg_body}, ratio={relative_body_ratio:.2f}")
+        is_pattern = is_current_bullish and is_previous_bearish and engulfs_body and has_significant_size and has_larger_body
+        if not is_pattern:
+            logger.debug(f"Bullish Engulfing pattern not met: bullish_current={is_current_bullish}, bearish_previous={is_previous_bearish}, engulfs_body={engulfs_body}, significant_size={has_significant_size}, larger_body={has_larger_body}")
+        if require_confirmation and is_pattern and idx < len(candles)-1:
             confirmation = candles.iloc[idx+1]
             if confirmation['close'] <= current['close']:
+                logger.debug("Bullish Engulfing confirmation failed")
                 return False
-            
+        logger.debug(f"BullishEngulfing: Pattern result = {is_pattern}")
         return is_pattern
     
     def _is_bearish_engulfing(self, candles: pd.DataFrame, idx: int, in_uptrend: bool = None, require_confirmation: bool = False) -> bool:
-        """
-        Check if the pattern at idx is a bearish engulfing pattern with optional trend context and confirmation.
-        
-        A bearish engulfing pattern consists of a bullish candle followed by a bearish candle
-        that completely engulfs the body of the previous candle.
-        
-        Args:
-            candles: DataFrame containing price data
-            idx: Index to check for pattern
-            in_uptrend: If True, validates pattern in uptrend (more reliable). If None, only checks pattern shape.
-            require_confirmation: Whether to require confirmation from the next candle
-            
-        Returns:
-            True if a valid bearish engulfing with the specified context and confirmation
-        """
-        # Ensure we have enough candles to check the pattern
+        logger.debug(f"Checking bearish engulfing pattern at index {idx}")
         if idx <= 0 or idx >= len(candles) - (1 if require_confirmation else 0):
+            logger.debug("Not enough candles for bearish engulfing pattern")
             return False
-            
         current = candles.iloc[idx]
         previous = candles.iloc[idx-1]
-        
-        # Basic pattern check - current candle must be bearish
         is_current_bearish = current['close'] < current['open']
         is_previous_bullish = previous['close'] > previous['open']
-        
-        # Calculate candle bodies and ranges for size comparisons
         current_body = abs(current['close'] - current['open'])
         previous_body = abs(previous['close'] - previous['open'])
-        
-        current_range = current['high'] - current['low']
-        previous_range = previous['high'] - previous['low']
-        
-        # Check if current candle body engulfs previous candle body
-        engulfs_body = (current['open'] >= previous['close'] and 
-                current['close'] <= previous['open'])
-        
-        # New checks for stronger pattern identification
-        # 1. Minimum size requirement - engulfing candle should be significant
-        # Calculate average range for recent candles as a simple ATR approximation
+        engulfs_body = (current['open'] >= previous['close'] and current['close'] <= previous['open'])
+        if not engulfs_body:
+            logger.debug(f"Bearish Engulfing fails: current does not engulf previous (current open={current['open']}, previous close={previous['close']}, current close={current['close']}, previous open={previous['open']})")
         lookback = min(14, idx)
-        if lookback > 0:
-            recent_ranges = [candles.iloc[i]['high'] - candles.iloc[i]['low'] for i in range(idx-lookback, idx+1)]
-            avg_range = sum(recent_ranges) / len(recent_ranges)
-        else:
-            avg_range = current_range
-            
-        min_body_size = 0.5 * avg_range  # Engulfing body should be at least 50% of average range
+        recent_bodies = [abs(candles.iloc[i]['close'] - candles.iloc[i]['open']) for i in range(idx - lookback, idx + 1)]
+        avg_body = sum(recent_bodies) / len(recent_bodies) if recent_bodies else 0
+        min_body_size = 0.5 * avg_body
         has_significant_size = current_body >= min_body_size
-        
-        # 2. Relative body size check - engulfing candle should be larger
         relative_body_ratio = current_body / previous_body if previous_body > 0 else 2.0
-        has_larger_body = relative_body_ratio >= 1.3  # At least 30% larger
-        
-        # Combine basic and advanced checks
-        is_pattern = (is_current_bearish and is_previous_bullish and 
-                     engulfs_body and has_significant_size and has_larger_body)
-        
-        # Check trend context if specified
-        if in_uptrend is not None and is_pattern:
-            # Only valid in uptrend for reversal context
-            if not in_uptrend:
-                return False
-                
-        # Check confirmation if required
-        if require_confirmation and is_pattern and idx < len(candles) - 1:
+        has_larger_body = relative_body_ratio >= 1.3
+        logger.debug(f"Bearish Engulfing: current_body={current_body}, avg_body={avg_body}, ratio={relative_body_ratio:.2f}")
+        is_pattern = is_current_bearish and is_previous_bullish and engulfs_body and has_significant_size and has_larger_body
+        if not is_pattern:
+            logger.debug(f"Bearish Engulfing pattern not met: bearish_current={is_current_bearish}, bullish_previous={is_previous_bullish}, engulfs_body={engulfs_body}, significant_size={has_significant_size}, larger_body={has_larger_body}")
+        if require_confirmation and is_pattern and idx < len(candles)-1:
             confirmation = candles.iloc[idx+1]
             if confirmation['close'] >= current['close']:
+                logger.debug("Bearish Engulfing confirmation failed")
                 return False
-            
+        logger.debug(f"BearishEngulfing: Pattern result = {is_pattern}")
         return is_pattern
     
-    def _determine_h1_trend(self, h1_df: pd.DataFrame) -> str:
+    def _is_inverted_hammer(self, candle: pd.Series, in_downtrend: bool = None, df: pd.DataFrame = None, idx: int = None, require_confirmation: bool = False, atr_filter: bool = True) -> bool:
+        logger.debug(f"Checking inverted hammer pattern at index {idx}")
+        total_range = candle['high'] - candle['low']
+        if total_range == 0 or self._is_invalid_or_zero(total_range):
+            logger.debug("InvertedHammer: Invalid total range")
+            return False
+        body = abs(candle['close'] - candle['open'])
+        if candle['close'] >= candle['open']:
+            upper_wick = candle['high'] - candle['close']
+            lower_wick = candle['open'] - candle['low']
+        else:
+            upper_wick = candle['high'] - candle['open']
+            lower_wick = candle['close'] - candle['low']
+        body_percentage = body / total_range
+        upper_wick_percentage = upper_wick / total_range
+        lower_wick_percentage = lower_wick / total_range
+        logger.debug(f"InvertedHammer: total_range={total_range}, body={body}, upper_wick={upper_wick}, lower_wick={lower_wick}")
+        logger.debug(f"InvertedHammer percentages: body={body_percentage:.2f}, upper_wick={upper_wick_percentage:.2f}, lower_wick={lower_wick_percentage:.2f}")
+        max_body_pct = 0.38
+        is_significant_size = True
+        if atr_filter and df is not None and idx is not None:
+            try:
+                atr_series = calculate_atr(df.iloc[max(0, idx-14):idx+1], 14)
+                if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                    atr = atr_series.iloc[-1]
+                else:
+                    atr = atr_series
+                if not self._is_invalid_or_zero(atr):
+                    is_significant_total = float(total_range) >= (float(atr) * 0.7)
+                    is_significant_shadow = float(upper_wick) >= (float(atr) * 0.5)
+                    is_significant_size = is_significant_total and is_significant_shadow
+                    logger.debug(f"InvertedHammer ATR check: total_range={total_range}, ATR={atr}, significant_total={is_significant_total}, significant_shadow={is_significant_shadow}")
+                else:
+                    logger.debug("InvertedHammer ATR check failed: invalid ATR")
+            except Exception as e:
+                logger.debug(f"InvertedHammer ATR check exception: {e}")
+        is_pattern = (body_percentage < max_body_pct and upper_wick_percentage > 0.55 and lower_wick_percentage < 0.15 and is_significant_size)
+        if not is_pattern:
+            logger.debug(f"InvertedHammer condition not met: body_pct={body_percentage:.2f} (< {max_body_pct}), upper_wick_pct={upper_wick_percentage:.2f} (required > 0.55), lower_wick_pct={lower_wick_percentage:.2f} (required < 0.15)")
+        if require_confirmation and df is not None and idx is not None and idx < len(df)-1:
+            confirmation_candle = df.iloc[idx+1]
+            if in_downtrend:
+                if confirmation_candle['close'] <= candle['close']:
+                    logger.debug("InvertedHammer confirmation failed in downtrend")
+                    return False
+            else:
+                if confirmation_candle['close'] >= candle['close']:
+                    logger.debug("InvertedHammer confirmation failed in uptrend")
+                    return False
+        logger.debug(f"InvertedHammer: Pattern result = {is_pattern}")
+        return is_pattern
+    
+    def _determine_higher_timeframe_trend(self, higher_df: pd.DataFrame) -> str:
         """
         Determine the trend on the higher timeframe using price action instead of EMA.
         Uses swing highs and lows to identify the trend direction.
         
         Args:
-            h1_df: Higher timeframe dataframe
+            higher_df: Higher timeframe dataframe
             
         Returns:
             'bullish', 'bearish', or 'neutral'
         """
-        if len(h1_df) < 20:
-            logger.debug(f"⚠️ Not enough data for trend determination, need 20 candles but got {len(h1_df)}")
+        if len(higher_df) < 20:
+            logger.debug(f"⚠️ Not enough data for trend determination, need 20 candles but got {len(higher_df)}")
             return 'neutral'
         
         try:
             # Get a subset of recent data
-            lookback = min(30, len(h1_df))
-            df_subset = h1_df.iloc[-lookback:].copy()
+            lookback = min(30, len(higher_df))
+            df_subset = higher_df.iloc[-lookback:].copy()
             
             # Find swing highs and lows
             swing_highs = []
@@ -3963,9 +3044,9 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.warning(f"Error in trend determination: {str(e)}, falling back to simple method")
             # Simple fallback: compare current close to N periods ago
             try:
-                periods_ago = min(10, len(h1_df) - 1)
-                current_close = float(h1_df['close'].iloc[-1])
-                past_close = float(h1_df['close'].iloc[-periods_ago])
+                periods_ago = min(10, len(higher_df) - 1)
+                current_close = float(higher_df['close'].iloc[-1])
+                past_close = float(higher_df['close'].iloc[-periods_ago])
                 
                 if current_close > past_close * 1.005:  # 0.5% higher
                     return 'bullish'
@@ -4139,4 +3220,95 @@ class BreakoutReversalStrategy(SignalGenerator):
         
         # If we got here, it's an inverted hammer shape with the right context but no confirmation required
         return True
+        # Insert grouping methods for reversal pattern detection
+    def _detect_bullish_reversal_pattern(self, df: pd.DataFrame, idx: int, in_downtrend: bool) -> Optional[str]:
+        candle = df.iloc[idx]
+        patterns = [
+            ("Hammer", lambda: self._is_hammer(candle, in_downtrend=in_downtrend, df=df, idx=idx, require_confirmation=True)),
+            ("Inverted Hammer", lambda: self._is_inverted_hammer(candle, in_downtrend=in_downtrend, df=df, idx=idx, require_confirmation=False)),
+            ("Bullish Engulfing", lambda: self._is_bullish_engulfing(candles=df, idx=idx, in_downtrend=in_downtrend, require_confirmation=False)),
+            ("Morning Star", lambda: self._is_morning_star(candles=df, idx=idx, in_downtrend=in_downtrend, require_confirmation=False)),
+        ]
+        detected_patterns = []
+        for name, func in patterns:
+            if func():
+                detected_patterns.append(name)
+        if detected_patterns:
+            return ", ".join(detected_patterns)
+        return None
+
+    def _detect_bearish_reversal_pattern(self, df: pd.DataFrame, idx: int, in_downtrend: bool) -> Optional[str]:
+        candle = df.iloc[idx]
+        patterns = [
+            ("Shooting Star", lambda: self._is_shooting_star(candles=df, idx=idx, in_uptrend=not in_downtrend, require_confirmation=False)),
+            ("Hanging Man", lambda: self._is_hammer(candle, in_downtrend=not in_downtrend, df=df, idx=idx, require_confirmation=False)),
+            ("Bearish Engulfing", lambda: self._is_bearish_engulfing(candles=df, idx=idx, in_uptrend=not in_downtrend, require_confirmation=False)),
+            ("Evening Star", lambda: self._is_evening_star(candles=df, idx=idx, in_uptrend=not in_downtrend, require_confirmation=False)),
+        ]
+        for name, func in patterns:
+            if func():
+                return name
+        return None
+    
+    def _score_signals(self, raw_signals: List[Dict], primary_df: pd.DataFrame, higher_df: pd.DataFrame) -> List[Dict]:
+        """Score a list of raw signals using SignalScorer and standardize confidence."""
+        scored = []
+        for sig in raw_signals:
+            # preserve original symbol for post-processing
+            sig['original_symbol'] = sig.get('symbol')
+            scored_sig = self._scorer.score_signal(sig, primary_df, higher_df)
+            # Standardized confidence: direct mapping, clamped to [0, 1]
+            scored_sig['confidence'] = max(0.0, min(1.0, scored_sig.get('score', 0)))
+            scored.append(scored_sig)
+        return scored
+
+    def _prepare_dataframes(self, data: Dict[str, Any], symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        # Delegate conversion and indexing
+        primary = self._to_dataframe(data.get(self.primary_timeframe), symbol, self.primary_timeframe)
+        primary = self._ensure_datetime_index(primary, symbol, self.primary_timeframe)
+        higher = self._to_dataframe(data.get(self.higher_timeframe), symbol, self.higher_timeframe)
+        higher = self._ensure_datetime_index(higher, symbol, self.higher_timeframe)
+        return primary, higher
+
+    def _ensure_tick_volume(self, df: pd.DataFrame, symbol: str) -> None:
+        """Ensure df has 'tick_volume' column, falling back to 'volume' or default."""
+        if 'tick_volume' not in df.columns:
+            if 'volume' in df.columns:
+                logger.debug(f"Using 'volume' as 'tick_volume' for {symbol}")
+                df['tick_volume'] = df['volume']
+            else:
+                logger.debug(f"Setting default tick_volume=1 for {symbol}")
+                df['tick_volume'] = 1
+
+    def _compute_volume_threshold(self, df: pd.DataFrame) -> float:
+        """Compute volume threshold based on percentile or fallback to average."""
+        try:
+            lookback = min(50, len(df) - 1)
+            vol = df['tick_volume'].iloc[-lookback:].copy()
+            thresh = float(np.percentile(vol, self.volume_percentile))
+            logger.debug(f"Volume threshold (percentile {self.volume_percentile}): {thresh:.1f}")
+        except Exception as e:
+            logger.warning(f"Volume threshold percentile failed: {e}")
+            try:
+                avg_vol = float(df['tick_volume'].rolling(window=20).mean().iloc[-1])
+                thresh = avg_vol * self.volume_threshold
+                logger.debug(f"Fallback avg volume threshold: {thresh:.1f}")
+            except Exception as e2:
+                logger.warning(f"Volume threshold fallback failed: {e2}")
+                thresh = 1.0
+        return thresh
+
+    def _log_candle_samples(self, df: pd.DataFrame, symbol: str, count: int = 5) -> None:
+        """Log recent candle data for debugging."""
+        n = min(count, len(df))
+        if n <= 0:
+            return
+        logger.debug(f"🕯️ {symbol}: Last {n} candles data sample:")
+        for i in range(-n, 0):
+            c = df.iloc[i]
+            logger.debug(f"   {df.index[i]}: O={c['open']:.5f},H={c['high']:.5f},L={c['low']:.5f},C={c['close']:.5f},Vol={c['tick_volume']}")
+    
+    def _analyze_volume_quality(self, candle: pd.Series, threshold: float) -> float:
+        """Central helper for volume quality analysis."""
+        return self._scorer.analyze_volume_quality(candle, threshold)
     

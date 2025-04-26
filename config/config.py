@@ -23,7 +23,7 @@ TRADING_CONFIG = {
         # Volatility Indices (common format in Deriv/MT5)
         "Volatility 10 Index",
         # "Volatility 25 Index",
-        "Volatility 50 Index",
+        #"Volatility 50 Index",
         #"Volatility 75 Index",
         #"Volatility 100 Index",
         # Crash/Boom Indices
@@ -31,6 +31,8 @@ TRADING_CONFIG = {
         "Crash 500 Index",
         "Crash 1000 Index",
         "Boom 300 Index",
+        "XAUUSD",
+        "BTCUSD",
         # "Boom 500 Index",
         "Boom 1000 Index",
         # Jump Indices
@@ -69,7 +71,7 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
     
     "signal_generators": [ 
-        #"breakout_reversal",
+        "breakout_reversal",
         "confluence_price_action"
     ],
 }
