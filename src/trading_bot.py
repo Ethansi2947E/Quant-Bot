@@ -6,8 +6,6 @@ import MetaTrader5 as mt5  # Add MetaTrader5 import
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Type, Optional, Set
-import pandas as pd
-import numpy as np
 
 from loguru import logger
 
@@ -97,43 +95,13 @@ class TradingBot:
         if not self.config:
             logger.info("No config provided, loading default configuration from config.py")
             from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, MT5_CONFIG, SESSION_CONFIG
-            
             self.config = {
                 "trading": TRADING_CONFIG,
                 "telegram": TELEGRAM_CONFIG,
                 "mt5": MT5_CONFIG,
                 "session": SESSION_CONFIG,
             }
-        
-        # Extract commonly used config sections
         self.trading_config = self.config.get("trading", {})
-        
-        # DEBUG: Check if trading_config is empty and try to fix it
-        if not self.trading_config:
-            logger.warning("trading_config is empty after extraction from self.config. Attempting direct import...")
-            try:
-                from config.config import TRADING_CONFIG
-                # Don't try to modify the config object, just use it
-                self.trading_config = TRADING_CONFIG
-                logger.info(f"Directly loaded TRADING_CONFIG with {len(TRADING_CONFIG.keys()) if isinstance(TRADING_CONFIG, dict) else 0} keys")
-                # Don't try to modify self.config if it's read-only
-                # Create a new dictionary instead
-                try:
-                    self.config = {
-                        "trading": TRADING_CONFIG,
-                        "telegram": self.config.get("telegram", {}),
-                        "mt5": self.config.get("mt5", {}),
-                        "session": self.config.get("session", {})
-                    }
-                    logger.info("Successfully created new config dictionary")
-                except Exception as config_err:
-                    logger.warning(f"Could not create new config dictionary: {str(config_err)}")
-                    # Continue with self.trading_config set properly
-            except Exception as e:
-                logger.error(f"Failed to directly load TRADING_CONFIG: {str(e)}")
-        else:
-            logger.info(f"Loaded trading_config with {len(self.trading_config.keys())} keys")
-        
         self.telegram_config = self.config.get("telegram", {})
         self.mt5_config = self.config.get("mt5", {})
         
@@ -226,10 +194,7 @@ class TradingBot:
         
         # Initialize signal generators
         self.signal_generator_class = signal_generator_class
-        self.signal_generator = None
-        self.available_signal_generators = {}
         self.signal_generators = []  # Initialize the missing signal_generators list
-        self.active_signal_generators = []  # Initialize the missing active_signal_generators list
         self.latest_prices = {}  # Initialize the missing latest_prices dictionary
         self._init_signal_generators(signal_generator_class)
         
@@ -294,105 +259,38 @@ class TradingBot:
 
     def _init_signal_generators(self, default_generator_class: Optional[Type[SignalGenerator]] = None):
         """Initialize signal generators with configuration."""
-        # Use provided signal generator class with fallback to default
         generator_class = default_generator_class or SignalGenerator
-        
-        # Load each signal generator with MT5 handler and risk manager
-        self.primary_signal_generator = generator_class(
-            mt5_handler=self.mt5_handler,
-            risk_manager=self.risk_manager,
-        )
-        
         # Import the strategy classes
         try:
-            # Force direct import of both strategies for reliability
-            try:
-                from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy
-                logger.info("Force imported BreakoutReversalStrategy directly from file")
-                
-                from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy
-                logger.info("Force imported ConfluencePriceActionStrategy directly from file")
-            except ImportError as import_e:
-                logger.error(f"Error force importing strategy classes: {str(import_e)}")
-                
-            # Try importing from strategy module first
-            try:
-                from src.strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
-                logger.info("Successfully imported BreakoutReversalStrategy from strategy module")
-            except ImportError:
-                # Fallback to direct import
-                from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
-                logger.info("Imported BreakoutReversalStrategy directly from file")
-            
-            # Create a dictionary of available signal generators
-            self.available_signal_generators = {"breakout_reversal": BreakoutReversalStrategy}
-            # Import and register ConfluencePriceActionStrategy if available
-            try:
-                from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy  # type: ignore
-                self.available_signal_generators["confluence_price_action"] = ConfluencePriceActionStrategy
-            except ImportError:
-                logger.debug("ConfluencePriceActionStrategy not found or failed import")
-            
-            # Initialize the signal generators list based on config
-            self.signal_generators = []
-            signal_generator_names = self.trading_config.get("signal_generators", ["breakout_reversal"])
-            logger.info(f"Loaded signal_generator_names from trading_config: {signal_generator_names}")
-            
-            # Debug: See what's in the config
-            if not self.trading_config:
-                logger.warning("trading_config is STILL empty, attempting fresh load directly from config.py")
-                try:
-                    # Import directly from config.py 
-                    from config.config import TRADING_CONFIG
-                    signal_generator_names = TRADING_CONFIG.get("signal_generators", ["breakout_reversal"])
-                    logger.info(f"Loaded signal_generators directly from config.py: {signal_generator_names}")
-                    
-                    # Fix the trading_config
-                    self.trading_config = TRADING_CONFIG
-                    self.config["trading"] = TRADING_CONFIG
-                except Exception as e:
-                    logger.error(f"Failed to load TRADING_CONFIG directly: {str(e)}")
-            
-            # Always load from config - our fix for empty config above ensures this works
-            for generator_name in signal_generator_names:
-                if generator_name in self.available_signal_generators:
-                    generator_class = self.available_signal_generators[generator_name]
-                    generator = generator_class(
-                        mt5_handler=self.mt5_handler,
-                        risk_manager=self.risk_manager
-                    )
-                    self.signal_generators.append(generator)
-                    logger.info(f"Loaded signal generator: {generator_name} ({generator.__class__.__name__})")
-                else:
-                    logger.warning(f"Unknown signal generator: {generator_name}")
-            
-            # If no signal generators were loaded, add the BreakoutReversalStrategy as default
-            if not self.signal_generators:
-                # No matching strategy for configured names; warn and do not fallback to breakout
-                logger.error(
-                    f"No signal generators matched config {signal_generator_names}. "
-                    "Ensure 'signal_generators' lists valid keys: "
-                    f"{list(self.available_signal_generators.keys())}"
-                )
-                # Optionally default to first available if desired:
-                # name, cls = next(iter(self.available_signal_generators.items()))
-                # self.signal_generators.append(cls(mt5_handler=self.mt5_handler, risk_manager=self.risk_manager))
-                # logger.warning(f"Defaulting to {name} strategy")
-                
+            from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy
+            from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy
+            self.available_signal_generators = {
+                "breakout_reversal": BreakoutReversalStrategy,
+                "confluence_price_action": ConfluencePriceActionStrategy
+            }
         except ImportError as e:
-            logger.error(f"Error importing signal generators: {str(e)}")
-            # Add the primary generator as fallback
-            if self.primary_signal_generator:
-                self.signal_generators = [self.primary_signal_generator]
-                logger.warning("Using primary signal generator as fallback due to import error")
-            
+            logger.error(f"Error importing strategy classes: {str(e)}")
+            self.available_signal_generators = {}
+        self.signal_generators = []
+        signal_generator_names = self.trading_config.get("signal_generators", ["breakout_reversal"])
+        for generator_name in signal_generator_names:
+            if generator_name in self.available_signal_generators:
+                generator_class = self.available_signal_generators[generator_name]
+                generator = generator_class(
+                    mt5_handler=self.mt5_handler,
+                    risk_manager=self.risk_manager
+                )
+                self.signal_generators.append(generator)
+                logger.info(f"Loaded signal generator: {generator_name} ({generator.__class__.__name__})")
+            else:
+                logger.warning(f"Unknown signal generator: {generator_name}")
+        if not self.signal_generators:
+            logger.error(
+                f"No signal generators matched config {signal_generator_names}. "
+                "Ensure 'signal_generators' lists valid keys: "
+                f"{list(self.available_signal_generators.keys())}"
+            )
         logger.info(f"Initialized {len(self.signal_generators)} signal generators")
-            
-        # Set the active signal generator for legacy code
-        self.active_signal_generator_name = "default"
-        self.active_signal_generator = self.primary_signal_generator
-        
-        # Initialize other components with config
         if hasattr(self.risk_manager, 'initialize'):
             self.risk_manager.initialize(self.config)
 
@@ -1305,31 +1203,6 @@ class TradingBot:
         
         # Ensure no duplicates
         self.symbols = list(dict.fromkeys(self.symbols))
-    
-    def get_analysis_interval(self, timeframe):
-        """
-        Get the minimum time between analyses for a timeframe.
-        
-        Args:
-            timeframe (str): Timeframe identifier (e.g., "M1", "M5", "H1")
-            
-        Returns:
-            float: Minimum time in seconds between analyses
-        """
-        # Default debounce intervals by timeframe
-        default_intervals = {
-            "M1": 10,   # Every 10 seconds for M1
-            "M5": 30,   # Every 30 seconds for M5
-            "M15": 60,  # Every minute for M15
-            "M30": 120, # Every 2 minutes for M30
-            "H1": 300,  # Every 5 minutes for H1
-            "H4": 900,  # Every 15 minutes for H4
-            "D1": 3600  # Every hour for D1
-        }
-        
-        # Use custom intervals if defined, otherwise use defaults
-        return self.analysis_debounce_intervals.get(timeframe, default_intervals.get(timeframe, 60))
-    
     
     def analyze_session(self):
         """

@@ -1,10 +1,6 @@
-import os
-import json
 import time
 from datetime import datetime, timedelta, UTC
 import math
-import logging
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Tuple, Any, TYPE_CHECKING
 from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, RISK_MANAGER_CONFIG
 from loguru import logger

@@ -390,7 +390,7 @@ class SignalProcessor:
                 # Skip signals without confidence
                 confidence_check_start = time.time()
                 confidence = signal.get("confidence", 0)
-                confidence_threshold = 0.60  # Minimum 60% confidence
+                confidence_threshold = 0.50  # Minimum 50% confidence
                 
                 if confidence < confidence_threshold:
                     logger.debug(f"Signal for {symbol} has low confidence ({confidence:.2f}). Skipping.")

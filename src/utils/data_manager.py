@@ -189,6 +189,7 @@ class DataManager:
         Returns:
             Updated DataFrame or None if update failed
         """
+        logger.debug(f"[DataManager] update_data: symbol={symbol}, timeframe={timeframe}, force={force}")
         now = time.time()
         key = f"{symbol}_{timeframe}"
         
@@ -277,6 +278,7 @@ class DataManager:
         Returns:
             DataFrame containing market data or None if not available
         """
+        logger.debug(f"[DataManager] get_data: symbol={symbol}, timeframe={timeframe}, force_update={force_update}")
         if force_update:
             return self.update_data(symbol, timeframe, force=True)
         

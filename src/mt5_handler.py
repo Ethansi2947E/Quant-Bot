@@ -53,19 +53,9 @@ _mt5_handler_instance = None
 
 class MT5Handler:
     def __init__(self):
-        global _mt5_handler_instance
-        # If an instance already exists, use it
-        if _mt5_handler_instance is not None:
-            logger.info("Using existing MT5Handler instance instead of creating a new one")
-            # Copy attributes from existing instance
-            self.__dict__ = _mt5_handler_instance.__dict__
-            return
-        
-        _mt5_handler_instance = self
         self.connected = False
         self.initialize()
         self._last_error = None  # Add error tracking
-        
         # Initialize risk manager reference
         self.risk_manager = None
     
@@ -171,6 +161,7 @@ class MT5Handler:
         timeframe: str,
         num_candles: int = 1000
     ) -> Optional[pd.DataFrame]:
+        logger.debug(f"[MT5Handler] get_market_data: symbol={symbol}, timeframe={timeframe}, num_candles={num_candles}")
         """
         Get market data for a symbol and timeframe.
         
@@ -739,29 +730,6 @@ class MT5Handler:
                 logger.info("MT5 connection closed")
             except Exception as e:
                 logger.error(f"Error during MT5 shutdown: {str(e)}")
-    
-    def __del__(self):
-        """Cleanup MT5 connection - but only when explicitly requested or at final program termination."""
-        try:
-            # Skip all destructor shutdowns except during complete program termination
-            # This helps prevent connection issues during normal operations
-            if not sys.is_finalizing():
-                logger.debug("Skipping MT5 shutdown in __del__ during normal operation")
-                return
-                
-            # Only shutdown if actually connected
-            if hasattr(self, 'connected') and self.connected:
-                try:
-                    if hasattr(mt5, 'shutdown'):
-                        mt5.shutdown()
-                    logger.info("MT5 connection closed during program termination")
-                except Exception as e:
-                    if not sys.is_finalizing():
-                        logger.error(f"Error during MT5 shutdown in __del__: {str(e)}")
-        except Exception as e:
-            # Don't log during interpreter shutdown
-            if not sys.is_finalizing():
-                logger.error(f"Error in MT5Handler.__del__: {str(e)}")
 
     def modify_position(self, ticket: int, new_sl: float, new_tp: float) -> bool:
         """Modify the stop loss and take profit of an open position using the MT5 API."""
@@ -2172,159 +2140,6 @@ class MT5Handler:
         except Exception as e:
             logger.error(f"Error getting last tick for {symbol}: {str(e)}")
             return None
-    
-    def check_price_movement(self, symbol: str, lookback_period: int = 5, threshold_percent: float = 0.1) -> Dict[str, Any]:
-        """
-        Check if a symbol's price has moved significantly since the last check.
-        
-        Args:
-            symbol: Symbol to check price movement for
-            lookback_period: Number of minutes to look back for comparison
-            threshold_percent: Percentage threshold to determine significant movement
-            
-        Returns:
-            Dictionary with price movement information:
-            {
-                "symbol": Symbol name,
-                "current_bid": Current bid price,
-                "current_ask": Current ask price,
-                "previous_bid": Bid price from lookback_period ago,
-                "previous_ask": Ask price from lookback_period ago,
-                "bid_change_percent": Percentage change in bid price,
-                "ask_change_percent": Percentage change in ask price,
-                "significant_movement": Boolean indicating if movement exceeds threshold,
-                "direction": "up", "down", or "sideways" based on bid price movement
-            }
-        """
-        try:
-            if not self.connected:
-                logger.error("MT5 not connected")
-                return self._create_default_movement_result(symbol)
-            
-            # Get current tick data
-            current_tick = self.get_last_tick(symbol)
-            if current_tick is None:
-                logger.error(f"Failed to get current tick data for {symbol}")
-                return self._create_default_movement_result(symbol)
-                
-            # Get historical M1 data for the lookback period
-            now = datetime.now()
-            start_time = now - timedelta(minutes=lookback_period)
-            
-            # Get historical data for comparison
-            historical_data = self.get_historical_data(symbol, "M1", start_time, now)
-            if historical_data is None or len(historical_data) == 0:
-                logger.warning(f"No historical data available for {symbol}, using last tick only")
-                return self._create_default_movement_result(symbol)
-                
-            # Get first candle's open price as the previous price
-            previous_bid = historical_data.iloc[0]['open']
-            previous_ask = previous_bid + historical_data.iloc[0]['spread'] * mt5.symbol_info(symbol).point if 'spread' in historical_data.columns else previous_bid
-            
-            # Current prices
-            current_bid = current_tick['bid']
-            current_ask = current_tick['ask']
-            
-            # Calculate percentage changes
-            bid_change_percent = ((current_bid - previous_bid) / previous_bid) * 100 if previous_bid > 0 else 0
-            ask_change_percent = ((current_ask - previous_ask) / previous_ask) * 100 if previous_ask > 0 else 0
-            
-            # Determine movement significance and direction
-            significant_movement = abs(bid_change_percent) >= threshold_percent
-            
-            direction = "sideways"
-            if bid_change_percent > 0:
-                direction = "up"
-            elif bid_change_percent < 0:
-                direction = "down"
-                
-            return {
-                "symbol": symbol,
-                "current_bid": current_bid,
-                "current_ask": current_ask,
-                "previous_bid": previous_bid,
-                "previous_ask": previous_ask,
-                "bid_change_percent": bid_change_percent,
-                "ask_change_percent": ask_change_percent,
-                "significant_movement": significant_movement,
-                "direction": direction,
-                "lookback_period_minutes": lookback_period,
-                "threshold_percent": threshold_percent
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking price movement for {symbol}: {str(e)}")
-            logger.error(traceback.format_exc())
-            return self._create_default_movement_result(symbol)
-            
-    def _create_default_movement_result(self, symbol: str) -> Dict[str, Any]:
-        """Create a default price movement result when data is unavailable."""
-        return {
-            "symbol": symbol,
-            "current_bid": 0,
-            "current_ask": 0,
-            "previous_bid": 0,
-            "previous_ask": 0,
-            "bid_change_percent": 0,
-            "ask_change_percent": 0,
-            "significant_movement": False,
-            "direction": "unknown",
-            "lookback_period_minutes": 0,
-            "threshold_percent": 0,
-            "error": True
-        }
-
-    def get_all_symbols_lot_info(self, symbols=None):
-        """
-        Get lot size information for all symbols or specified symbols.
-        
-        Args:
-            symbols (list, optional): List of symbols to check. If None, check all available symbols.
-            
-        Returns:
-            dict: Dictionary with symbol names as keys and lot size info as values
-        """
-        if not self.connected:
-            logger.error("MT5 not connected")
-            return {}
-            
-        result = {}
-        
-        try:
-            # If no symbols provided, get all available symbols
-            if symbols is None:
-                symbols_info = mt5.symbols_get()
-                symbols = [symbol.name for symbol in symbols_info]
-            
-            # Process each symbol
-            for symbol in symbols:
-                # Try to select the symbol
-                if not mt5.symbol_select(symbol, True):
-                    logger.warning(f"Could not select symbol {symbol}")
-                    continue
-                    
-                symbol_info = mt5.symbol_info(symbol)
-                if not symbol_info:
-                    logger.warning(f"Could not get info for symbol {symbol}")
-                    continue
-                
-                # Extract lot size information
-                result[symbol] = {
-                    "min_lot": symbol_info.volume_min,
-                    "max_lot": symbol_info.volume_max,
-                    "lot_step": symbol_info.volume_step,
-                    "contract_size": symbol_info.trade_contract_size,
-                    "digits": symbol_info.digits,
-                    "point": symbol_info.point,
-                    "currency_profit": symbol_info.currency_profit
-                }
-                
-            logger.info(f"Retrieved lot information for {len(result)} symbols")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error getting symbols lot information: {str(e)}")
-            return {}
 
     def get_symbol_filling_mode(self, symbol: str) -> int:
         """
@@ -2362,14 +2177,6 @@ class MT5Handler:
             logger.error(f"Error determining filling mode for {symbol}: {str(e)}")
             logger.error(traceback.format_exc())
             return mt5.ORDER_FILLING_FOK  # Default to FOK
-
-    def get_account_info(self) -> Dict[str, Any]:
-        """Get account information from MT5"""
-        
-        account_info = mt5.account_info()
-        if account_info is None:
-            logger.error("Failed to get account info")
-            return {}
 
     def is_symbol_available(self, symbol: str) -> bool:
         """

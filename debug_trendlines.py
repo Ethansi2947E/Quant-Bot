@@ -41,7 +41,7 @@ async def debug_trendlines():
     symbols = ["XAGUSD", "ETHUSD", "EURUSD"]
     
     # Choose timeframes
-    primary_tf = "M15"
+    primary_tf = "M5"
     higher_tf = "H1"
     
     # Initialize the strategy
@@ -58,7 +58,7 @@ async def debug_trendlines():
         market_data[symbol] = {}
         
         # Get primary timeframe data (last 1000 candles)
-        primary_data = mt5_handler.get_market_data(symbol, primary_tf, 200)
+        primary_data = mt5_handler.get_market_data(symbol, primary_tf, 1000)
         higher_data = mt5_handler.get_market_data(symbol, higher_tf, 200)
         
         if primary_data is not None and higher_data is not None:

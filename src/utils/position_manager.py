@@ -104,9 +104,13 @@ class PositionManager:
                     position_type = self._get_position_type(position)
                     current_sl = position.get("sl", 0.0)
                     current_tp = position.get("tp", 0.0)
-                    entry_price = position.get("price_open", 0.0)
-                    current_price = position.get("price_current", 0.0)
+                    entry_price = position.get("open_price", 0.0)
+                    current_price = position.get("current_price", 0.0)
                     profit = position.get("profit", 0.0)
+                    
+                    # Defensive: Warn if entry_price is 0.0
+                    if entry_price == 0.0:
+                        logger.warning(f"Position {symbol} #{ticket} has open_price=0.0! This will break trailing stop logic.")
                     
                     # Ensure we have accurate price data
                     if current_price == 0.0:
@@ -123,7 +127,7 @@ class PositionManager:
                             if current_price == 0.0 and isinstance(tick, dict):
                                 current_price = tick['ask'] if position_type == "buy" and 'ask' in tick else tick['bid'] if 'bid' in tick else 0.0
                                 
-                            position["price_current"] = current_price
+                            position["current_price"] = current_price
                             logger.debug(f"Updated {symbol} #{ticket} with current price {current_price}")
                     
                     logger.debug(f"Managing position #{ticket}: {symbol} {position_type} at {entry_price}, Current: {current_price}, SL: {current_sl}, TP: {current_tp}, P/L: {profit}")
@@ -195,8 +199,8 @@ class PositionManager:
             ticket = position.get("ticket", 0)
             symbol = position.get("symbol", "")
             position_type = self._get_position_type(position)
-            entry_price = position.get("price_open", 0.0)
-            current_price = position.get("price_current", 0.0)
+            entry_price = position.get("open_price", 0.0)
+            current_price = position.get("current_price", 0.0)
             current_sl = position.get("sl", 0.0)
             
             # Get the trailing step size
@@ -512,7 +516,7 @@ class PositionManager:
                                 ticket=ticket,
                                 symbol=symbol,
                                 action="CLOSED",
-                                price=position.get("price_current", 0.0),
+                                price=position.get("current_price", 0.0),
                                 profit=position.get("profit", 0.0),
                                 reason="Bot shutdown"
                             )
@@ -650,7 +654,7 @@ class PositionManager:
             for position in positions:
                 ticket = position.get("ticket", 0)
                 position_type = self._get_position_type(position)
-                entry_price = position.get("price_open", 0.0)
+                entry_price = position.get("open_price", 0.0)
                 
                 # Skip invalid positions
                 if not ticket:
@@ -661,7 +665,7 @@ class PositionManager:
                 market_price = ask_price if position_type == "buy" else bid_price
                 
                 # Update position with current market price
-                position["price_current"] = market_price
+                position["current_price"] = market_price
                 
                 # Add detailed logging
                 logger.info(f"Position #{ticket}: Type={position_type}, Entry={entry_price}, Current={market_price}")
@@ -669,7 +673,7 @@ class PositionManager:
                 # Update the position in our tracking
                 if ticket in self.active_trades:
                     # Update current price in our tracked position
-                    self.active_trades[ticket]["price_current"] = market_price
+                    self.active_trades[ticket]["current_price"] = market_price
                     logger.debug(f"Updated tracked position #{ticket} with current price {market_price}")
                     
                     # Calculate current profit
