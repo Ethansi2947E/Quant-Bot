@@ -121,7 +121,10 @@ class PositionManager:
                         tick = tick_cache[symbol]
                         if tick:
                             # Use appropriate price based on position type
-                            current_price = tick.get('ask', 0.0) if position_type == "buy" else tick.get('bid', 0.0)
+                            if isinstance(tick, dict):
+                                current_price = tick.get('ask', 0.0) if position_type == "buy" else tick.get('bid', 0.0)
+                            else:
+                                current_price = getattr(tick, 'ask', 0.0) if position_type == "buy" else getattr(tick, 'bid', 0.0)
                             
                             # If still zero, try accessing as dictionary with bracket notation
                             if current_price == 0.0 and isinstance(tick, dict):
@@ -209,16 +212,66 @@ class PositionManager:
             trail_step_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_points', 
                              TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_step_pips', 20))
             
+            # Get break even config
+            break_even_enabled = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_enabled', True)
+            break_even_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_pips', 5)
+            break_even_buffer_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_buffer_pips', 0.5)
+
             # Get pip value for this symbol using the utility function
             pip_value = calculate_pip_value(symbol, mt5_handler=self.mt5_handler)
             
             # Calculate trailing step in price
             trail_step = trail_step_pips * pip_value
+            break_even_threshold = break_even_pips * pip_value
+            break_even_buffer = break_even_buffer_pips * pip_value
             
             # Get minimum stop level from MT5
             min_stop_distance = self.mt5_handler.get_min_stop_distance(symbol)
             
             logger.debug(f"Minimum stop distance for {symbol}: {min_stop_distance}")
+            
+            # --- Break Even Logic ---
+            if break_even_enabled:
+                if position_type == "buy":
+                    profit = current_price - entry_price
+                    # Only move SL to break even if profit threshold reached and SL is below entry
+                    if profit >= break_even_threshold and current_sl < entry_price:
+                        new_sl = entry_price + break_even_buffer
+                        # Ensure new SL is not too close to current price
+                        min_valid_sl = current_price - min_stop_distance
+                        if new_sl > min_valid_sl:
+                            logger.debug(f"Adjusted break even SL from {new_sl} to {min_valid_sl} to respect minimum distance ({min_stop_distance})")
+                            new_sl = min_valid_sl
+                        if new_sl > current_sl + (0.1 * pip_value):
+                            success = self.mt5_handler.modify_position(
+                                ticket=ticket,
+                                new_sl=new_sl,
+                                new_tp=position.get("tp", 0.0)
+                            )
+                            if success:
+                                logger.info(f"Moved SL to break even for BUY {symbol} #{ticket}: {current_sl} -> {new_sl}")
+                                return True
+                            else:
+                                logger.warning(f"Failed to move SL to break even for BUY {symbol} #{ticket} from {current_sl} to {new_sl}")
+                elif position_type == "sell":
+                    profit = entry_price - current_price
+                    if profit >= break_even_threshold and (current_sl > entry_price or current_sl == 0.0):
+                        new_sl = entry_price - break_even_buffer
+                        min_valid_sl = current_price + min_stop_distance
+                        if new_sl < min_valid_sl:
+                            logger.debug(f"Adjusted break even SL from {new_sl} to {min_valid_sl} to respect minimum distance ({min_stop_distance})")
+                            new_sl = min_valid_sl
+                        if new_sl < current_sl - (0.1 * pip_value) or current_sl == 0.0:
+                            success = self.mt5_handler.modify_position(
+                                ticket=ticket,
+                                new_sl=new_sl,
+                                new_tp=position.get("tp", 0.0)
+                            )
+                            if success:
+                                logger.info(f"Moved SL to break even for SELL {symbol} #{ticket}: {current_sl} -> {new_sl}")
+                                return True
+                            else:
+                                logger.warning(f"Failed to move SL to break even for SELL {symbol} #{ticket} from {current_sl} to {new_sl}")
             
             # Initialize tracking if needed
             if ticket not in self.trailing_stop_data:
@@ -633,23 +686,12 @@ class PositionManager:
             latest_tick = self.mt5_handler.get_last_tick(symbol)
             
             # Improved tick data handling for both object and dictionary formats
-            bid_price = current_price
-            ask_price = current_price
-            
-            if latest_tick:
-                try:
-                    # First try object attribute access
-                    if hasattr(latest_tick, 'bid') and hasattr(latest_tick, 'ask'):
-                        bid_price = latest_tick.bid
-                        ask_price = latest_tick.ask
-                    # Then try dictionary access
-                    elif isinstance(latest_tick, dict):
-                        bid_price = latest_tick.get('bid', current_price)
-                        ask_price = latest_tick.get('ask', current_price)
-                    
-                    logger.debug(f"Got latest tick for {symbol}: Bid={bid_price}, Ask={ask_price}")
-                except Exception as e:
-                    logger.warning(f"Error accessing tick data for {symbol}: {str(e)}. Using fallback price.")
+            if isinstance(latest_tick, dict):
+                bid_price = latest_tick.get('bid', current_price)
+                ask_price = latest_tick.get('ask', current_price)
+            else:
+                bid_price = getattr(latest_tick, 'bid', current_price)
+                ask_price = getattr(latest_tick, 'ask', current_price)
             
             for position in positions:
                 ticket = position.get("ticket", 0)

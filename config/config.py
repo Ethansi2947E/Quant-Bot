@@ -20,31 +20,16 @@ MT5_CONFIG = {
 # Trading Configuration
 TRADING_CONFIG = {
     "symbols": [
-        # Volatility Indices (common format in Deriv/MT5)
         "Volatility 10 Index",
-        # "Volatility 25 Index",
-        #"Volatility 50 Index",
-        #"Volatility 75 Index",
-        #"Volatility 100 Index",
-        # Crash/Boom Indices
-        #"Crash 300 Index",
         "Crash 500 Index",
         "Crash 1000 Index",
         "Boom 300 Index",
         "XAUUSD",
         "BTCUSD",
-        # "Boom 500 Index",
         "Boom 1000 Index",
-        # Jump Indices
-        #"Jump 10 Index",
-        #"Jump 25 Index",
         "Jump 50 Index",
         "Jump 75 Index",
-        #"Jump 100 Index",
-        # Step Indices
         "Step Index",
-        # Range Break Indices
-        #"Range Break 100 Index",
         "Range Break 200 Index",
     ],
     "fixed_lot_size": 0.05,  # Fixed lot size to use if use_fixed_lot_size is true
@@ -62,7 +47,7 @@ TRADING_CONFIG = {
     "data_management": {
         "use_direct_fetch": True,      # Use direct fetching for all timeframes
         "real_time_bars_count": 10,    # Number of recent bars to fetch for validation
-        "price_tolerance": 0.02,       # 2% price tolerance for validation (increased from 0.0003/0.03%)
+        "price_tolerance": 0.0003,       # 2% price tolerance for validation (increased from 0.0003/0.03%)
         "validate_trades": True,       # Validate trades against real-time data before execution
         "tick_delay_tolerance": 2.0,   # Maximum allowed tick delay in seconds
     },
@@ -71,22 +56,22 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
     
     "signal_generators": [ 
-        "breakout_reversal",
-        "confluence_price_action"
+        "confluence_price_action",
+        "breakout_reversal"
     ],
 }
 
 # Telegram Configuration
 TELEGRAM_CONFIG = {
        "token": os.getenv("TELEGRAM_BOT_TOKEN"),
-       "allowed_users": [int(id) for id in os.getenv("TELEGRAM_ALLOWED_USERS").split(",")],
+       "allowed_users": [int(id) for id in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",") if id.strip()],
        "enabled": True
 }
 
 # Logging Configuration
 LOG_CONFIG = {
     "format": "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-    "level": "DEBUG",
+    "level": "INFO",
     # No file logging settings
     "use_file_logging": False
 }
@@ -123,7 +108,7 @@ SESSION_CONFIG: Dict[str, Dict[str, Any]] = {
 }
    
 # Risk Management Configuration
-def get_risk_config(timeframe="M15"):
+def get_risk_config():
     # Return the same configuration regardless of timeframe
     return {
         'max_daily_trades': 15,
@@ -160,21 +145,7 @@ POSITION_CONFIG = {
     }
 }
 
-# Market Condition Filters
-def get_market_filters(timeframe="M15"):
-    # Return standardized filters regardless of timeframe
-    return {
-        'min_daily_range': 0.0008,
-        'max_daily_range': 0.0150,
-        'min_volume_threshold': 400,
-        'max_spread_threshold': 20.0,
-        'correlation_threshold': 0.60,
-        'trend_strength_min': 0.40,
-        'volatility_percentile': 0.10,
-        'momentum_threshold': 0.008,
-        'structure_quality_min': 0.60,
-        'min_confirmations': 2
-    }
+
 
 # Trade Exit Configuration
 TRADE_EXIT_CONFIG = {
@@ -193,53 +164,17 @@ TRADE_EXIT_CONFIG = {
         'buffer_pips': 2,         # Buffer in pips to avoid unnecessary updates
         'auto_sl_setup': True,    # Auto-setup a stop loss if none exists
         'auto_sl_percent': 0.02,  # Auto-setup stop loss at 2% from entry if none exists
+        # --- Break Even Logic ---
+        'break_even_enabled': True,  # Enable/disable break even move
+        'break_even_pips': 5,       # Move SL to break even after 5 pips in profit
+        'break_even_buffer_pips': 0.5, # Add a small buffer to break even SL
     }
 }
 
-# Volatility Thresholds
-def get_volatility_config(timeframe="M15"):
-    # Return standard volatility setting regardless of timeframe
-    return 1.2
 
-# Pattern Detector Configuration
-def get_pattern_detector_config(timeframe="M15"):
-    # Return standard pattern detection settings regardless of timeframe
-    min_sweep_factor = 1.0
-    min_sweep_pips = 3.0 * min_sweep_factor
-    max_sweep_pips = 30.0 * min_sweep_factor
-    
-    return {
-        # Core parameters
-        'min_sweep_pips': min_sweep_pips,
-        'max_sweep_pips': max_sweep_pips,
-        'minimum_volume_ratio': 1.2,
-        'equal_level_threshold': 0.0001,
-        'ob_threshold': 0.0015,
-        'fvg_threshold': 0.00015,
-        'liquidity_threshold': 0.0020,
-        'manipulation_threshold': 0.0015,
-        
-        # Pattern-specific thresholds
-        'amd_pattern': {
-            'min_volume_ratio': 1.2,
-            'lookback_period': 20
-        },
-        
-        'turtle_soup': {
-            'min_sweep_pips': min_sweep_pips,
-            'max_sweep_pips': max_sweep_pips,
-            'atr_multiplier': 0.5
-        },
-        
-        'sh_bms_rto': {
-            'equal_level_threshold': 0.0001,
-            'liquidity_threshold': 0.0015,
-            'max_rto_bars': 12
-        }
-    }
 
 # Risk Manager Configuration
-def get_risk_manager_config(timeframe="M15"):
+def get_risk_manager_config():
     # Return the same configuration regardless of timeframe
     return {
         # Core risk parameters
@@ -313,32 +248,8 @@ def get_risk_manager_config(timeframe="M15"):
     }
 
 # Create a default RISK_MANAGER_CONFIG for imports
-RISK_MANAGER_CONFIG = get_risk_manager_config("M15")
+RISK_MANAGER_CONFIG = get_risk_manager_config()
 
-# Timeframe Configuration
-TIMEFRAME_CONFIG = {
-    "supported_timeframes": ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"],
-    "update_frequencies": {
-        "M1": 60,     # Update every 60 seconds
-        "M5": 300,    # Update every 5 minutes
-        "M15": 900,   # Update every 15 minutes
-        "M30": 1800,  # Update every 30 minutes
-        "H1": 3600,   # Update every hour
-        "H4": 14400,  # Update every 4 hours
-        "D1": 86400,  # Update every day
-        "W1": 604800  # Update every week
-    },
-    "disabled_timeframes": [],  # Timeframes to disable globally
-    "max_lookback_bars": {
-        "M1": 10000,
-        "M5": 5000,
-        "M15": 3000,
-        "M30": 2000,
-        "H1": 1500,
-        "H4": 1000,
-        "D1": 500,
-        "W1": 200
-    }
-}
+
 
 

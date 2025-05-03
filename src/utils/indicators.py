@@ -80,11 +80,11 @@ def calculate_rsi(
     if data is None or data.empty or len(data) < period + 1:
         return pd.Series(dtype=float)
         
-    delta = data[column].diff()
+    delta = data[column].diff().astype(float)
     
     # Make two series: one for gains, one for losses
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    gain = delta.where(delta > 0, 0.0).astype(float)
+    loss = -delta.where(delta < 0, 0.0).astype(float)
     
     # First average gain and loss
     avg_gain = gain.rolling(window=period).mean()
@@ -99,12 +99,20 @@ def calculate_rsi(
         
     for i in range(period, len(gain)):
         if hasattr(avg_gain, 'iloc'):
-            avg_gain.iloc[i] = (avg_gain.iloc[i-1] * (period-1) + gain.iloc[i]) / period
-            avg_loss.iloc[i] = (avg_loss.iloc[i-1] * (period-1) + loss.iloc[i]) / period
+            avg_gain_prev = float(avg_gain.iloc[i-1])
+            gain_val = float(gain.iloc[i])
+            avg_gain.iloc[i] = (avg_gain_prev * (period-1) + gain_val) / period
+            avg_loss_prev = float(avg_loss.iloc[i-1])
+            loss_val = float(loss.iloc[i])
+            avg_loss.iloc[i] = (avg_loss_prev * (period-1) + loss_val) / period
         else:
             # Fallback for numpy arrays
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+            avg_gain_prev = float(avg_gain[i-1])
+            gain_val = float(gain[i])
+            avg_gain[i] = (avg_gain_prev * (period-1) + gain_val) / period
+            avg_loss_prev = float(avg_loss[i-1])
+            loss_val = float(loss[i])
+            avg_loss[i] = (avg_loss_prev * (period-1) + loss_val) / period
     
     # Calculate RS and RSI
     rs = avg_gain / avg_loss

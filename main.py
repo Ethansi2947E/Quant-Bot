@@ -12,7 +12,7 @@ from loguru import logger
 
 # Initialize logging with console output only, no file logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Set the default level to INFO
+    level=logging.INFO,  # Set the default level to INFO
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -60,7 +60,7 @@ class InterceptHandler(logging.Handler):
 
         # Find caller from where originated the logged message
         frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        while frame is not None and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
@@ -73,7 +73,7 @@ logger.remove()  # Remove default handlers
 logger.add(
     sys.stderr,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="DEBUG",  # Changed from INFO to DEBUG
+    level="INFO",  # Changed from INFO to DEBUG
     colorize=True,
     # Remove enqueue parameter to avoid logging errors
     diagnose=False,  # Disable traceback to reduce log volume
@@ -123,14 +123,8 @@ async def main():
         logging.info(f"Using MT5 server: {MT5_CONFIG['server']}")
         logging.info(f"Using MT5 login: {MT5_CONFIG['login']}")
         
-        # Ensure any existing MT5 connections are closed
-        try:
-            if hasattr(mt5, 'shutdown'):
-                mt5.shutdown()
-                logging.info("Shut down any existing MT5 connections")
-        except Exception as e:
-            logging.warning(f"Error during initial MT5 shutdown: {str(e)}")
-            # Ignore errors here but log them
+        # No shutdown method in MetaTrader5; nothing to do here
+        logging.info("No MT5 shutdown method; skipping explicit shutdown.")
         
         # Create config object with all necessary configurations
         class Config:
@@ -170,7 +164,7 @@ async def main():
         )
         
         # Create trading bot instance
-        trading_bot = TradingBot(config)
+        trading_bot = TradingBot(config.__dict__)
         
         # Start the trading bot - now returns a future that completes when the bot should shut down
         logging.info("Starting trading bot...")
@@ -213,14 +207,6 @@ async def main():
             except Exception as e:
                 logging.error(f"Error stopping bot: {str(e)}")
                 logging.error(traceback.format_exc())
-        
-        # Shutdown MT5 as a last resort
-        try:
-            if hasattr(mt5, 'shutdown'):
-                mt5.shutdown()
-                logging.info("MT5 connection closed")
-        except Exception as e:
-            logging.error(f"Error shutting down MT5: {str(e)}")
             
         logging.info("Bot shutdown complete")
 

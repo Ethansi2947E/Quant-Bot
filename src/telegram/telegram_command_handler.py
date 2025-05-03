@@ -94,9 +94,10 @@ class TelegramCommandHandler:
                 from telegram.ext import CallbackQueryHandler
                 
                 # Add callback query handler for inline buttons
-                telegram_bot.application.add_handler(
-                    CallbackQueryHandler(self.handle_callback_query)
-                )
+                if telegram_bot.application:
+                    telegram_bot.application.add_handler(
+                        CallbackQueryHandler(self.handle_callback_query)
+                    )
                 
                 logger.info("Registered callback query handler for interactive buttons")
                 
@@ -239,19 +240,6 @@ class TelegramCommandHandler:
                     self.trading_bot.handle_shutdown_command
                 )
             
-            # Timeframe commands
-            if "set_timeframe" not in self.command_handlers and hasattr(self.trading_bot, 'handle_set_timeframe_command'):
-                await telegram_bot.register_command_handler(
-                    "set_timeframe",
-                    self.trading_bot.handle_set_timeframe_command
-                )
-            
-            # Dashboard commands if they exist
-            if hasattr(self.trading_bot, 'handle_start_dashboard_command') and "startdashboard" not in self.command_handlers:
-                await telegram_bot.register_command_handler(
-                    "startdashboard",
-                    self.trading_bot.handle_start_dashboard_command
-                )
             
             logger.info("Successfully registered telegram commands")
             
@@ -599,7 +587,11 @@ class TelegramCommandHandler:
             import MetaTrader5 as mt5
             
             # Get deals for the specified period
-            deals = mt5.history_deals_get(start_date, end_date)
+            if hasattr(mt5, "history_deals_get"):
+                deals = mt5.history_deals_get(start_date, end_date)
+            else:
+                logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
+                return "⚠️ <b>MT5 Python package is outdated or incompatible. Please upgrade MetaTrader5 to use trade history features.</b>"
             
             if not deals or len(deals) == 0:
                 return f"📊 <b>Performance Summary</b>\n\nNo trades found in the last {days} days."
@@ -829,8 +821,12 @@ class TelegramCommandHandler:
             def count_trades(from_date, to_date=None):
                 if not to_date:
                     to_date = today
-                    
-                deals = mt5.history_deals_get(from_date, to_date)
+                
+                if hasattr(mt5, "history_deals_get"):
+                    deals = mt5.history_deals_get(from_date, to_date)
+                else:
+                    logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
+                    return 0, 0, 0, 0
                 
                 if not deals:
                     return 0, 0, 0, 0
@@ -938,13 +934,18 @@ class TelegramCommandHandler:
             import MetaTrader5 as mt5
             
             # Connect to MT5 if not already connected
-            if not mt5.terminal_info():
+            if hasattr(mt5, "terminal_info") and not mt5.terminal_info():
                 logger.info("Initializing MT5 connection")
-                mt5.initialize()
+                if hasattr(mt5, "initialize"):
+                    mt5.initialize()
             
             # Get deals for the specified period
             logger.info(f"Requesting MT5 history deals for {days} day(s)")
-            deals = mt5.history_deals_get(start_date, end_date)
+            if hasattr(mt5, "history_deals_get"):
+                deals = mt5.history_deals_get(start_date, end_date)
+            else:
+                logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
+                return "⚠️ <b>MT5 Python package is outdated or incompatible. Please upgrade MetaTrader5 to use trade history features.</b>"
             
             if deals is None:
                 logger.error("MT5 returned None for history_deals_get")
@@ -1158,12 +1159,13 @@ class TelegramCommandHandler:
                     last_update = self.trading_bot.telegram_bot.last_update
                     if last_update is not None and hasattr(last_update, "effective_chat") and last_update.effective_chat is not None:
                         chat_id = last_update.effective_chat.id
-                        await self.trading_bot.telegram_bot.bot.send_message(
-                            chat_id=chat_id,
-                            text="📅 <b>Select a date range for trade history:</b>",
-                            reply_markup=reply_markup,
-                            parse_mode="HTML"
-                        )
+                        if self.trading_bot.telegram_bot.bot is not None:
+                            await self.trading_bot.telegram_bot.bot.send_message(
+                                chat_id=chat_id,
+                                text="📅 <b>Select a date range for trade history:</b>",
+                                reply_markup=reply_markup,
+                                parse_mode="HTML"
+                            )
                         return ""  # Return empty string since we sent a separate message
                     else:
                         logger.error("Cannot show history UI: last_update is None or missing effective_chat")
@@ -1200,7 +1202,11 @@ class TelegramCommandHandler:
                     import MetaTrader5 as mt5
                     
                     # Get deals directly - these contain the actual profit information
-                    deals = mt5.history_deals_get(start_date, end_date)
+                    if hasattr(mt5, "history_deals_get"):
+                        deals = mt5.history_deals_get(start_date, end_date)
+                    else:
+                        logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
+                        deals = None
                     
                     if deals is not None and len(deals) > 0:
                         logger.info(f"Found {len(deals)} deals in MT5 history")
@@ -1344,9 +1350,9 @@ class TelegramCommandHandler:
                         # Then calculate pips based on trade direction
                         for idx, row in df.iterrows():
                             if 'type' in df.columns and row['type'] == 'BUY':
-                                df.loc[idx, 'pips'] = (row['exit_price'] - row['entry']) * 10000
+                                df.at[idx, 'pips'] = (row['exit_price'] - row['entry']) * 10000
                             else:
-                                df.loc[idx, 'pips'] = (row['entry'] - row['exit_price']) * 10000
+                                df.at[idx, 'pips'] = (row['entry'] - row['exit_price']) * 10000
                         
                         # Now that pips are calculated, determine the result for each trade
                         df['result'] = 'BREAK EVEN'  # Default value
@@ -1440,29 +1446,38 @@ class TelegramCommandHandler:
                                 chat_id = last_update.effective_chat.id
                                 
                                 # Send initial message
-                                await self.trading_bot.telegram_bot.bot.send_message(
-                                    chat_id=chat_id,
-                                    text="⏳ <b>Sending files, please wait...</b>",
-                                    parse_mode='HTML'
-                                )
+                                if self.trading_bot.telegram_bot.bot is not None:
+                                    await self.trading_bot.telegram_bot.bot.send_message(
+                                        chat_id=chat_id,
+                                        text="⏳ <b>Sending files, please wait...</b>",
+                                        parse_mode='HTML'
+                                    )
+                                else:
+                                    logger.error("Telegram bot instance is None, cannot send message.")
                                 
                                 # Send CSV file
-                                with open(csv_filename, 'rb') as csv_file:
-                                    await self.trading_bot.telegram_bot.bot.send_document(
-                                        chat_id=chat_id,
-                                        document=csv_file,
-                                        filename=os.path.basename(csv_filename),
-                                        caption="📊 Trade History (CSV format)"
-                                    )
+                                if self.trading_bot.telegram_bot.bot is not None:
+                                    with open(csv_filename, 'rb') as csv_file:
+                                        await self.trading_bot.telegram_bot.bot.send_document(
+                                            chat_id=chat_id,
+                                            document=csv_file,
+                                            filename=os.path.basename(csv_filename),
+                                            caption="📊 Trade History (CSV format)"
+                                        )
+                                else:
+                                    logger.error("Telegram bot instance is None, cannot send CSV document.")
                                 
                                 # Send Excel file
-                                with open(excel_filename, 'rb') as excel_file:
-                                    await self.trading_bot.telegram_bot.bot.send_document(
-                                        chat_id=chat_id,
-                                        document=excel_file,
-                                        filename=os.path.basename(excel_filename),
-                                        caption="📈 Trade History with Summary (Excel format)"
-                                    )
+                                if self.trading_bot.telegram_bot.bot is not None:
+                                    with open(excel_filename, 'rb') as excel_file:
+                                        await self.trading_bot.telegram_bot.bot.send_document(
+                                            chat_id=chat_id,
+                                            document=excel_file,
+                                            filename=os.path.basename(excel_filename),
+                                            caption="📈 Trade History with Summary (Excel format)"
+                                        )
+                                else:
+                                    logger.error("Telegram bot instance is None, cannot send Excel document.")
                                 
                                 logger.info(f"Successfully sent history files to chat ID: {chat_id}")
                                 return success_msg + "\n\n✅ <b>Files have been sent to this chat.</b>"

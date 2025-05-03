@@ -345,7 +345,7 @@ Details: {str(context.error)}"""
                 "🔧 System Settings": "system_settings"
             }
             
-            if message_text in category_map:
+            if isinstance(message_text, str) and message_text in category_map:
                 category = category_map[message_text]
                 await self.show_command_keyboard(update, context, category)
                 return
@@ -474,8 +474,7 @@ Details: {str(context.error)}"""
             ]
         }
         
-        # If a specific category is requested, return that submenu
-        if category in category_commands:
+        if isinstance(category, str) and category in category_commands and category in categories:
             keyboard = []
             # Add category title
             keyboard.append([KeyboardButton(f"{categories[category]}")])
@@ -483,7 +482,6 @@ Details: {str(context.error)}"""
             keyboard.extend(category_commands[category])
             # Add back button
             keyboard.append([KeyboardButton("⬅️ Back to Main Menu")])
-            
             return ReplyKeyboardMarkup(
                 keyboard,
                 resize_keyboard=True,

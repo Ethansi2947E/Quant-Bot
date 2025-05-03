@@ -39,7 +39,7 @@ class SignalProcessor:
         
         # State tracking
         self.active_trades = {}
-        self.min_confidence = self.config.get("min_confidence", 0.5)  # Default to 50% confidence
+        self.min_confidence = self.config.get("min_confidence", 0.6)  # Default to 60% confidence
         # Import TRADING_CONFIG for key settings to ensure we always use the current values
         from config.config import TRADING_CONFIG
         # Use TRADING_CONFIG directly for this sensitive setting
@@ -131,7 +131,7 @@ class SignalProcessor:
         if config:
             self.config = config
             # Update derived values
-            self.min_confidence = self.config.get("min_confidence", 0.5)
+            self.min_confidence = self.config.get("min_confidence", 0.6)
             # Always get the latest value from TRADING_CONFIG
             from config.config import TRADING_CONFIG
             self.allow_position_additions = TRADING_CONFIG.get("allow_position_additions", False)
@@ -384,13 +384,16 @@ class SignalProcessor:
             signal_start_time = time.time()
             symbol = signal.get("symbol", "Unknown")
             direction = signal.get("direction", "Unknown")
+            if direction is None:
+                logger.warning(f"Missing direction for signal for {symbol}")
+                continue
             logger.debug(f"[TIMING] 🔍 Processing signal {i+1}/{len(signals)}: {symbol} {direction} at {signal_start_time:.6f}")
             
             try:
                 # Skip signals without confidence
                 confidence_check_start = time.time()
                 confidence = signal.get("confidence", 0)
-                confidence_threshold = 0.50  # Minimum 50% confidence
+                confidence_threshold = 0.30  # Minimum 66% confidence
                 
                 if confidence < confidence_threshold:
                     logger.debug(f"Signal for {symbol} has low confidence ({confidence:.2f}). Skipping.")
@@ -464,8 +467,8 @@ class SignalProcessor:
                     existing_symbol_positions = all_positions_by_symbol[symbol]
                     # Check if any positions are in the same direction
                     same_dir_positions = [p for p in existing_symbol_positions if 
-                                         (p.get("type") == 0 and direction.lower() == "buy") or
-                                         (p.get("type") == 1 and direction.lower() == "sell")]
+                                         (p.get("type") == 0 and (direction or "").lower() == "buy") or
+                                         (p.get("type") == 1 and (direction or "").lower() == "sell")]
                     
                     if same_dir_positions:
                         logger.warning(f"🚨 SAFETY BLOCK: Found {len(same_dir_positions)} existing positions for {symbol} in {direction} direction - additions disabled")
@@ -522,6 +525,9 @@ class SignalProcessor:
                     
                     # Store the processed signal to avoid duplicates
                     self._add_processed_signal(signal)
+                    # --- RiskManager state update: trade opened ---
+                    if self.risk_manager:
+                        self.risk_manager.on_trade_opened(signal)
                 else:
                     signal["status"] = "failed"
                     signal["error"] = result.get("message", "Unknown error")
@@ -574,8 +580,8 @@ class SignalProcessor:
         all_positions = self.mt5_handler.get_open_positions() if self.mt5_handler else []
         symbol_positions = [p for p in all_positions if p.get("symbol") == symbol]
         same_direction_positions = [p for p in symbol_positions if 
-                                  (p.get("type") == 0 and direction.lower() == "buy") or 
-                                  (p.get("type") == 1 and direction.lower() == "sell")]
+                                  (p.get("type") == 0 and (direction or "").lower() == "buy") or 
+                                  (p.get("type") == 1 and (direction or "").lower() == "sell")]
         
         # Log existing positions information
         logger.warning(f"⚠️ TRADE EXECUTION: Found {len(all_positions)} total positions")
@@ -704,12 +710,12 @@ class SignalProcessor:
             if entry_price == 0:
                 current_tick = self.mt5_handler.get_last_tick(symbol)
                 if current_tick:
-                    entry_price = current_tick['bid'] if direction.upper() == 'SELL' else current_tick['ask']
+                    entry_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
                     
             # Get current market price for price deviation check
             current_tick = self.mt5_handler.get_last_tick(symbol)
             if current_tick:
-                current_price = current_tick['bid'] if direction.upper() == 'SELL' else current_tick['ask']
+                current_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
                 # Check for significant price deviation (> 0.5%)
                 original_entry = signal.get('entry_price', 0)
                 if original_entry > 0 and abs(current_price - original_entry) / original_entry > 0.005:
@@ -730,7 +736,7 @@ class SignalProcessor:
                     logger.info(f"Using fixed position size: {position_size} lots")
                 else:
                     # Risk-based calculation using account info
-                    account_balance = account_info.get('balance', 10000)  # Default if not available
+                    account_balance = account_info.get('balance', 10000) if account_info else 10000  # Default if not available
                     
                     # Use RiskManager to calculate position size if available
                     if self.risk_manager:
@@ -766,7 +772,7 @@ class SignalProcessor:
                 'price': entry_price,
                 'sl': stop_loss,
                 'tp': take_profit,
-                'type': direction.upper(),
+                'type': (direction or "").upper(),
                 'comment': signal.get('reason', 'Signal trade'),
                 'position_id': signal.get('position_id', 0),  # For position modifications
                 'is_addition': is_addition
@@ -778,7 +784,7 @@ class SignalProcessor:
             # MT5Handler doesn't have place_order but has place_market_order
             order_result = self.mt5_handler.place_market_order(
                 symbol=symbol,
-                order_type=direction.upper(),
+                order_type=(direction or "").upper(),
                 volume=position_size,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
@@ -791,8 +797,10 @@ class SignalProcessor:
             
             if order_result:
                 # Success
-                logger.info(f"✅ Trade executed: {symbol} {direction} {position_size} lots")
-                
+                logger.info(f"✅ Trade executed: {symbol} {(direction or "")} {position_size} lots")
+                # --- RiskManager state update: trade opened ---
+                if self.risk_manager:
+                    self.risk_manager.on_trade_opened(signal)
                 # Build notification with strategy and detailed score breakdown
                 strategy_name = signal.get('source', signal.get('generator', 'Unknown'))
                 # Prepare analysis text
@@ -820,7 +828,7 @@ class SignalProcessor:
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {direction.upper()}\n"
+                        f"🔹 Direction: {(direction or "").upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
@@ -849,7 +857,7 @@ class SignalProcessor:
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {direction.upper()}\n"
+                        f"🔹 Direction: {(direction or "").upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
@@ -883,7 +891,7 @@ class SignalProcessor:
                     await self.telegram_bot.send_message(
                         f"❌ Trade Execution Failed\n\n"
                         f"Symbol: {symbol}\n"
-                        f"Direction: {direction.upper()}\n"
+                        f"Direction: {(direction or "").upper()}\n"
                         f"Error: {error_message}\n"
                         f"Code: {error_code}"
                     )
@@ -1187,13 +1195,15 @@ class SignalProcessor:
         original_sl = signal.get("stop_loss")
         original_tp = signal.get("take_profit")
         
-        # Exit early if any essential value is missing
-        if not all([symbol, direction, original_entry, original_sl, original_tp, current_price]):
-            logger.warning(f"Cannot recalculate TP/SL for {symbol} - missing required values")
+        # Exit early if any of the essential values is missing
+        if original_entry is None or original_sl is None or original_tp is None:
+            logger.warning(f"Cannot recalculate TP/SL for {signal.get('symbol', 'Unknown')} - missing values")
             return signal
-            
-        # Calculate original risk and reward in points
-        if direction.lower() == "buy":
+        # Ensure numeric type
+        original_entry = float(original_entry)
+        original_sl = float(original_sl)
+        original_tp = float(original_tp)
+        if (direction or "").lower() == "buy":
             original_risk = original_entry - original_sl
             original_reward = original_tp - original_entry
         else:  # sell
@@ -1209,7 +1219,7 @@ class SignalProcessor:
         
         # Calculate new SL and TP based on current price, maintaining the same R:R ratio
         updated_signal = signal.copy()
-        if direction.lower() == "buy":
+        if (direction or "").lower() == "buy":
             new_sl = current_price - original_risk
             new_tp = current_price + (original_risk * original_rr_ratio)
         else:  # sell

@@ -20,6 +20,7 @@ from loguru import logger
 import asyncio
 from datetime import datetime
 from src.mt5_handler import MT5Handler
+import copy
 
 class DataManager:
     """
@@ -102,6 +103,10 @@ class DataManager:
             "H4": 3600,  # Validate H4 data every hour
         }
         self.last_validation = {}  # Track when each symbol-timeframe combo was last validated
+        
+        # --- NEW: requirements registry ---
+        # Format: { (symbol, timeframe): lookback }
+        self.requirements = {}
         
         logger.info("DataManager initialized with direct MT5 fetching")
     
@@ -525,4 +530,95 @@ class DataManager:
             return int(timeframe[1:]) * 86400
         elif timeframe.startswith('W'):
             return int(timeframe[1:]) * 604800
-        return 60  # Default to 1 minute 
+        return 60  # Default to 1 minute
+
+    def register_timeframe(self, symbol: str, timeframe: str, lookback: int):
+        """
+        Register a (symbol, timeframe, lookback) requirement from a strategy.
+        Ensures the cache is preloaded with the required lookback.
+        """
+        key = (symbol, timeframe)
+        prev_lookback = self.requirements.get(key, 0)
+        if lookback > prev_lookback:
+            self.requirements[key] = lookback
+        else:
+            # Already registered with sufficient lookback
+            lookback = prev_lookback
+        # Preload cache if needed
+        if symbol not in self.data_cache:
+            self.data_cache[symbol] = {}
+        df = self.data_cache[symbol].get(timeframe)
+        needs_fetch = df is None or len(df) < lookback
+        if needs_fetch:
+            logger.info(f"Preloading {lookback} bars for {symbol}/{timeframe} from MT5 for strategy registration")
+            df = self.mt5_handler.get_market_data(symbol, timeframe, lookback)
+            if df is not None:
+                df = self._preprocess_data(df, symbol, timeframe)
+                self.data_cache[symbol][timeframe] = df
+                self.last_update[f"{symbol}_{timeframe}"] = time.time()
+            else:
+                logger.warning(f"Failed to preload data for {symbol}/{timeframe}")
+
+    # --- NEW: Append-only cache update and last candle tracking ---
+    async def update_on_tick(self, symbol: str):
+        """
+        For each registered timeframe for the symbol, check if a new candle has formed.
+        If so, fetch and append the new bar to the cache.
+        """
+        if not hasattr(self, 'last_candle_time'):
+            self.last_candle_time = {}  # {(symbol, timeframe): last_datetime}
+        if not hasattr(self, '_locks'):
+            self._locks = {}  # {symbol: asyncio.Lock}
+        if symbol not in self._locks:
+            self._locks[symbol] = asyncio.Lock()
+        async with self._locks[symbol]:
+            for (sym, timeframe), lookback in self.requirements.items():
+                if sym != symbol:
+                    continue
+                # Get the last candle time in cache
+                df = self.data_cache.get(symbol, {}).get(timeframe)
+                last_time = None
+                if df is not None and not df.empty:
+                    last_time = df.index[-1]
+                self.last_candle_time[(symbol, timeframe)] = last_time
+                # Fetch the latest bar from MT5 (just 2 bars for safety)
+                latest_df = self.mt5_handler.get_market_data(symbol, timeframe, 2)
+                if latest_df is None or latest_df.empty:
+                    logger.warning(f"No data returned for {symbol}/{timeframe} on tick update")
+                    continue
+                latest_df = self._preprocess_data(latest_df, symbol, timeframe)
+                latest_bar_time = latest_df.index[-1]
+                # If new bar, append it
+                if last_time is None or latest_bar_time > last_time:
+                    logger.info(f"New candle detected for {symbol}/{timeframe} at {latest_bar_time}")
+                    # Append only the new bar(s)
+                    new_bars = latest_df[latest_df.index > last_time] if last_time is not None else latest_df
+                    if df is not None and not df.empty:
+                        updated_df = pd.concat([df, new_bars])
+                        # Drop duplicates just in case
+                        updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+                    else:
+                        updated_df = new_bars
+                    # Trim to max lookback
+                    max_lookback = self.requirements[(symbol, timeframe)]
+                    if len(updated_df) > max_lookback:
+                        updated_df = updated_df.iloc[-max_lookback:]
+                    self.data_cache[symbol][timeframe] = updated_df
+                    self.last_candle_time[(symbol, timeframe)] = updated_df.index[-1]
+                    self.last_update[f"{symbol}_{timeframe}"] = time.time()
+                else:
+                    logger.debug(f"No new candle for {symbol}/{timeframe} (last: {last_time}, latest: {latest_bar_time})")
+
+    # --- NEW: Data retrieval API (deepcopy) ---
+    def get_data_window(self, symbol: str, timeframe: str, lookback: int) -> pd.DataFrame:
+        """
+        Return a deepcopy of the latest N bars from the cache for (symbol, timeframe).
+        If not enough data, return as much as available.
+        """
+        df = self.data_cache.get(symbol, {}).get(timeframe)
+        if df is None or df.empty:
+            logger.warning(f"No cached data for {symbol}/{timeframe} in get_data_window")
+            return pd.DataFrame()
+        # Get the latest N bars
+        window = df.iloc[-lookback:] if lookback > 0 else df.copy()
+        return copy.deepcopy(window) 

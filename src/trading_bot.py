@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Type, Optional, Set
 
 from loguru import logger
+import copy
 
 # Import custom modules
 from src.mt5_handler import MT5Handler
@@ -112,9 +113,8 @@ class TradingBot:
         self.mt5_handler = MT5Handler()
         
         # Verify MT5 connection is working
-        if not self.mt5_handler.connected:
-            if self.mt5_handler.initialize():
-                logger.info("MT5 connection established during initialization")
+        if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
+            self.mt5_handler.initialize()
         
         # Track connection status
         self.mt5_connected = self.mt5_handler.connected
@@ -130,10 +130,6 @@ class TradingBot:
         self.risk_manager = RiskManager(
             mt5_handler=self.mt5_handler
         )
-        
-        # Set the risk_manager on the MT5Handler
-        self.mt5_handler.risk_manager = self.risk_manager
-        logger.info(f"Set RiskManager on MT5Handler to ensure proper position sizing")
         
         # Initialize data manager
         self.data_manager = DataManager(
@@ -194,9 +190,8 @@ class TradingBot:
         
         # Initialize signal generators
         self.signal_generator_class = signal_generator_class
-        self.signal_generators = []  # Initialize the missing signal_generators list
+        self.signal_generators = []
         self.latest_prices = {}  # Initialize the missing latest_prices dictionary
-        self._init_signal_generators(signal_generator_class)
         
         # Set state tracking variables
         self.close_positions_on_shutdown = self.config.get('close_positions_on_shutdown', False)
@@ -230,14 +225,11 @@ class TradingBot:
         self.ny_timezone = pytz.timezone('America/New_York')
         
         # Signal thresholds
-        self.min_confidence = self.trading_config.get("min_confidence", 0.5)  # Default to 50% confidence
+        self.min_confidence = self.trading_config.get("min_confidence", 0.6)  # Default to 60% confidence
         
         # Trade management
         self.trailing_stop_enabled = True
         self.trailing_stop_data = {}  # Store trailing stop data for open positions
-        
-        # Central market data storage
-        self.market_data_cache = {}
         
         logger.info("TradingBot initialized with enhanced multi-timeframe analysis capabilities")
 
@@ -249,50 +241,194 @@ class TradingBot:
             self.mt5_handler = MT5Handler()
             logger.info(f"Created new MT5Handler instance")
             
-        # Set the risk_manager on the MT5Handler
-        self.mt5_handler.risk_manager = self.risk_manager
-        logger.info(f"Set RiskManager on MT5Handler")
-
         # Initialize MT5 connection (if not already connected)
-        if not self.mt5_handler.is_connected():
-            self.initialize_mt5()
+        if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
+            self.mt5_handler.initialize()
 
-    def _init_signal_generators(self, default_generator_class: Optional[Type[SignalGenerator]] = None):
-        """Initialize signal generators with configuration."""
-        generator_class = default_generator_class or SignalGenerator
-        # Import the strategy classes
-        try:
-            from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy
-            from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy
-            self.available_signal_generators = {
-                "breakout_reversal": BreakoutReversalStrategy,
-                "confluence_price_action": ConfluencePriceActionStrategy
-            }
-        except ImportError as e:
-            logger.error(f"Error importing strategy classes: {str(e)}")
-            self.available_signal_generators = {}
-        self.signal_generators = []
-        signal_generator_names = self.trading_config.get("signal_generators", ["breakout_reversal"])
-        for generator_name in signal_generator_names:
-            if generator_name in self.available_signal_generators:
-                generator_class = self.available_signal_generators[generator_name]
-                generator = generator_class(
-                    mt5_handler=self.mt5_handler,
-                    risk_manager=self.risk_manager
-                )
-                self.signal_generators.append(generator)
-                logger.info(f"Loaded signal generator: {generator_name} ({generator.__class__.__name__})")
-            else:
-                logger.warning(f"Unknown signal generator: {generator_name}")
+        self.main_loop_task = None
+        self._monitor_trades_task = None
+        self.data_fetch_task = None
+        self.queue_processor_task = None
+
+        # Log config order at the very start
+        logger.info(f"[TRACE INIT] Initial config signal_generators order: {self.config.get('trading', {}).get('signal_generators', 'NOT FOUND')}")
+        # Log config order after extracting trading_config
+        logger.info(f"[TRACE INIT] trading_config signal_generators order: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
+
+    # --- NEW: Tick listener/dispatcher ---
+    async def tick_event_loop(self):
+        """
+        Background task: For each registered symbol, call update_on_tick every 2 seconds.
+        Trigger ALL strategies in self.signal_generators for each symbol/timeframe.
+        Adds detailed diagnostic logging for debugging.
+        """
+        import traceback as tb
         if not self.signal_generators:
-            logger.error(
-                f"No signal generators matched config {signal_generator_names}. "
-                "Ensure 'signal_generators' lists valid keys: "
-                f"{list(self.available_signal_generators.keys())}"
-            )
-        logger.info(f"Initialized {len(self.signal_generators)} signal generators")
-        if hasattr(self.risk_manager, 'initialize'):
-            self.risk_manager.initialize(self.config)
+            logger.error("No signal generators loaded! Cannot start tick_event_loop.")
+            return
+        # Log which strategies will be used
+        logger.info(f"[TICK LOOP] Using {len(self.signal_generators)} strategies: {[s.__class__.__name__ for s in self.signal_generators]}")
+        last_seen_candle = {}  # {(symbol, timeframe, strategy_name): last_datetime}
+        while not getattr(self, 'shutdown_requested', False):
+            try:
+                logger.debug(f"tick_event_loop: symbols={self.symbols}, time={datetime.now()}")
+                symbols = set(sym for (sym, tf) in getattr(self.data_manager, 'requirements', {}).keys())
+                for symbol in symbols:
+                    await self.data_manager.update_on_tick(symbol)
+                
+                # Iterate over all loaded strategies
+                for strategy in self.signal_generators:
+                    strategy_name = strategy.__class__.__name__
+                    required_timeframes = getattr(strategy, 'required_timeframes', [])
+                    primary_tf = getattr(strategy, 'primary_timeframe', required_timeframes[0] if required_timeframes else None)
+                    
+                    logger.info(f"[TICK LOOP] Processing strategy: {strategy_name}")
+                    
+                    if not required_timeframes:
+                        logger.debug(f"Skipping {strategy_name}: required_timeframes is empty")
+                        continue
+                    if not primary_tf:
+                        logger.debug(f"Skipping {strategy_name}: primary_timeframe is not set")
+                        continue
+                        
+                    lookback_periods = getattr(strategy, 'lookback_periods', {})
+                    default_lookback = getattr(strategy, 'lookback_period', 100)
+                    
+                    for symbol in self.symbols:
+                        if symbol not in symbols:
+                            logger.debug(f"Symbol {symbol} not in requirements, skipping for {strategy_name}.")
+                            continue
+                            
+                        # Use a unique key for last seen candle per strategy
+                        last_seen_key = (symbol, primary_tf, strategy_name)
+                        last_time = self.data_manager.last_candle_time.get((symbol, primary_tf))
+                        prev_time = last_seen_candle.get(last_seen_key)
+                        
+                        logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time={last_time}, prev_time={prev_time}")
+                        
+                        if last_time is None:
+                            logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time is None, skipping.")
+                            continue
+                        if last_time == prev_time:
+                            logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time == prev_time ({last_time}), skipping.")
+                            continue
+                            
+                        logger.info(f"Triggering {strategy_name} for {symbol}/{primary_tf} at {last_time}")
+                        
+                        # Gather all required data windows for this symbol/strategy
+                        market_data = {symbol: {}}
+                        missing_data = False
+                        for tf in required_timeframes:
+                            lb = lookback_periods.get(tf, default_lookback)
+                            df = self.data_manager.get_data_window(symbol, tf, lb)
+                            if df is None or df.empty:
+                                logger.warning(f"Missing data for {symbol}/{tf} (needed for {strategy_name})")
+                                missing_data = True
+                                break  # Break if any required timeframe data is missing
+                            market_data[symbol][tf] = df
+                        
+                        # Skip signal generation if data is missing
+                        if missing_data:
+                            logger.warning(f"Skipping signal generation for {strategy_name} on {symbol}/{primary_tf} due to missing data")
+                            continue
+                        
+                        # Call generate_signals
+                        try:
+                            signals = await strategy.generate_signals(
+                                market_data=copy.deepcopy(market_data),
+                                symbol=symbol,
+                                timeframe=primary_tf,
+                                skip_plots=True  # Ensure plots are skipped during live trading
+                            )
+                            if signals:
+                                logger.info(f"Strategy {strategy_name} generated {len(signals)} signals for {symbol}/{primary_tf}")
+                            else:
+                                logger.info(f"Strategy {strategy_name} returned no signals for {symbol}/{primary_tf}")
+                            await self.process_signals(signals)
+                        except Exception as e:
+                            logger.error(f"Error in strategy {strategy_name} generate_signals: {str(e)}\n{tb.format_exc()}")
+                        
+                        # Update last seen for this specific strategy
+                        last_seen_candle[last_seen_key] = last_time
+                        
+                # End of strategy loop
+                await asyncio.sleep(2)
+            
+            except Exception as e:
+                logger.error(f"Error in tick_event_loop: {str(e)}\n{tb.format_exc()}")
+                await asyncio.sleep(2)
+
+    def _normalize_strategy_key(self, key: str) -> str:
+        """Normalize strategy key to handle different naming conventions."""
+        # Convert to lowercase and remove any 'strategy' suffix
+        key = key.lower()
+        # Handle both underscore and camel case formats
+        if '_strategy' in key:
+            key = key.replace('_strategy', '')
+        elif 'strategy' in key:
+            key = key.replace('strategy', '')
+        # Remove any remaining underscores
+        key = key.replace('_', '')
+        return key
+
+    async def _initialize_signal_generators(self):
+        logger.info(f"[TRACE] _initialize_signal_generators called. trading_config signal_generators: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
+        import traceback as tb
+        logger.debug(f"[TRACE] Call stack for _initialize_signal_generators:\n{''.join(tb.format_stack(limit=5))}")
+        try:
+            # Get active generator names from config
+            # Check if config is missing, if so load directly from config.py
+            active_generator_names = self.trading_config.get("signal_generators")
+            if active_generator_names is None:
+                # Try to get directly from config.py
+                try:
+                    from config.config import TRADING_CONFIG
+                    active_generator_names = TRADING_CONFIG.get("signal_generators", ["breakout_reversal"])
+                    logger.info(f"Loaded signal generators directly from config.py: {active_generator_names}")
+                    # Update trading_config for future use
+                    self.trading_config["signal_generators"] = active_generator_names
+                except Exception as e:
+                    logger.error(f"Failed to import from config.py: {str(e)}")
+                    active_generator_names = ["breakout_reversal"]
+            
+            # Fallback to default if still None
+            if not active_generator_names:
+                active_generator_names = ["breakout_reversal", "confluence_price_action"]
+                logger.warning(f"Using default signal generators: {active_generator_names}")
+
+            # Load generators from the strategies directory
+            self._load_available_signal_generators()
+
+            # Build a normalized lookup for available strategies
+            normalized_available = {self._normalize_strategy_key(k): v for k, v in self.available_signal_generators.items()}
+            # Initialize active generators from config
+            for generator_name in active_generator_names:
+                norm_key = self._normalize_strategy_key(generator_name)
+                if norm_key in normalized_available:
+                    generator_class = normalized_available[norm_key]
+                    # Ensure we're passing the SAME MT5Handler instance
+                    generator = generator_class(
+                        mt5_handler=self.mt5_handler,  # Use the shared instance
+                        risk_manager=self.risk_manager
+                    )
+                    self.signal_generators.append(generator)
+                    logger.info(f"Initialized signal generator: {generator_name} ({generator.__class__.__name__})")
+                    # --- NEW: Register data requirements with DataManager ---
+                    required_timeframes = getattr(generator, 'required_timeframes', [])
+                    lookback_periods = getattr(generator, 'lookback_periods', {})
+                    default_lookback = getattr(generator, 'lookback_period', 100)
+                    for symbol in self.symbols:
+                        for tf in required_timeframes:
+                            lookback = lookback_periods.get(tf, default_lookback)
+                            self.data_manager.register_timeframe(symbol, tf, lookback)
+                else:
+                    logger.warning(f"Unknown signal generator: {generator_name} (normalized: {norm_key})")
+            logger.info(f"[TRACE] active_generator_names used: {active_generator_names}")
+            logger.info(f"[TRACE] Final signal_generators order: {[gen.__class__.__name__ for gen in self.signal_generators]}")
+        except Exception as e:
+            logger.error(f"Error initializing signal generators: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
     async def start(self):
         """Start the trading bot."""
@@ -304,9 +440,9 @@ class TradingBot:
             logger.info("Starting trading bot...")
             
             # Initialize MT5 connection if needed
-            if not self.mt5_handler.connected:
+            if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
                 logger.info("Initializing MT5 connection...")
-                if not self.initialize_mt5():
+                if not self.mt5_handler.initialize():
                     logger.error("Failed to initialize MT5 connection")
                     self.running = False
                     self.shutdown_future.set_result(False)
@@ -319,6 +455,11 @@ class TradingBot:
             # Initialize the bot components
             logger.info("Initializing bot components...")
             await self.initialize()
+
+            # Confirm signal generators are loaded
+            if not self.signal_generators:
+                logger.error("No signal generators loaded after initialization! Cannot start tick_event_loop.")
+                raise RuntimeError("No signal generators loaded.")
             
             # Set up Telegram commands
             if self.telegram_bot:
@@ -328,8 +469,8 @@ class TradingBot:
             # Start the notification task
             self.notification_task = asyncio.create_task(self.send_notification_task())
             
-            # Set up the main trading tasks
-            self.main_task = asyncio.create_task(self.main_loop())
+            # --- REPLACE OLD MAIN LOOP WITH TICK EVENT LOOP ---
+            self.main_task = asyncio.create_task(self.tick_event_loop())
             self.trade_monitor_task = asyncio.create_task(self._monitor_trades_loop())
             self.shutdown_monitor_task = asyncio.create_task(self._monitor_shutdown())
             
@@ -344,8 +485,13 @@ class TradingBot:
                 await self.signal_processor._notify_trade_action(startup_message)
             self.startup_notification_sent = True
             
+            # Add log to confirm config order and which strategy will be used as primary
+            logger.info(f"[STARTUP] Config signal_generators order: {self.trading_config.get('signal_generators', [])}")
+            logger.info(f"[STARTUP] Will use {self.signal_generators[0].__class__.__name__ if self.signal_generators else 'None'} as the default/primary strategy.")
+            
             logger.info("Trading bot started successfully")
             # Don't set the future result now; it will be set when the bot shuts down
+            logger.info(f"[TRACE START] signal_generators order at start: {[gen.__class__.__name__ for gen in self.signal_generators]}")
             return self.shutdown_future
         
         except Exception as e:
@@ -361,7 +507,7 @@ class TradingBot:
         try:
             while self.running and not self.shutdown_requested:
                 # Check if main loop has exited
-                if hasattr(self, 'main_loop_task') and self.main_loop_task.done():
+                if self.main_loop_task is not None and self.main_loop_task.done():
                     # If main loop exited with an error, log it
                     if self.main_loop_task.exception():
                         logger.error(f"Main loop exited with an error: {self.main_loop_task.exception()}")
@@ -374,7 +520,7 @@ class TradingBot:
                     break
                 
                 # Check if monitor task has exited
-                if hasattr(self, '_monitor_trades_task') and self._monitor_trades_task.done():
+                if self._monitor_trades_task is not None and self._monitor_trades_task.done():
                     # If monitor task exited with an error, log it
                     if self._monitor_trades_task.exception():
                         logger.error(f"Monitor task exited with an error: {self._monitor_trades_task.exception()}")
@@ -469,10 +615,10 @@ class TradingBot:
         generator_name = args[0].lower()
         
         if generator_name in self.available_signal_generators:
-            # Instead of using change_signal_generator, directly use _init_signal_generators
+            # Instead of using change_signal_generator, directly use _initialize_signal_generators
             generator_class = self.available_signal_generators[generator_name]
             self.signal_generator_class = generator_class
-            self._init_signal_generators(generator_class)
+            await self._initialize_signal_generators()
             
             # Send notification via Telegram
             if self.telegram_bot and hasattr(self.telegram_bot, 'is_running') and self.telegram_bot.is_running:
@@ -516,10 +662,10 @@ class TradingBot:
         Format: /status
         """
         # Get account info
-        account_info = self.mt5_handler.get_account_info()
+        account_info = self.mt5_handler.get_account_info() if self.mt5_handler is not None else {}
         
         # Get open positions
-        positions = self.mt5_handler.get_open_positions()
+        positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
         
         # Determine current session
         current_session = self.analyze_session()
@@ -552,38 +698,17 @@ class TradingBot:
             status += "Recent Positions:\n"
             for pos in positions[:5]:
                 pos_type = "BUY" if pos["type"] == 0 else "SELL"
+                if self.mt5_handler is not None:
+                    result = self.mt5_handler.close_position(pos["ticket"])
+                    logger.info(f"Position {pos['ticket']} close result: {result}")
+                else:
+                    logger.error("MT5 handler is not initialized, cannot close position.")
                 status += f"- {pos['symbol']} {pos_type}: {pos['profit']}\n"
             
             if len(positions) > 5:
                 status += f"...and {len(positions) - 5} more\n"
         
         return status
-
-    async def main_loop(self):
-        """Main operational loop for the trading bot."""
-        
-        # Log the start of the main loop
-        logger.info("Starting main trading loop")
-        
-        while not self.shutdown_requested:
-            try:
-                if self.trading_enabled:
-                    # Simple fetch and generate cycle
-                    await self.simplified_analysis_cycle()
-                
-                    # Manage existing trades (trailing stops, etc)
-                    await self.manage_open_trades()
-                
-                # Update performance metrics
-                await self.update_performance_metrics()
-                
-                # Fixed interval sleep between cycles - more predictable behavior
-                await asyncio.sleep(120)  # 2 minute interval between analyses
-                
-            except Exception as e:
-                logger.error(f"Error in main loop: {str(e)}")
-                logger.error(traceback.format_exc())
-                await asyncio.sleep(5)  # Error recovery delay
 
     async def _monitor_trades_loop(self):
         """Separate loop for monitoring trades more frequently."""
@@ -592,7 +717,7 @@ class TradingBot:
         while self.running and not self.shutdown_requested:
             try:
                 # Check for active positions first
-                active_positions = self.mt5_handler.get_open_positions()
+                active_positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
                 
                 if not active_positions:
                     # No open positions, no need to check market status or manage trades
@@ -793,7 +918,7 @@ class TradingBot:
         try:
             # If no specific symbol is provided, check all configured symbols
             if symbol is None:
-                symbols_to_check = self._get_symbol_list()
+                symbols_to_check = self.symbols
                 
                 # Return True if any symbol is open
                 for sym in symbols_to_check:
@@ -978,22 +1103,24 @@ class TradingBot:
             self.real_time_monitoring_enabled = False
             
             # Cancel the data fetch task if it's running
-            if hasattr(self, 'data_fetch_task') and self.data_fetch_task:
+            if self.data_fetch_task is not None and not self.data_fetch_task.done():
                 logger.info("Cancelling data fetch task...")
-                self.data_fetch_task.cancel()
                 try:
-                    await self.data_fetch_task
+                    await asyncio.wait([self.data_fetch_task])
+                    logger.info("data_fetch_task cancelled successfully")
                 except asyncio.CancelledError:
-                    logger.info("Data fetch task cancelled")
-                    
+                    logger.info("data_fetch_task cancellation raised CancelledError")
+            else:
+                logger.warning("data_fetch_task not running")
+            
             # Cancel the queue processor task if it's running
-            if hasattr(self, 'queue_processor_task') and self.queue_processor_task:
+            if self.queue_processor_task is not None and not self.queue_processor_task.done():
                 logger.info("Cancelling analysis queue processor...")
-                self.queue_processor_task.cancel()
                 try:
-                    await self.queue_processor_task
+                    await asyncio.wait([self.queue_processor_task])
+                    logger.info("queue_processor_task cancelled successfully")
                 except asyncio.CancelledError:
-                    logger.info("Analysis queue processor cancelled")
+                    logger.info("queue_processor_task cancellation raised CancelledError")
             
             # Rest of shutdown code...
             
@@ -1002,13 +1129,16 @@ class TradingBot:
                 logger.info("Closing all positions before shutdown")
                 try:
                     # Get a list of positions to close
-                    positions = self.mt5_handler.get_open_positions()
+                    positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
                     
                     if positions:
                         logger.info(f"Found {len(positions)} positions to close")
                         for pos in positions:
-                            result = self.mt5_handler.close_position(pos["ticket"])
-                            logger.info(f"Position {pos['ticket']} close result: {result}")
+                            if self.mt5_handler is not None:
+                                result = self.mt5_handler.close_position(pos["ticket"])
+                                logger.info(f"Position {pos['ticket']} close result: {result}")
+                            else:
+                                logger.error("MT5 handler is not initialized, cannot close position.")
                     else:
                         logger.info("No open positions to close")
                 except Exception as e:
@@ -1049,7 +1179,7 @@ class TradingBot:
             else:
                 logger.info("Using existing MT5Handler instance")
                 # Ensure MT5 is connected
-                if not self.mt5_handler.is_connected():
+                if not getattr(self.mt5_handler, 'connected', False):
                     logger.info("Reconnecting existing MT5Handler")
                     mt5_initialized = self.mt5_handler.initialize()
                     if not mt5_initialized:
@@ -1101,55 +1231,6 @@ class TradingBot:
             return False
             
         return True
-
-    async def _initialize_signal_generators(self):
-        """Initialize all active signal generators."""
-        try:
-            # Set up signal generators
-            active_generators = []
-            
-            # Get active generator names from config
-            active_generator_names = self.trading_config.get("signal_generators", ["breakout_reversal"])
-            
-            # If we have a specific signal generator class passed, only use that one
-            if self.signal_generator_class:
-                # Ensure we're passing the SAME MT5Handler instance
-                sg = self.signal_generator_class(
-                    mt5_handler=self.mt5_handler,  # Use the shared instance
-                    risk_manager=self.risk_manager
-                )
-                await sg.initialize()
-                self.signal_generators = [sg]
-                logger.info(f"Initialized signal generator: {sg.__class__.__name__} with shared MT5Handler")
-                return
-            
-            # Load generators from the strategies directory
-            self._load_available_signal_generators()
-            
-            # Initialize active generators from config
-            for generator_name in active_generator_names:
-                if generator_name in self.available_signal_generators:
-                    generator_class = self.available_signal_generators[generator_name]
-                    # Ensure we're passing the SAME MT5Handler instance
-                    generator = generator_class(
-                        mt5_handler=self.mt5_handler,  # Use the shared instance
-                        risk_manager=self.risk_manager
-                    )
-                    self.signal_generators.append(generator)
-                    logger.info(f"Initialized signal generator: {generator_name} ({generator.__class__.__name__})")
-                else:
-                    logger.warning(f"Unknown signal generator: {generator_name}")
-            
-            # Set the active generators
-            self.signal_generators = active_generators
-            
-            # Note: We no longer need to pass the MT5Handler to the generators here,
-            # as they should be created with the shared instance
-            
-        except Exception as e:
-            logger.error(f"Error initializing signal generators: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
 
     def _load_symbols_from_config(self):
         """Load trading symbols from configuration."""
@@ -1261,12 +1342,14 @@ class TradingBot:
                     from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
                     self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
                     logger.info("Imported BreakoutReversalStrategy directly from file")
+                
                 # Try importing the new confluence strategy
                 try:
                     from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy  # type: ignore
                     self.available_signal_generators["confluence_price_action"] = ConfluencePriceActionStrategy
-                except ImportError:
-                    logger.warning("ConfluencePriceActionStrategy not found in strategy module")
+                    logger.info("Successfully imported ConfluencePriceActionStrategy")
+                except ImportError as e:
+                    logger.warning(f"ConfluencePriceActionStrategy not found in strategy module: {str(e)}")
             except ImportError as e:
                 logger.warning(f"Could not import BreakoutReversalStrategy: {str(e)}")
             
@@ -1276,7 +1359,6 @@ class TradingBot:
                 import src.strategy as strategy_module
                 
                 # Check if it has a __all__ attribute listing available strategies
-                # pyright: ignore[reportAttributeAccessIssue]
                 strategy_names = []
                 try:
                     all_attr = getattr(strategy_module, '__all__', [])
@@ -1294,7 +1376,7 @@ class TradingBot:
                 
                 # Process the found strategy names
                 for strategy_name in strategy_names:
-                    if strategy_name == 'BreakoutReversalStrategy':
+                    if strategy_name in ['BreakoutReversalStrategy', 'ConfluencePriceActionStrategy']:
                         # Already imported
                         continue
                         
@@ -1304,6 +1386,8 @@ class TradingBot:
                         
                         # Convert CamelCase to snake_case
                         snake_case_name = ''.join(['_'+c.lower() if c.isupper() else c for c in strategy_name]).lstrip('_')
+                        # Remove 'strategy' suffix if present
+                        snake_case_name = snake_case_name.replace('_strategy', '')
                         
                         # Add it to the available strategies
                         self.available_signal_generators[snake_case_name] = strategy_class
@@ -1324,139 +1408,6 @@ class TradingBot:
             logger.error(f"Error loading signal generators: {str(e)}")
             logger.error(traceback.format_exc())
     
-    async def simplified_analysis_cycle(self):
-        """
-        Directly fetch data for strategy timeframes and generate signals.
-        This is the core trading functionality that processes each signal generator.
-        """
-        
-        analysis_start = time.time()
-        logger.info("🔄 Starting simplified analysis cycle")
-        
-        # Check if we have signal generators
-        if not self.signal_generators:
-            # This is unexpected - try to re-initialize them if needed
-            logger.warning("No signal generators found in simplified_analysis_cycle! Attempting to recover...")
-            
-            try:
-                # Check if we can load them from the module
-                from config.config import TRADING_CONFIG
-                signal_generator_names = TRADING_CONFIG.get("signal_generators", ["confluence_price_action"])
-                logger.info(f"Re-loading signal generators from config: {signal_generator_names}")
-                
-                # Load available signal generators
-                if not hasattr(self, 'available_signal_generators') or not self.available_signal_generators:
-                    self._load_available_signal_generators()
-                
-                # Create new instances as needed
-                for generator_name in signal_generator_names:
-                    if generator_name in self.available_signal_generators:
-                        generator_class = self.available_signal_generators[generator_name]
-                        generator = generator_class(
-                            mt5_handler=self.mt5_handler,
-                            risk_manager=self.risk_manager
-                        )
-                        if not self.signal_generators:
-                            self.signal_generators = []
-                        self.signal_generators.append(generator)
-                        logger.info(f"Recovered signal generator: {generator_name} ({generator.__class__.__name__})")
-                    else:
-                        logger.warning(f"Unknown signal generator during recovery: {generator_name}")
-            except Exception as e:
-                logger.error(f"Failed to recover signal generators: {str(e)}")
-                
-            # If still no generators, abort
-            if not self.signal_generators:
-                logger.error("No signal generators available even after recovery attempt. Cannot continue analysis.")
-                return
-        
-        # Log how many generators we're using
-        logger.info(f"Starting analysis with {len(self.signal_generators)} signal generators")
-        
-        # Fetch and process for each signal generator one by one
-        for signal_generator in self.signal_generators:
-            generator_start = time.time()
-            generator_name = signal_generator.__class__.__name__
-            logger.info(f"⏳ Starting analysis with {generator_name}")
-            
-            # Get the specific timeframes required by this strategy
-            # Handle missing attributes gracefully with defaults
-            primary_tf = getattr(signal_generator, 'primary_timeframe', 'M15')
-            higher_tf = getattr(signal_generator, 'higher_timeframe', 'H1')
-            
-            # Get all required timeframes from the strategy if available
-            required_timeframes = getattr(signal_generator, 'required_timeframes', [primary_tf, higher_tf])
-            
-            logger.debug(f"Fetching data for strategy with timeframes: {required_timeframes}")
-            
-            # Process each symbol one by one for immediate trade execution
-            for symbol in self.symbols:
-                symbol_start = time.time()
-                logger.info(f"Analyzing {symbol} with {generator_name}")
-                
-                # Fetch market data just for this symbol
-                market_data = {symbol: {}}
-                data_fetch_start = time.time()
-                
-                for tf in required_timeframes:
-                    # Use the _ensure_data_available method which honors strategy lookback requirements
-                    logger.info(f"Directly fetching {tf} data for {symbol}")
-                    success = await self._ensure_data_available(symbol, tf)
-                    
-                    if success and symbol in self.market_data_cache and tf in self.market_data_cache[symbol]:
-                        market_data[symbol][tf] = self.market_data_cache[symbol][tf]
-                        data_length = len(market_data[symbol][tf]) if hasattr(market_data[symbol][tf], '__len__') else 0
-                        logger.debug(f"Successfully fetched {data_length} bars for {symbol}/{tf}")
-                    else:
-                        logger.warning(f"Failed to fetch data for {symbol}/{tf}")
-                
-                data_fetch_time = time.time() - data_fetch_start
-                logger.debug(f"📊 Data fetching for {symbol} completed in {data_fetch_time:.2f}s")
-                
-                # Generate and process signals for this symbol immediately
-                try:
-                    signal_gen_start = time.time()
-                    # Check if this is the BreakoutReversalStrategy to force trendline detection
-                    is_breakout_strategy = signal_generator.__class__.__name__ == 'BreakoutReversalStrategy'
-                    
-                    if is_breakout_strategy:
-                        logger.info(f"🔍 Analyzing {symbol} with BreakoutReversalStrategy (immediate processing)")
-                        new_signals = await signal_generator.generate_signals(
-                            market_data=market_data, 
-                            debug_visualize=True, 
-                            skip_plots=True,
-                            force_trendlines=True,
-                            process_immediately=True  # Enable immediate processing
-                        )
-                    else:
-                        new_signals = await signal_generator.generate_signals(
-                            market_data=market_data,
-                            process_immediately=True  # Enable immediate processing
-                        )
-                    
-                    signal_gen_time = time.time() - signal_gen_start
-                    
-                    if new_signals:
-                        logger.info(f"✅ Generated {len(new_signals)} signals for {symbol} in {signal_gen_time:.2f}s")
-                        # Process signals immediately instead of adding to self.signals list
-                        logger.info(f"⚡ Processing {len(new_signals)} signals immediately for {symbol}")
-                        await self.process_signals(new_signals)
-                    else:
-                        logger.info(f"📭 No signals generated for {symbol} in {signal_gen_time:.2f}s")
-                        
-                    symbol_total_time = time.time() - symbol_start
-                    logger.info(f"Symbol {symbol} analysis completed in {symbol_total_time:.2f}s")
-                    
-                except Exception as e:
-                    logger.error(f"Error generating signals for {symbol}: {str(e)}")
-                    logger.error(traceback.format_exc())
-            
-            generator_time = time.time() - generator_start
-            logger.info(f"⏱️ Analysis with {generator_name} completed in {generator_time:.2f}s")
-        
-        analysis_time = time.time() - analysis_start
-        logger.info(f"🏁 Simplified analysis cycle completed in {analysis_time:.2f}s")
-
     async def send_notification_task(self):
         """Periodically send status notifications to the Telegram bot."""
         try:
@@ -1464,7 +1415,7 @@ class TradingBot:
                 # Only send periodic notifications if telegram bot is available
                 if self.telegram_bot and hasattr(self.telegram_bot, 'is_running') and self.telegram_bot.is_running:
                     # Get current status information
-                    positions = self.mt5_handler.get_open_positions()
+                    positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
                     position_count = len(positions)
                     
                     # Only send notification if there are open positions
@@ -1491,109 +1442,5 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error in notification task: {str(e)}")
             logger.error(traceback.format_exc())
-    
-    async def _ensure_data_available(self, symbol: str, timeframe: str) -> bool:
-        """
-        Make sure data is available for the given symbol and timeframe.
-        Directly fetches from MT5 if needed.
-        
-        Args:
-            symbol: Trading symbol
-            timeframe: Timeframe (e.g., 'M15', 'H1')
-            
-        Returns:
-            True if data is available, False otherwise
-        """
-        try:
-            # Check if data is already available in cache
-            if (symbol in self.market_data_cache and 
-                timeframe in self.market_data_cache.get(symbol, {}) and
-                self.market_data_cache[symbol][timeframe] is not None and
-                not (hasattr(self.market_data_cache[symbol][timeframe], 'empty') and 
-                     self.market_data_cache[symbol][timeframe].empty)):
-                logger.debug(f"Data already available for {symbol}/{timeframe}")
-                return True
-            
-            # Default lookback periods based on timeframe - significantly reduced from previous values
-            default_bars = {
-                "M1": 120,
-                "M5": 120,
-                "M15": 120,
-                "H1": 120,
-                "H4": 60,
-                "D1": 30
-            }.get(timeframe, 100)  # Default to 100 bars if not specified
-            
-            # Check for specific lookback requirements from signal generators
-            max_lookback = default_bars
-            
-            # Look for strategy-specific lookback periods
-            for gen in self.signal_generators:
-                logger.debug(f"Checking lookback settings for {gen.__class__.__name__}")
-                
-                # For debugging, log the attributes of the generator
-                if hasattr(gen, 'timeframe_settings'):
-                    logger.info(f"Found timeframe_settings attribute on {gen.__class__.__name__}")
-                    tf_keys = list(gen.timeframe_settings.keys()) if isinstance(gen.timeframe_settings, dict) else "Not a dict"
-                    logger.info(f"Available timeframes in settings: {tf_keys}")
-                    
-                    if isinstance(gen.timeframe_settings, dict) and timeframe in gen.timeframe_settings:
-                        logger.info(f"Found settings for {timeframe} in {gen.__class__.__name__}")
-                        tf_setting_keys = list(gen.timeframe_settings[timeframe].keys())
-                        logger.info(f"Keys in {timeframe} settings: {tf_setting_keys}")
-                
-                # Check for lookback_periods dictionary attribute
-                if hasattr(gen, 'lookback_periods') and isinstance(gen.lookback_periods, dict) and timeframe in gen.lookback_periods:
-                    gen_lookback = gen.lookback_periods[timeframe]
-                    max_lookback = max(max_lookback, gen_lookback)
-                    logger.info(f"✅ Using lookback_periods dict for {timeframe}: {gen_lookback} bars from {gen.__class__.__name__}")
-                
-                # Check for timeframe-specific settings in the strategy (for BreakoutReversalStrategy)
-                elif hasattr(gen, 'timeframe_settings') and isinstance(gen.timeframe_settings, dict) and timeframe in gen.timeframe_settings:
-                    tf_settings = gen.timeframe_settings[timeframe]
-                    if 'lookback_period' in tf_settings:
-                        tf_lookback = tf_settings['lookback_period']
-                        max_lookback = max(max_lookback, tf_lookback)
-                        logger.info(f"✅ Using timeframe_settings for {timeframe}: lookback_period={tf_lookback} bars from {gen.__class__.__name__}")
-                
-                # Check for plain lookback_period attribute on the strategy
-                elif hasattr(gen, 'lookback_period'):
-                    lookback = gen.lookback_period
-                    max_lookback = max(max_lookback, lookback)
-                    logger.info(f"✅ Using direct lookback_period: {lookback} bars from {gen.__class__.__name__}")
-            
-            # Add a buffer (20%) to ensure we have enough data for calculations
-            bars_required = int(max_lookback * 1.2)
-            
-            # Enforce minimum bars for reliable analysis
-            bars_required = max(bars_required, 30)
-            
-            # Fetch the data directly from MT5
-            logger.info(f"Direct fetch: Getting {bars_required} {timeframe} bars for {symbol}")
-            data = self.mt5_handler.get_market_data(symbol, timeframe, bars_required)
-            
-            if data is None or (hasattr(data, 'empty') and data.empty):
-                logger.warning(f"Failed to fetch data for {symbol}/{timeframe}")
-                return False
-            
-            # If data is a DataFrame, check if it has enough bars
-            data_length = len(data) if hasattr(data, '__len__') else 0
-            if data_length < 10:  # Require at least 10 bars minimum
-                logger.warning(f"Not enough data for {symbol}/{timeframe}, got only {data_length} bars")
-                return False
-                
-            # Ensure we have a place to store the data
-            if symbol not in self.market_data_cache:
-                self.market_data_cache[symbol] = {}
-            
-            # Store the data in cache
-            self.market_data_cache[symbol][timeframe] = data
-            logger.info(f"Successfully fetched and cached {data_length} bars for {symbol}/{timeframe}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error ensuring data availability for {symbol}/{timeframe}: {str(e)}")
-            return False
     
     
