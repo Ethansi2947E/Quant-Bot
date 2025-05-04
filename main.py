@@ -73,7 +73,7 @@ logger.remove()  # Remove default handlers
 logger.add(
     sys.stderr,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="INFO",  # Changed from INFO to DEBUG
+    level="DEBUG",  # Changed from INFO to DEBUG
     colorize=True,
     # Remove enqueue parameter to avoid logging errors
     diagnose=False,  # Disable traceback to reduce log volume

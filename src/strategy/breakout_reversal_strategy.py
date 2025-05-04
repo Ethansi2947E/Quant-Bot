@@ -43,7 +43,7 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 10,
         "consolidation_update_hours": 2,
         "atr_multiplier": 0.5,   # Lower multiplier for noisy timeframe
-        "volume_percentile": 80,  # 80th percentile for volume threshold
+        "volume_percentile": 85,  # 85th percentile for volume threshold
         "min_risk_reward": 2.0   # Align with book
     },
     "M5": {
@@ -54,7 +54,7 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 6,
         "consolidation_update_hours": 3,
         "atr_multiplier": 0.7,   # Medium multiplier
-        "volume_percentile": 80,  # 80th percentile for volume threshold
+        "volume_percentile": 85,  # 85th percentile for volume threshold
         "min_risk_reward": 2.0   # Align with book
     },
     "M15": {
@@ -65,7 +65,7 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 3,
         "consolidation_update_hours": 6,
         "atr_multiplier": 1.0,   # Standard multiplier
-        "volume_percentile": 80,  # 80th percentile for volume threshold
+        "volume_percentile": 85,  # 85th percentile for volume threshold
         "min_risk_reward": 2.0   # Align with book
     },
     "H1": {
@@ -76,7 +76,7 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 2,
         "consolidation_update_hours": 12,
         "atr_multiplier": 1.2,   # Higher multiplier for more significant movements
-        "volume_percentile": 80,  # 80th percentile for volume threshold
+        "volume_percentile": 85,  # 85th percentile for volume threshold
         "min_risk_reward": 3.0   # More conservative for higher TF
     },
     "H4": {
@@ -87,7 +87,7 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 2,
         "consolidation_update_hours": 24,
         "atr_multiplier": 1.5,   # Higher multiplier for more significant movements
-        "volume_percentile": 80,  # 80th percentile for volume threshold
+        "volume_percentile": 85,  # 85th percentile for volume threshold
         "min_risk_reward": 3.0   # More conservative for higher TF
     }
 }
@@ -192,9 +192,9 @@ class _TrendLineAnalyzer:
             'max_trend_lines': 12
         }
 
-    def find_swings(self) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
-        highs = self.strategy._find_swing_highs(self.df)
-        lows = self.strategy._find_swing_lows(self.df)
+    def find_swings(self, swing_window: int = 5) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+        highs = self.strategy._find_swing_highs(self.df, window=swing_window)
+        lows = self.strategy._find_swing_lows(self.df, window=swing_window)
         return highs, lows
 
     def fit_lines(self, swing_highs: List[Tuple[int, float]], swing_lows: List[Tuple[int, float]], skip_plots: bool=False) -> Tuple[List[Dict], List[Dict]]:
@@ -206,22 +206,22 @@ class _TrendLineAnalyzer:
         clustered = self.strategy._cluster_trend_lines(lines)
         return sorted(clustered, key=lambda x: x['quality_score'], reverse=True)[:self.params['max_trend_lines']]
 
-    def get_trend_lines(self, skip_plots: bool=False) -> Tuple[List[Dict], List[Dict]]:
-        swing_highs, swing_lows = self.find_swings()
+    def get_trend_lines(self, skip_plots: bool=False, swing_window: int = 5) -> Tuple[List[Dict], List[Dict]]:
+        swing_highs, swing_lows = self.find_swings(swing_window)
         bullish, bearish = self.fit_lines(swing_highs, swing_lows, skip_plots)
         bullish = self.validate_and_cluster(bullish)
         bearish = self.validate_and_cluster(bearish)
         return bullish, bearish
 
-    def get_support_lines(self, skip_plots: bool=False) -> List[Dict]:
-        """Return only bullish (support) trend lines."""
-        _, swing_lows = self.find_swings()
+    def get_support_lines(self, skip_plots: bool=False, **kwargs) -> List[Dict]:
+        swing_window = kwargs.get('swing_window', 5)
+        _, swing_lows = self.find_swings(swing_window)
         bullish, _ = self.fit_lines([], swing_lows, skip_plots)
         return self.validate_and_cluster(bullish)
 
-    def get_resistance_lines(self, skip_plots: bool=False) -> List[Dict]:
-        """Return only bearish (resistance) trend lines."""
-        swing_highs, _ = self.find_swings()
+    def get_resistance_lines(self, skip_plots: bool=False, **kwargs) -> List[Dict]:
+        swing_window = kwargs.get('swing_window', 5)
+        swing_highs, _ = self.find_swings(swing_window)
         _, bearish = self.fit_lines(swing_highs, [], skip_plots)
         return self.validate_and_cluster(bearish)
 
@@ -247,13 +247,12 @@ class _SignalScorer:
             else:
                 tick_volume = candle['tick_volume']
                 
-            # First check if volume is even significant - using a less strict threshold
-            # If candle volume is less than 60% of threshold, consider it insufficient
+            # First check if volume is even significant - using a stricter threshold
             volume_ratio = tick_volume / threshold
             self.strategy.logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
             
-            if volume_ratio < 0.6:  # More lenient check
-                self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 60% of threshold {threshold:.1f}")
+            if volume_ratio < 0.8:  # More strict check
+                self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 80% of threshold {threshold:.1f}")
                 return 0  # Insufficient volume
                 
             # Calculate components
@@ -471,6 +470,8 @@ class _SignalScorer:
             'risk_reward': risk_reward_score,
             'final_score': final
         }
+        if volume_quality_score < 0.5:
+            signal['skip_due_to_volume'] = True
         return signal
 
 def plot_raw_price_series(df, symbol, timeframe):
@@ -497,7 +498,7 @@ class BreakoutReversalStrategy(SignalGenerator):
     to generate high-probability trading signals.
     """
     
-    def __init__(self, primary_timeframe="M15", higher_timeframe="H1", use_range_extension_tp=False, **kwargs):
+    def __init__(self, primary_timeframe="M1", higher_timeframe="H1", use_range_extension_tp=False, **kwargs):
         """
         Initialize the Breakout and Reversal strategy.
         
@@ -641,6 +642,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         self._scorer = _SignalScorer(self)
         self.risk_manager = RiskManager.get_instance()
         self.use_range_extension_tp = use_range_extension_tp
+        self.swing_window = kwargs.get('swing_window', self.candles_to_check)
     
     def _load_timeframe_profile(self):
         """Load timeframe-specific parameters from the appropriate profile."""
@@ -990,8 +992,8 @@ class BreakoutReversalStrategy(SignalGenerator):
 
         logger.info(f"🔍 Finding trend lines for {symbol}")
         analyzer = _TrendLineAnalyzer(df, self)
-        bullish_trend_lines = analyzer.get_support_lines(skip_plots)
-        bearish_trend_lines = analyzer.get_resistance_lines(skip_plots)
+        bullish_trend_lines = analyzer.get_support_lines(skip_plots, swing_window=getattr(self, 'swing_window', 5))
+        bearish_trend_lines = analyzer.get_resistance_lines(skip_plots, swing_window=getattr(self, 'swing_window', 5))
         self.bullish_trend_lines[symbol] = bullish_trend_lines
         self.bearish_trend_lines[symbol] = bearish_trend_lines
 
@@ -1128,7 +1130,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         import numpy as np
         from scipy.stats import linregress
         min_points = getattr(self, 'trend_line_min_points', 3)
-        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.5)
+        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.7)
         if len(swing_points) < min_points:
             self.logger.debug(f"Not enough swing points ({len(swing_points)}) to identify {line_type} trend lines. Need at least {min_points}.")
             return []
@@ -1789,12 +1791,16 @@ class BreakoutReversalStrategy(SignalGenerator):
             
             # Check each resistance level
             for level in resistance_levels:
-                logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}")
-                # Breakout condition - RELAXED: no longer require strong candle
-                # Previous candle below or at resistance, current candle closing above
-                if (previous_candle['close'] <= level['zone_min'] * (1 + self.price_tolerance) and
-                    current_candle['close'] > level['zone_min'] * (1 + self.price_tolerance)):
-                    
+                logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
+                # Updated breakout condition: require close > zone_max + price_tolerance*zone_max
+                if (
+                    previous_candle['close'] <= level['zone_max'] * (1 + self.price_tolerance)
+                    and current_candle['close'] > level['zone_max'] * (1 + self.price_tolerance)
+                ):
+                    # False-breakout filter for bullish breakouts
+                    if self.detect_false_breakout(df.iloc[:i+1], direction='bullish', price_tolerance=self.price_tolerance).iloc[-1]:
+                        logger.debug(f"🚫 False breakout detected for {symbol} at resistance breakout, skipping signal.")
+                        continue  # skip this candle—likely a fakeout
                     # Generate buy signal
                     entry_price = current_candle['close']
                     
@@ -1802,7 +1808,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                     stop_loss = min(current_candle['low'], previous_candle['low'])
                     
                     # Log the breakout regardless of whether we generate a signal
-                    logger.info(f"👀 Detected potential breakout for {symbol} at level {level['zone_min']:.5f}")
+                    logger.info(f"👀 Detected potential breakout for {symbol} at level {level['zone_max']:.5f}")
                     
                     # RELAXED conditions: allow signals with neutral H1 trend, don't require strong volume
                     if h1_trend != 'bearish':  # Just avoid counter-trend signals
@@ -1811,7 +1817,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         
                         # Add detailed logging
                         logger.debug(f"Breakout details: Close={current_candle['close']:.5f}, " +
-                                   f"Level={level['zone_min']:.5f}, Volume quality={volume_quality:.2f}, " +
+                                   f"Level={level['zone_max']:.5f}, Volume quality={volume_quality:.2f}, " +
                                    f"H1 trend={h1_trend}")
                         
                         # Generate trade signals...
@@ -1905,14 +1911,19 @@ class BreakoutReversalStrategy(SignalGenerator):
             
             # Check each support level
             for level in support_levels:
-                logger.debug(f"🔄 {symbol}: Checking support level {level['zone_max']:.5f}")
-                # Breakdown condition: Previous candle above or at support, current candle closing below
-                if (previous_candle['close'] >= level['zone_max'] * (1 - self.price_tolerance) and
-                    current_candle['close'] < level['zone_max'] * (1 - self.price_tolerance) and
-                    self._is_strong_candle(current_candle) and
-                    volume_quality < 0 and  # Negative means bearish volume characteristics
-                    h1_trend == 'bearish'):
-                    
+                logger.debug(f"🔄 {symbol}: Checking support level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
+                # Updated breakdown condition: require close < zone_min - price_tolerance*zone_min
+                if (
+                    previous_candle['close'] >= level['zone_min'] * (1 - self.price_tolerance)
+                    and current_candle['close'] < level['zone_min'] * (1 - self.price_tolerance)
+                    and self._is_strong_candle(current_candle)
+                    and volume_quality < 0
+                    and h1_trend == 'bearish'
+                ):
+                    # False-breakout filter for bearish breakdowns
+                    if self.detect_false_breakout(df.iloc[:i+1], direction='bearish', price_tolerance=self.price_tolerance).iloc[-1]:
+                        logger.debug(f"🚫 False breakdown detected for {symbol} at support breakdown, skipping signal.")
+                        continue  # skip this candle—likely a fakeout
                     # Generate sell signal
                     entry_price = current_candle['close']
                     
@@ -2084,7 +2095,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         # False breakout is more custom, so keep as is for now
 
         # Check for reversal at support (bullish patterns)
-        for i in range(-candles_to_check, 0):
+        for i in range(-candles_to_check+1, 0):
             current_candle = df.iloc[i]
             previous_candle = df.iloc[i-1]
             logger.debug(f"📊 {symbol}: Checking reversal at candle {df.index[i]}: O={current_candle['open']:.5f} H={current_candle['high']:.5f} L={current_candle['low']:.5f} C={current_candle['close']:.5f}")
@@ -2092,10 +2103,10 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.debug(f"📊 {symbol}: Volume quality score: {volume_quality:.1f} (>0 = bullish, <0 = bearish)")
             for level in support_levels:
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_max']:.5f}")
-                is_near_support = abs(current_candle['low'] - level['zone_max']) <= level['zone_max'] * self.price_tolerance
-                logger.debug(f"✓ {symbol}: Price near support: {is_near_support} (Low: {current_candle['low']:.5f}, Support: {level['zone_max']:.5f}, Tolerance: {level['zone_max'] * self.price_tolerance:.5f})")
+                is_near_support = abs(current_candle['low'] - level['zone_max']) <= self._get_dynamic_tolerance(df, i, fallback_price=level['zone_max'])
+                logger.debug(f"✓ {symbol}: Price near support: {is_near_support} (Low: {current_candle['low']:.5f}, Support: {level['zone_max']:.5f}, Tolerance: {self._get_dynamic_tolerance(df, i, fallback_price=level['zone_max']):.5f})")
                 if is_near_support:
-                    # Use vectorized pattern detection
+                    # Use only precomputed vectorized pattern detection
                     pattern_types = []
                     idx = i if i >= 0 else len(df) + i
                     if hammer_pattern.iloc[idx]:
@@ -2159,7 +2170,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"🔄 {symbol}: Checking bullish trend line at price {line_value:.5f}")
                 
                 # Price near trend line
-                is_near_trendline = abs(current_candle['low'] - line_value) <= current_candle['close'] * self.price_tolerance
+                is_near_trendline = abs(current_candle['low'] - line_value) <= self._get_dynamic_tolerance(df, i, fallback_price=line_value)
                 logger.debug(f"✓ {symbol}: Price near trend line: {is_near_trendline} (Low: {current_candle['low']:.5f}, Trend line: {line_value:.5f})")
                 
                 if is_near_trendline:
@@ -2240,7 +2251,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             logger.debug(f"❌ {symbol}: Insufficient bullish volume (quality: {volume_quality:.1f})")
         
         # Check for reversal at resistance (bearish patterns)
-        for i in range(-candles_to_check, 0):
+        for i in range(-candles_to_check+1, 0):
             current_candle = df.iloc[i]
             previous_candle = df.iloc[i-1]
             
@@ -2250,11 +2261,17 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each resistance level
             for level in resistance_levels:
                 logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}")
-                if abs(current_candle['high'] - level['zone_min']) <= level['zone_min'] * self.price_tolerance:
-                    # Detect bearish reversal pattern
-                    # Get the uptrend state instead of downtrend for bearish pattern
-                    is_uptrend = self._determine_higher_timeframe_trend(h1_df) == 'bullish'
-                    pattern_type = self._detect_bearish_reversal_pattern(df, i, is_uptrend)
+                if abs(current_candle['high'] - level['zone_min']) <= self._get_dynamic_tolerance(df, i, fallback_price=level['zone_min']):
+                    # Use only precomputed vectorized pattern detection
+                    pattern_types = []
+                    idx = i if i >= 0 else len(df) + i
+                    if shooting_star_pattern.iloc[idx]:
+                        pattern_types.append("Shooting Star")
+                    if bearish_engulfing_pattern.iloc[idx]:
+                        pattern_types.append("Bearish Engulfing")
+                    if evening_star_pattern.iloc[idx]:
+                        pattern_types.append("Evening Star")
+                    pattern_type = ", ".join(pattern_types) if pattern_types else None
                     volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
 
                     if pattern_type:
@@ -2310,7 +2327,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 # Calculate trend line value at current position
                 line_value = self._calculate_trend_line_value(trend_line, i)
                 # Price near trend line
-                if abs(current_candle['high'] - line_value) <= current_candle['close'] * self.price_tolerance:
+                if abs(current_candle['high'] - line_value) <= self._get_dynamic_tolerance(df, i, fallback_price=line_value):
                     # Detect bearish reversal pattern
                     # Get the uptrend state instead of downtrend for bearish pattern
                     is_uptrend = self._determine_higher_timeframe_trend(h1_df) == 'bullish'
@@ -3007,3 +3024,29 @@ class BreakoutReversalStrategy(SignalGenerator):
                 (prev_close > df['close'] + tol_val) &
                 (wick_ok)
             )
+
+    def _get_dynamic_tolerance(self, df: pd.DataFrame, idx: int, fallback_price: float = None) -> float:
+        """
+        Compute a dynamic tolerance using ATR * atr_multiplier, fallback to price_tolerance if ATR is unavailable.
+        Args:
+            df: DataFrame with price data
+            idx: Index for the current candle
+            fallback_price: Price to use for fallback (e.g., level or close)
+        Returns:
+            Tolerance value (float)
+        """
+        try:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(df.iloc[:idx+1], self.atr_period)
+            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                atr = float(atr_series.iloc[-1])
+                if not pd.isna(atr) and atr > 0:
+                    return atr * self.atr_multiplier
+        except Exception:
+            pass
+        # Fallback to price_tolerance * fallback_price
+        if fallback_price is not None:
+            return fallback_price * self.price_tolerance
+        # Fallback to close price if nothing else
+        close = df['close'].iloc[idx] if idx < len(df) else df['close'].iloc[-1]
+        return close * self.price_tolerance

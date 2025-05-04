@@ -37,7 +37,7 @@ data_loader = select_data_loader(
 )
 
 # 4. Load the strategy (BreakoutReversalStrategy)
-strategy = load_strategy('BreakoutReversalStrategy', {
+strategy = load_strategy('ConfluencePriceActionStrategy', {
     'primary_timeframe': 'M15',
     'higher_timeframe': 'H1'
 })

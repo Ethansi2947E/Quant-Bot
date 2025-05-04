@@ -7,7 +7,7 @@ import asyncio
 
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
-from src.utils.market_utils import calculate_pip_value, convert_pips_to_price
+from src.utils.market_utils import calculate_pip_value, convert_pips_to_price, convert_price_to_pips
 from src.risk_manager import RiskManager
 
 class PositionManager:
@@ -720,7 +720,10 @@ class PositionManager:
                     
                     # Calculate current profit
                     volume = position.get("volume", 0.0)
-                    profit_pips = (market_price - entry_price) * 10000 if position_type == "buy" else (entry_price - market_price) * 10000
+                    if position_type == "buy":
+                        profit_pips = convert_price_to_pips(market_price - entry_price, symbol, mt5_handler=self.mt5_handler)
+                    else:
+                        profit_pips = convert_price_to_pips(entry_price - market_price, symbol, mt5_handler=self.mt5_handler)
                     logger.debug(f"Position #{ticket} current P/L: {profit_pips:.1f} pips")
                     
                     # Apply trailing stop logic if enabled
