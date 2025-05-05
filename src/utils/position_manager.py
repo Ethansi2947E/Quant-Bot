@@ -4,6 +4,8 @@ from loguru import logger
 import time
 from datetime import datetime, timedelta
 import asyncio
+import pandas as pd
+import numpy as np
 
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
@@ -220,11 +222,47 @@ class PositionManager:
             # Get pip value for this symbol using the utility function
             pip_value = calculate_pip_value(symbol, mt5_handler=self.mt5_handler)
             
-            # Calculate trailing step in price
-            trail_step = trail_step_pips * pip_value
+            # Calculate break-even thresholds and buffers (always needed)
             break_even_threshold = break_even_pips * pip_value
             break_even_buffer = break_even_buffer_pips * pip_value
-            
+
+            # Trailing stop mode selection
+            trailing_mode = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('mode', 'pips')
+            atr_multiplier = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('atr_multiplier', 1.0)
+            percent = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('percent', 0.005)  # 0.5% default
+            atr = None
+            if trailing_mode == 'atr':
+                try:
+                    from src.utils.indicators import calculate_atr
+                    df = self.mt5_handler.get_market_data(symbol, 'M1', 50)
+                    if df is not None and len(df) >= 14:
+                        atr_series = calculate_atr(df, 14)
+                        if isinstance(atr_series, pd.Series):
+                            atr = float(atr_series.iloc[-1])
+                        elif isinstance(atr_series, (np.ndarray, list)):
+                            atr = float(atr_series[-1])
+                        elif isinstance(atr_series, float):
+                            atr = atr_series
+                        elif isinstance(atr_series, int):
+                            atr = float(atr_series)
+                        elif isinstance(atr_series, pd.DataFrame):
+                            logger.warning("ATR series is a DataFrame, cannot extract ATR value.")
+                            atr = None
+                        else:
+                            logger.warning(f"ATR series is of unsupported type: {type(atr_series)}")
+                            atr = None
+                except Exception as e:
+                    logger.warning(f"Failed to calculate ATR for {symbol}: {e}")
+            if trailing_mode == 'atr' and atr is not None:
+                trailing_distance = atr * atr_multiplier
+                logger.info(f"Using ATR-based trailing stop: ATR={atr:.5f}, multiplier={atr_multiplier}, trailing_distance={trailing_distance:.5f}")
+            elif trailing_mode == 'percent':
+                trailing_distance = current_price * percent
+                logger.info(f"Using percent-based trailing stop: {percent*100:.2f}%, trailing_distance={trailing_distance:.5f}")
+            else:
+                trailing_distance = trail_step_pips * pip_value
+                logger.info(f"Using pip-based trailing stop: {trail_step_pips} pips, trailing_distance={trailing_distance:.5f}")
+
             # Get minimum stop level from MT5
             min_stop_distance = self.mt5_handler.get_min_stop_distance(symbol)
             
@@ -353,7 +391,7 @@ class PositionManager:
                         logger.debug(f"Updated highest price for {symbol} #{ticket} to {current_price}")
                         
                     # Calculate new stop loss based on trailing distance
-                    new_sl = tracking_data["highest_price"] - trail_step
+                    new_sl = tracking_data["highest_price"] - trailing_distance
                     
                     # Ensure the stop loss respects minimum distance
                     min_valid_sl = current_price - min_stop_distance
@@ -410,7 +448,7 @@ class PositionManager:
                         logger.debug(f"Updated lowest price for {symbol} #{ticket} to {current_price}")
                         
                     # Calculate new stop loss based on trailing distance
-                    new_sl = tracking_data["lowest_price"] + trail_step
+                    new_sl = tracking_data["lowest_price"] + trailing_distance
                     
                     # Ensure the stop loss respects minimum distance
                     min_valid_sl = current_price + min_stop_distance

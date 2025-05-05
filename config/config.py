@@ -28,7 +28,6 @@ TRADING_CONFIG = {
         "BTCUSD",
         "Boom 1000 Index",
         "Jump 50 Index",
-        "Jump 75 Index",
         "Step Index",
         "Range Break 200 Index",
     ],
@@ -57,7 +56,7 @@ TRADING_CONFIG = {
     
     "signal_generators": [ 
         "confluence_price_action",
-        "breakout_reversal"
+        #"breakout_reversal"
     ],
 }
 

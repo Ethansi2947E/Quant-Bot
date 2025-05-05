@@ -25,6 +25,9 @@ class Backtester:
         - Initialize with strategy, data loader, config, and symbols
         - Call run() to execute the backtest
         - Access results and reports after completion
+    
+    Note: If 'profile': True is set in config, profiling will be enabled for strategy.generate_signals,
+    and parallelization will be automatically disabled to avoid cProfile conflicts.
     """
     def __init__(self, 
                  strategy, 
@@ -71,6 +74,8 @@ class Backtester:
         Main backtesting loop. Simulates bar-by-bar trading for all symbols.
         Loads data, aligns by datetime, iterates through each bar, and simulates trades.
         Stores results in self.results, self.trade_log, and self.equity_curve.
+        
+        Note: If profiling is enabled, parallelization is automatically disabled by the strategy.
         """
         # Load data
         data = self.data_loader(self.symbols, self.timeframes)
@@ -105,7 +110,7 @@ class Backtester:
                         market_data[symbol][tf] = df[df.index <= dt].copy()
             # Generate signals for this bar
             try:
-                signals = await self.strategy.generate_signals(market_data=market_data, skip_plots=True, debug_visualize=False)
+                signals = await self.strategy.generate_signals(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
             except Exception as e:
                 logger.warning(f"Error generating signals at {dt}: {e}")
                 signals = []

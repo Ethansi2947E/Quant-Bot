@@ -54,7 +54,20 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                  partial_profit_pct: float = 0.5,
                  max_bars_till_exit: int = 5,
                  trailing_stop_atr_mult: float = 1.5,
+                 # New regime filter kwargs
+                 use_adx_filter: bool = True,
+                 adx_threshold: float = 20.0,
+                 use_range_filter: bool = True,
+                 range_ratio_threshold: float = 0.5,
                  **kwargs):
+        """
+        Args:
+            ...
+            use_adx_filter (bool): Whether to use ADX filter for regime. Default True.
+            adx_threshold (float): ADX threshold for trend regime. Default 20.0.
+            use_range_filter (bool): Whether to use range-ratio filter for regime. Default True.
+            range_ratio_threshold (float): Threshold for range_ratio to define ranging. Default 0.5.
+        """
         super().__init__(**kwargs)
         self.name = "ConfluencePriceActionStrategy"
         self.description = (
@@ -84,6 +97,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # Override risk percent from RiskManager config for this timeframe
         rm_conf = get_risk_manager_config()
         self.risk_percent = rm_conf.get('max_risk_per_trade', self.risk_percent)
+        # Regime filter config
+        self.use_adx_filter = kwargs.get('use_adx_filter', use_adx_filter)
+        self.adx_threshold = kwargs.get('adx_threshold', adx_threshold)
+        self.use_range_filter = kwargs.get('use_range_filter', use_range_filter)
+        self.range_ratio_threshold = kwargs.get('range_ratio_threshold', range_ratio_threshold)
 
         self.max_sl_atr_mult = None
         self.max_sl_pct = None
@@ -769,28 +787,32 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             subset = df.iloc[-self.pivot_lookback:]
         # Pivot detection (use subset for all indexing)
         for i in range(2, len(subset) - 2):
-            # Use subset for all indices
             if (subset['low'].iat[i] < subset['low'].iat[i-1] and subset['low'].iat[i] < subset['low'].iat[i-2]
                     and subset['low'].iat[i] < subset['low'].iat[i+1] and subset['low'].iat[i] < subset['low'].iat[i+2]):
                 lows.append(subset['low'].iat[i])
             if (subset['high'].iat[i] > subset['high'].iat[i-1] and subset['high'].iat[i] > subset['high'].iat[i-2]
                     and subset['high'].iat[i] > subset['high'].iat[i+1] and subset['high'].iat[i] > subset['high'].iat[i+2]):
                 highs.append(subset['high'].iat[i])
-        # Debug: log number of raw pivots
         logger.debug(f"[KeyLevels] Raw pivot lows: {len(lows)}, pivot highs: {len(highs)} (before clustering)")
-        # Calculate clustering tolerance with floor and ceiling
-        clustering_tol = max(5 * TICK_SIZE, min(subset['close'].mean() * self.price_tolerance, 20 * TICK_SIZE))
-        # Cluster levels to avoid duplicates
+        # Clustering tolerance is the maximum of 5 ticks and the minimum of (mean price * price_tolerance, 15 ticks),
+        # but is further widened to at least ATR*0.1 if ATR is available. This ensures clusters are not too loose, but still adapt to volatility.
+        clustering_tol = max(5 * TICK_SIZE, min(subset['close'].mean() * self.price_tolerance, 15 * TICK_SIZE))
+        atr_val = None
+        if len(subset) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(subset, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[-1])
+        if atr_val:
+            clustering_tol = max(clustering_tol, atr_val * 0.1)
         support_levels = self._cluster_levels_with_strength(sorted(lows), clustering_tol, subset, is_support=True)
         resistance_levels = self._cluster_levels_with_strength(sorted(highs), clustering_tol, subset, is_support=False)
-        # Debug: log number of clusters before filtering
         logger.debug(f"[KeyLevels] Support clusters: {len(support_levels)}, Resistance clusters: {len(resistance_levels)} (before filtering by touches)")
-        # Filter levels: only keep those with at least 2 touches in the last 50 bars (was 1)
+        # --- Require at least 2 touches for a level to be considered ---
         last_50 = df.iloc[-min(50, len(df)):]
-        min_touches = 2  # Raise to 3 for stricter filtering if desired
+        min_touches = 2
         support_levels = [lvl for lvl in support_levels if self._count_level_touches(last_50, lvl['level'], clustering_tol, is_support=True) >= min_touches]
         resistance_levels = [lvl for lvl in resistance_levels if self._count_level_touches(last_50, lvl['level'], clustering_tol, is_support=False) >= min_touches]
-        # Debug: log number of levels after filtering
         logger.debug(f"[KeyLevels] Support levels after filtering: {len(support_levels)}, Resistance levels after filtering: {len(resistance_levels)}")
         return support_levels, resistance_levels
 
@@ -830,17 +852,26 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     # -- Pullback detection --
     def _is_pullback(self, df: pd.DataFrame, level: float, direction: str) -> bool:
         """Check if price pulled back to `level` within recent bars
-        Improved: Scan last N bars for any close beyond the level, then require last bar to retest within a tighter tolerance (0.1%).
+        Relaxed: Use max(level*self.price_tolerance, ATR*0.5) for tolerance, and increase pullback_bars for M15.
         """
         if df is None or len(df) < self.pullback_bars:
             return False
-        # Use a tighter tolerance for pullback retest
-        pullback_tolerance = level * 0.001  # 0.1%
-        recent = df.iloc[-self.pullback_bars:]
+        # --- Use ATR-based tolerance ---
+        atr_val = None
+        if len(df) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(df, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[-1])
+        pullback_tolerance = max(level * self.price_tolerance, (atr_val * 0.5) if atr_val else 0)
+        # --- Increase pullback_bars for M15 ---
+        pullback_bars = self.pullback_bars
+        if hasattr(self, 'primary_timeframe') and self.primary_timeframe == 'M15':
+            pullback_bars = max(pullback_bars, 24)
+        recent = df.iloc[-pullback_bars:]
         last_candle = recent.iloc[-1]
         closes = recent['close']
         if direction == 'bullish':
-            # Any prior bar (excluding last) closed above the level
             prior_beyond = (closes.iloc[:-1] > level).any()
             retest = abs(last_candle['low'] - level) <= pullback_tolerance
             if prior_beyond and retest:
@@ -855,66 +886,91 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     # -- Candlestick pattern checks --
     def _is_pin_bar(self, candle: pd.Series, level: float, direction: str) -> bool:
         """Detect a pin bar touching `level` with a long wick and body in the correct third of the range
-        Improved: Use min(open, close) for lower wick, relax wick > 2*body to 1.5*body, optionally scale by ATR.
+        Loosened: wick_body_ratio=1.0, allow ATR scaling: lower_wick > max(body * 1.0, ATR*0.5)
         """
         body = abs(candle['close'] - candle['open'])
         total = candle['high'] - candle['low']
         if total <= 0:
             return False
         tol_val = level * self.price_tolerance
-        # Optionally scale wick/body by ATR (if available)
-        wick_body_ratio = 1.5
+        atr_val = None
+        if hasattr(self, 'primary_timeframe') and hasattr(self, 'ma_period'):
+            # Try to get ATR from candle's DataFrame if available
+            try:
+                df = candle.parent if hasattr(candle, 'parent') else None
+                if df is not None and 'close' in df.columns and len(df) >= 14:
+                    from src.utils.indicators import calculate_atr
+                    atr_series = calculate_atr(df, period=14)
+                    if isinstance(atr_series, pd.Series):
+                        atr_val = float(atr_series.iloc[-1])
+            except Exception:
+                atr_val = None
+        wick_body_ratio = 1.0
         if direction == 'bullish':
             lower_wick = min(candle['open'], candle['close']) - candle['low']
             body_top = max(candle['open'], candle['close'])
-            if (lower_wick > body * wick_body_ratio and
+            wick_req = max(body * wick_body_ratio, (atr_val * 0.5) if atr_val else 0)
+            if (lower_wick > wick_req and
                 abs(candle['low'] - level) <= tol_val and
                 body_top > candle['low'] + 2 * total / 3):
                 return True
         else:
             upper_wick = candle['high'] - max(candle['open'], candle['close'])
             body_bottom = min(candle['open'], candle['close'])
-            if (upper_wick > body * wick_body_ratio and
+            wick_req = max(body * wick_body_ratio, (atr_val * 0.5) if atr_val else 0)
+            if (upper_wick > wick_req and
                 abs(candle['high'] - level) <= tol_val and
                 body_bottom < candle['high'] - 2 * total / 3):
                 return True
         return False
 
     def _is_engulfing(self, candles: pd.DataFrame, idx: int, direction: str) -> bool:
-        """Detect bullish or bearish engulfing at index. Improved: require previous bar to touch the level."""
+        """Detect bullish or bearish engulfing at index. Allow prev bar to be within max(tol, ATR*0.2) of level."""
         if idx <= 0 or idx >= len(candles):
             return False
         curr = candles.iloc[idx]
         prev = candles.iloc[idx - 1]
         tol = curr['close'] * self.price_tolerance
+        atr_val = None
+        if len(candles) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(candles, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
+        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
         if direction == 'bullish':
             if not (curr['close'] > curr['open'] and prev['close'] < prev['open'] and
                     curr['open'] < prev['close'] and curr['close'] > prev['open']):
                 return False
-            # Require previous bar to touch the level
-            if not abs(prev['low'] - curr['close']) <= tol:
+            if not abs(prev['low'] - curr['close']) <= offset:
                 return False
             return True
         else:
             if not (curr['close'] < curr['open'] and prev['close'] > prev['open'] and
                     curr['open'] > prev['close'] and curr['close'] < prev['open']):
                 return False
-            if not abs(prev['high'] - curr['close']) <= tol:
+            if not abs(prev['high'] - curr['close']) <= offset:
                 return False
             return True
 
     def _is_inside_bar(self, candles: pd.DataFrame, idx: int) -> bool:
         """Detect an inside bar where the current candle is fully contained within the previous candle.
-        Improved: require mother candle to straddle the level.
+        Allow mother candle to be within max(tol, ATR*0.2) of child close.
         """
         if idx <= 0 or idx >= len(candles):
             return False
         mother = candles.iloc[idx - 1]
         child = candles.iloc[idx]
         tol = child['close'] * self.price_tolerance
+        atr_val = None
+        if len(candles) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(candles, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
+        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
         if child['high'] < mother['high'] and child['low'] > mother['low']:
-            # Require mother candle to straddle the level
-            if mother['low'] < child['close'] < mother['high']:
+            if abs(mother['low'] - child['close']) <= offset or abs(mother['high'] - child['close']) <= offset:
                 return True
         return False
 
@@ -951,7 +1007,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         )
 
     def _is_morning_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
-        """Detect a Morning Star (bullish 3-bar reversal) near support, allow pattern anywhere in last 5 bars."""
+        """Detect a Morning Star (bullish 3-bar reversal) near support, allow pattern only in last 5 bars."""
         if idx < 2:
             return False
         # Only require pattern occurs anywhere in last 5 bars
@@ -968,7 +1024,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         )
 
     def _is_evening_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
-        """Detect an Evening Star (bearish 3-bar reversal) near resistance, allow pattern anywhere in last 5 bars."""
+        """Detect an Evening Star (bearish 3-bar reversal) near resistance, allow pattern only in last 5 bars."""
         if idx < 2:
             return False
         if idx < len(candles) - 5:
@@ -1083,7 +1139,9 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         volatility = recent['close'].pct_change().std() * 100  # as percentage
         
         # Identify if in range or trending recently
-        is_ranging = range_ratio < 0.7  # If close range is less than 70% of total range
+        is_ranging = False
+        if hasattr(self, 'use_range_filter') and self.use_range_filter:
+            is_ranging = range_ratio < (self.range_ratio_threshold if hasattr(self, 'range_ratio_threshold') else 0.5)
         
         # Calculate momentum
         momentum = (recent['close'].iloc[-1] - recent['close'].iloc[0]) / recent['close'].iloc[0] * 100
@@ -1132,9 +1190,13 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         adx = adx_series.iloc[-1] if isinstance(adx_series, pd.Series) and not adx_series.empty else None
         # Range filter
         context = self._analyze_market_context(df)
-        # Check all conditions (ATR/volatility check removed)
-        return (adx is not None and adx > 25 and
-                not context.get('is_ranging', False))
+        adx_ok = True
+        if hasattr(self, 'use_adx_filter') and self.use_adx_filter:
+            adx_ok = adx is not None and adx > (self.adx_threshold if hasattr(self, 'adx_threshold') else 20.0)
+        range_ok = True
+        if hasattr(self, 'use_range_filter') and self.use_range_filter:
+            range_ok = not context.get('is_ranging', False)
+        return adx_ok and range_ok
 
     def _calculate_dynamic_exits(self, primary: pd.DataFrame, direction: str, entry: float, 
                                 stop: float, risk_pips: float, level: float, candle_idx: int) -> dict:

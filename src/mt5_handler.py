@@ -284,6 +284,31 @@ class MT5Handler:
         # If we get here, all recovery attempts failed
         return None
 
+    def _adjust_volume_to_broker_limits(self, symbol: str, requested_volume: float) -> float:
+        """
+        Adjust the requested lot size to comply with broker's min/max/step constraints for the symbol.
+        Args:
+            symbol (str): Trading symbol
+            requested_volume (float): Requested lot size
+        Returns:
+            float: Adjusted lot size within allowed limits
+        """
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"Could not get symbol info for {symbol}, using requested volume {requested_volume}")
+            return requested_volume
+        min_vol = getattr(symbol_info, 'volume_min', 0.01)
+        max_vol = getattr(symbol_info, 'volume_max', 100.0)
+        step = getattr(symbol_info, 'volume_step', 0.01)
+        # Clamp to min/max
+        adjusted = max(min(requested_volume, max_vol), min_vol)
+        # Align to step
+        adjusted = round(adjusted / step) * step
+        # Ensure precision (usually 2 decimals)
+        adjusted = round(adjusted, 2)
+        if adjusted != requested_volume:
+            logger.info(f"Adjusted requested volume {requested_volume} to {adjusted} for {symbol} (min={min_vol}, max={max_vol}, step={step})")
+        return adjusted
 
     def place_market_order(
         self,
@@ -353,61 +378,53 @@ class MT5Handler:
                 logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
                 take_profit = price - min_stop_distance - symbol_info.point
 
+        # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
+        try:
+            digits = int(getattr(symbol_info, "digits", 2))  # default to 2 if attribute missing
+            price = round(price, digits)
+            stop_loss = round(stop_loss, digits)
+            take_profit = round(take_profit, digits)
+            logger.debug(f"Rounded prices to {digits} digits → Price: {price}, SL: {stop_loss}, TP: {take_profit}")
+        except Exception as e:
+            logger.warning(f"Failed to round prices for {symbol}: {e}")
+        # ------------------------------------------------------------------------------
+
         # Log original volume request
         logger.info(f"Requested position size: {volume:.4f} lots")
 
-        # Adjust position size based on available margin
-        adjusted_volume = volume  # Default to requested volume
+        # --- NEW: Adjust volume to broker limits (min/max/step) ---
+        adjusted_volume = self._adjust_volume_to_broker_limits(symbol, volume)
+        if adjusted_volume != volume:
+            logger.info(f"Volume adjusted to broker limits: {adjusted_volume:.4f} lots (was {volume:.4f})")
+
+        # --- Optionally, also adjust for margin constraints using risk manager as before ---
         if self.risk_manager:
             try:
-                # Get account balance from account_info
                 if account_info and 'balance' in account_info:
                     account_balance = account_info['balance']
-
-                    # Get stop loss for risk calculation if not 0
-                    stop_loss_price = stop_loss if stop_loss != 0 else price * 0.95  # Default 5% if no SL
-
-                    # Call calculate_position_size with correct parameters
+                    stop_loss_price = stop_loss if stop_loss != 0 else price * 0.95
                     if hasattr(self.risk_manager, 'calculate_position_size'):
                         risk_percent = self.risk_manager.max_risk_per_trade * 100 if hasattr(self.risk_manager, 'max_risk_per_trade') else 1.0
-                        adjusted_volume = self.risk_manager.calculate_position_size(
+                        margin_adjusted = self.risk_manager.calculate_position_size(
                             account_balance=account_balance,
                             risk_per_trade=risk_percent,
                             entry_price=price,
                             stop_loss_price=stop_loss_price,
                             symbol=symbol
                         )
-                        if adjusted_volume != volume:
-                            logger.info(f"Adjusted position size: {adjusted_volume:.4f} lots (based on risk management)")
-                    else:
-                        logger.warning("RiskManager doesn't have calculate_position_size method")
+                        # Take the minimum of broker-limited and margin-limited size
+                        if margin_adjusted < adjusted_volume:
+                            logger.info(f"Further adjusted position size to {margin_adjusted:.4f} lots due to margin constraints")
+                        adjusted_volume = min(adjusted_volume, margin_adjusted)
             except Exception as e:
-                logger.warning(f"Failed to adjust position size: {str(e)}. Using original size: {volume:.4f} lots")
-                adjusted_volume = volume
+                logger.warning(f"Failed to adjust position size for margin: {str(e)}. Using broker-limited size: {adjusted_volume:.4f} lots")
 
-        # Enhanced margin error handling
+        # Final check: ensure volume is still within broker limits after all adjustments
+        adjusted_volume = self._adjust_volume_to_broker_limits(symbol, adjusted_volume)
+
         if adjusted_volume == 0:
-            logger.error(f"Cannot place order: No margin available for {symbol}")
-
-            # Calculate how much margin would be needed
-            try:
-                contract_size = symbol_info.trade_contract_size
-                leverage = account_info.leverage if account_info else 100
-                estimated_margin = (price * contract_size * volume) / leverage
-
-                logger.error(f"Estimated margin needed: {estimated_margin:.2f}, but free margin is only: {account_info.margin_free:.2f}" if account_info else "Account info unavailable")
-                logger.error(f"Consider reducing position size or depositing more funds")
-            except Exception as e:
-                logger.error(f"Error while calculating estimated margin: {str(e)}")
-
+            logger.error(f"Cannot place order: No margin or volume available for {symbol}")
             return None
-
-        # If volume was adjusted, log the reason
-        if adjusted_volume < volume:
-            logger.warning(f"Position size adjusted from {volume:.4f} to {adjusted_volume:.4f} lots due to margin constraints")
-
-        # Round volume to valid step size
-        adjusted_volume = round(adjusted_volume / symbol_info.volume_step) * symbol_info.volume_step
 
         # Get appropriate filling mode for this symbol
         filling_mode = self.get_symbol_filling_mode(symbol)

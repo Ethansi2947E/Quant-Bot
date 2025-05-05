@@ -37,7 +37,7 @@ data_loader = select_data_loader(
 )
 
 # 4. Load the strategy (BreakoutReversalStrategy)
-strategy = load_strategy('ConfluencePriceActionStrategy', {
+strategy = load_strategy('BreakoutReversalStrategy', {
     'primary_timeframe': 'M15',
     'higher_timeframe': 'H1'
 })
@@ -52,7 +52,10 @@ backtester = Backtester(
         'initial_balance': 10000,
         'trade_log_path': 'exports/demo_trade_log.csv',
         'trade_log_json_path': 'exports/demo_trade_log.json',
-        'results_json_path': 'exports/demo_results.json'
+        'results_json_path': 'exports/demo_results.json',
+        # Enable profiling for strategy.generate_signals (prints cProfile summary)
+        # Note: This will automatically disable parallelization for compatibility with cProfile
+        'profile': False
     }
 )
 asyncio.run(backtester.run())

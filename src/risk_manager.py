@@ -332,14 +332,37 @@ class RiskManager:
         stop = trade.get('stop_loss', 0)
         tp = trade.get('take_profit', 0)
         requested_size = trade.get('position_size', 0)
+        direction = trade.get('direction')
         
-        # --- Enforce minimum risk:reward ratio ---
-        risk = abs(entry - stop)
-        reward = abs(tp - entry)
-        if reward <= 0 or risk <= 0 or (reward / risk) < self.min_risk_reward:
+        # --- Enforce proper SL/TP placement and minimum risk:reward ratio ---
+        direction_lower = str(direction or "").lower()
+
+        # Compute signed risk & reward based on direction
+        if direction_lower == "buy":
+            risk_val = entry - stop           # should be > 0
+            reward_val = tp - entry           # should be > 0
+        elif direction_lower == "sell":
+            risk_val = stop - entry          # should be > 0
+            reward_val = entry - tp          # should be > 0
+        else:
+            # Unknown direction – treat as invalid
             return {
                 'valid': False,
-                'reason': f"Risk:Reward ratio too low ({reward/risk if risk > 0 else 0:.2f}), must be at least {self.min_risk_reward:.2f}"
+                'reason': f"Unknown trade direction '{direction}'"
+            }
+
+        # Validate SL/TP placement
+        if risk_val <= 0 or reward_val <= 0:
+            return {
+                'valid': False,
+                'reason': 'Stop-loss and/or take-profit are on the wrong side of the entry price for the trade direction'
+            }
+
+        # Enforce minimum R:R
+        if (reward_val / risk_val) < self.min_risk_reward:
+            return {
+                'valid': False,
+                'reason': f"Risk:Reward ratio too low ({reward_val / risk_val:.2f}), must be at least {self.min_risk_reward:.2f}"
             }
         
         # Determine position size based on config

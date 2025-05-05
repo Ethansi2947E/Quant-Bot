@@ -498,7 +498,7 @@ class BreakoutReversalStrategy(SignalGenerator):
     to generate high-probability trading signals.
     """
     
-    def __init__(self, primary_timeframe="M1", higher_timeframe="H1", use_range_extension_tp=False, **kwargs):
+    def __init__(self, primary_timeframe="M1", higher_timeframe="H1", use_range_extension_tp=False, backtest_mode=False, **kwargs):
         """
         Initialize the Breakout and Reversal strategy.
         
@@ -894,57 +894,44 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Ensure current_time is a datetime object
         if not isinstance(current_time, datetime):
             logger.debug(f"Converting current_time from {type(current_time)} to datetime")
-            # If it's a timestamp (integer), convert to datetime
             try:
                 if isinstance(current_time, (int, np.integer, float)):
-                    # Try different units for timestamp conversion
                     try:
                         current_time = datetime.fromtimestamp(current_time)
                     except (ValueError, OverflowError):
                         try:
-                            current_time = datetime.fromtimestamp(current_time / 1000)  # Try milliseconds
+                            current_time = datetime.fromtimestamp(current_time / 1000)
                         except:
                             current_time = datetime.now()
                 elif isinstance(current_time, pd.Timestamp):
                     current_time = current_time.to_pydatetime()
                 else:
-                    # For other types, use string conversion
                     current_time = pd.to_datetime(str(current_time)).to_pydatetime()
             except Exception as e:
-                # If all conversions fail, use current time
                 logger.debug(f"Failed to convert timestamp: {e}, using current time instead")
                 current_time = datetime.now()
         
-        if symbol in self.last_updated:
-            last_update = self.last_updated[symbol]
-            # Ensure last_update is a datetime object too
+        last_update = self.last_updated['key_levels'].get(symbol)
+        if last_update is not None:
             if not isinstance(last_update, datetime):
                 logger.debug(f"Converting last_update from {type(last_update)} to datetime")
                 try:
                     if isinstance(last_update, (int, np.integer, float)):
-                        # Try different units for timestamp conversion
                         try:
                             last_update = datetime.fromtimestamp(last_update)
                         except (ValueError, OverflowError):
                             try:
-                                last_update = datetime.fromtimestamp(last_update / 1000)  # Try milliseconds
+                                last_update = datetime.fromtimestamp(last_update / 1000)
                             except:
-                                # Force update in case of conversion error
                                 last_update = datetime.now() - timedelta(hours=self.level_update_interval + 1)
                     elif isinstance(last_update, pd.Timestamp):
                         last_update = last_update.to_pydatetime()
                     else:
-                        # For other types, use string conversion
                         last_update = pd.to_datetime(str(last_update)).to_pydatetime()
                 except Exception as e:
-                    # If all conversions fail, force an update
                     logger.debug(f"Failed to convert last_update: {e}, forcing update")
                     last_update = datetime.now() - timedelta(hours=self.level_update_interval + 1)
-                
-                # Update the stored value
-                self.last_updated[symbol] = last_update
-            
-            # Only update every X hours depending on timeframe
+                self.last_updated['key_levels'][symbol] = last_update
             try:
                 time_diff = (current_time - last_update).total_seconds()
                 if time_diff < self.level_update_interval * 3600:
@@ -952,22 +939,13 @@ class BreakoutReversalStrategy(SignalGenerator):
                     return
             except Exception as e:
                 logger.warning(f"Error calculating time difference: {e}. Forcing update.")
-                # Force update in case of error
-        
         logger.debug(f"🔄 Updating key levels for {symbol} with {len(df)} candles")
-        
-        # Find swing highs and lows
         support_levels = self._find_support_levels(df)
         resistance_levels = self._find_resistance_levels(df)
-        
-        # Store levels
         self.support_levels[symbol] = support_levels
         self.resistance_levels[symbol] = resistance_levels
-        self.last_updated[symbol] = current_time
-        
+        self.last_updated['key_levels'][symbol] = current_time
         logger.info(f"🔄 Updated key levels for {symbol} - Support: {len(support_levels)}, Resistance: {len(resistance_levels)}")
-        
-        # Log actual levels for debugging
         if support_levels:
             logger.debug(f"📉 Support levels for {symbol}: {[round(level['zone_max'], 5) for level in support_levels]}")
         if resistance_levels:
@@ -982,7 +960,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         if not skip_plots:
             plot_raw_price_series(df, symbol, self.primary_timeframe)
         current_time = datetime.now()
-        last_update_time = self.last_updated.get('trend_lines', {}).get(symbol, None)
+        last_update_time = self.last_updated['trend_lines'].get(symbol, None)
         force_update = debug_force_update
 
         if (not force_update and last_update_time is not None and 
@@ -1098,29 +1076,29 @@ class BreakoutReversalStrategy(SignalGenerator):
     
     def _find_swing_highs(self, df: pd.DataFrame, window: int = 5) -> list:
         """
-        Find swing highs (pivot highs) using a windowed approach.
+        Vectorized swing high (pivot high) detection using rolling window.
         Returns a list of (index, high) tuples.
         """
         if df is None or len(df) < 2 * window + 1:
             return []
-        pivots_high = []
-        for i in range(window, len(df) - window):
-            if df['high'].iloc[i] == max(df['high'].iloc[i-window:i+window+1]):
-                pivots_high.append((i, df['high'].iloc[i]))
-        return pivots_high
+        highs = df['high']
+        roll_max = highs.rolling(window=2*window+1, center=True).max()
+        is_pivot = (highs == roll_max)
+        pivots = [(i, highs.iloc[i]) for i in range(window, len(df) - window) if is_pivot.iloc[i]]
+        return pivots
     
     def _find_swing_lows(self, df: pd.DataFrame, window: int = 5) -> list:
         """
-        Find swing lows (pivot lows) using a windowed approach.
+        Vectorized swing low (pivot low) detection using rolling window.
         Returns a list of (index, low) tuples.
         """
         if df is None or len(df) < 2 * window + 1:
             return []
-        pivots_low = []
-        for i in range(window, len(df) - window):
-            if df['low'].iloc[i] == min(df['low'].iloc[i-window:i+window+1]):
-                pivots_low.append((i, df['low'].iloc[i]))
-        return pivots_low
+        lows = df['low']
+        roll_min = lows.rolling(window=2*window+1, center=True).min()
+        is_pivot = (lows == roll_min)
+        pivots = [(i, lows.iloc[i]) for i in range(window, len(df) - window) if is_pivot.iloc[i]]
+        return pivots
     
     def _identify_trend_lines(self, df: pd.DataFrame, swing_points: list, line_type: str, skip_plots: bool = False) -> list:
         """
@@ -1162,31 +1140,31 @@ class BreakoutReversalStrategy(SignalGenerator):
     def _count_trend_line_touches(self, df: pd.DataFrame, slope: float, intercept: float, 
                                   line_type: str, atr: float = None, start_idx: int = None, end_idx: int = None) -> int:
         """
-        Count how many times price has touched a trend line, using ATR-based tolerance and only between start_idx and end_idx.
+        Vectorized: Count how many times price has touched a trend line, using ATR-based tolerance and only between start_idx and end_idx.
         """
+        import numpy as np
         if atr is None or pd.isna(atr) or atr == 0:
             atr = df['close'].rolling(14).std().iloc[-1] if len(df) >= 14 else df['close'].std()
         if atr is None or pd.isna(atr) or atr == 0:
             atr = 1e-4
-        touches = 0
         price_series = df['low'] if line_type == 'bullish' else df['high']
         # Only check between start_idx and end_idx
         if start_idx is None or end_idx is None:
             start_idx = 0
             end_idx = len(df) - 1
-        for i in range(start_idx, end_idx + 1):
-            ts = df.index[i]
-            if isinstance(ts, pd.Timestamp):
-                x = ts.timestamp()
-            elif isinstance(ts, datetime):
-                x = ts.timestamp()
-            else:
-                x = float(i)
-            line_value = slope * x + intercept
-            price = price_series.iloc[i]
-            if abs(price - line_value) <= atr * 0.25:  # 0.25 ATR as touch tolerance
-                    touches += 1
-        return min(touches, 20)
+        idx_range = np.arange(start_idx, end_idx + 1)
+        # Convert index to x (timestamp or float)
+        index_slice = df.index[idx_range]
+        x_vals = np.array([
+            ts.timestamp() if isinstance(ts, (pd.Timestamp, datetime)) else float(i)
+            for i, ts in zip(idx_range, index_slice)
+        ])
+        line_values = slope * x_vals + intercept
+        prices = price_series.iloc[idx_range].to_numpy(dtype=float)
+        line_values = line_values.astype(float)
+        diffs = np.abs(prices - line_values)
+        touches = np.sum(diffs <= atr * 0.25)
+        return int(min(touches, 20))
     
     def _is_near_trend_line(self, df: pd.DataFrame, idx: int, trend_lines: List[Dict], 
                            line_type: str) -> Optional[Dict]:
@@ -1239,26 +1217,23 @@ class BreakoutReversalStrategy(SignalGenerator):
             symbol: Trading symbol
             df: Price dataframe
         """
-        # Look for periods where price is ranging (not trending strongly)
-        if symbol in self.last_consolidation_ranges:
-            last_update = self.last_updated.get(symbol, datetime.min)
-            current_time = df.index[-1]
-            
-            # Ensure current_time is a datetime object
-            if not isinstance(current_time, datetime):
-                logger.debug(f"Converting current_time from {type(current_time)} to datetime in consolidation ranges")
-                if isinstance(current_time, (int, np.integer, float)):
+        # Always set current_time from the last index
+        current_time = df.index[-1]
+        # Ensure current_time is a datetime object
+        if not isinstance(current_time, datetime):
+            logger.debug(f"Converting current_time from {type(current_time)} to datetime in consolidation ranges")
+            if isinstance(current_time, (int, np.integer, float)):
+                try:
+                    current_time = pd.to_datetime(int(current_time) if isinstance(current_time, np.integer) else float(current_time), unit='s')
+                except:
                     try:
-                        # Fix: Explicitly cast to int or float for pd.to_datetime
-                        current_time = pd.to_datetime(int(current_time) if isinstance(current_time, np.integer) else float(current_time), unit='s')
+                        current_time = pd.to_datetime(int(current_time) if isinstance(current_time, np.integer) else float(current_time), unit='ms')
                     except:
-                        try:
-                            # Fix: Explicitly cast to int or float for pd.to_datetime
-                            current_time = pd.to_datetime(int(current_time) if isinstance(current_time, np.integer) else float(current_time), unit='ms')
-                        except:
-                            # If conversion fails, use current time
-                            current_time = datetime.now()
-                            logger.debug(f"Failed to convert timestamp, using current time instead")
+                        current_time = datetime.now()
+                        logger.debug(f"Failed to convert timestamp, using current time instead")
+        
+        if symbol in self.last_consolidation_ranges:
+            last_update = self.last_updated['consolidation_ranges'].get(symbol, datetime.min)
             
             # Ensure last_update is a datetime object
             if not isinstance(last_update, datetime):
@@ -1276,7 +1251,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             last_update = datetime.now() - timedelta(hours=self.range_update_interval + 1)
                             logger.debug(f"Failed to convert last_update, forcing update in consolidation ranges")
                 # Update the stored value
-                self.last_updated[symbol] = last_update
+                self.last_updated['consolidation_ranges'][symbol] = last_update
             
             # Only update after significant time has passed based on timeframe
             try:
@@ -1431,6 +1406,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                     'size': 0,
                     'is_consolidation': False
                 }
+        self.last_updated['consolidation_ranges'][symbol] = current_time
     
     def _process_retest_conditions(self, symbol: str, df: pd.DataFrame) -> None:
         """
@@ -1536,13 +1512,15 @@ class BreakoutReversalStrategy(SignalGenerator):
         if direction == 'bullish' and abs(current_price - level) <= price_tolerance and current_price > level:
             logger.info(f"✅ Confirmed bullish retest of {level:.5f} for {symbol} (ATR window: {price_tolerance:.5f})")
             # Update breakout tracking to indicate retest is confirmed
-            self.retest_tracking[symbol]['retest_confirmed'] = True
-            
+            retest_info['retest_confirmed'] = True
+            self.retest_tracking[symbol] = retest_info
+        
         # For breakout below support, we're looking for a retest from below
         elif direction == 'bearish' and abs(current_price - level) <= price_tolerance and current_price < level:
             logger.info(f"✅ Confirmed bearish retest of {level:.5f} for {symbol} (ATR window: {price_tolerance:.5f})")
             # Update breakout tracking to indicate retest is confirmed
-            self.retest_tracking[symbol]['retest_confirmed'] = True
+            retest_info['retest_confirmed'] = True
+            self.retest_tracking[symbol] = retest_info
     
     def _find_support_levels(self, df: pd.DataFrame) -> List[dict]:
         """
@@ -1580,53 +1558,22 @@ class BreakoutReversalStrategy(SignalGenerator):
 
     def _count_level_touches(self, df: pd.DataFrame, level: float, level_type: str) -> int:
         """
-        Count how many times price has touched a level.
-        
-        Args:
-            df: Price dataframe
-            level: Price level to check
-            level_type: 'support' or 'resistance'
-            
-        Returns:
-            Number of touches
+        Vectorized: Count how many times price has touched a level.
         """
+        import numpy as np
         tolerance = level * self.price_tolerance
-        count = 0
-        
         if level_type == 'support':
-            # Price approached from above and bounced
-            for i in range(len(df)):
-                if abs(df['low'].iloc[i] - level) <= tolerance:
-                    count += 1
-        else:  # resistance
-            # Price approached from below and bounced
-            for i in range(len(df)):
-                if abs(df['high'].iloc[i] - level) <= tolerance:
-                    count += 1
-                    
-        return count
+            prices = df['low'].to_numpy(dtype=float)
+        else:
+            prices = df['high'].to_numpy(dtype=float)
+        diffs = np.abs(prices - level)
+        count = np.sum(diffs <= tolerance)
+        return int(count)
     
     def _cluster_levels(self, levels: List[float]) -> List[dict]:
-        """
-        Cluster nearby levels to avoid duplicates, returning zones (min, max, avg, width).
-        Args:
-            levels: List of price levels
-        Returns:
-            List of dicts: {'zone_min', 'zone_max', 'zone_avg', 'zone_width'}
-        """
-        if not levels:
-            return []
-        sorted_levels = sorted(levels)
-        clusters = []
-        current_cluster = [sorted_levels[0]]
-        for i in range(1, len(sorted_levels)):
-            if sorted_levels[i] - sorted_levels[i-1] <= sorted_levels[i] * self.price_tolerance:
-                current_cluster.append(sorted_levels[i])
-            else:
-                clusters.append(current_cluster)
-                current_cluster = [sorted_levels[i]]
-        clusters.append(current_cluster)
-        # For each cluster, return zone info
+        """Cluster nearby levels to avoid duplicates, returning zones (min, max, avg, width)."""
+        tol = self.price_tolerance * max(levels) if levels else 0
+        clusters = self.cluster_items(levels, metric=lambda x: x, tol=tol)
         result = []
         for cluster in clusters:
             zone_min = min(cluster)
@@ -1792,14 +1739,25 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each resistance level
             for level in resistance_levels:
                 logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
-                # Updated breakout condition: require close > zone_max + price_tolerance*zone_max
-                if (
-                    previous_candle['close'] <= level['zone_max'] * (1 + self.price_tolerance)
-                    and current_candle['close'] > level['zone_max'] * (1 + self.price_tolerance)
-                ):
-                    # False-breakout filter for bullish breakouts
-                    if self.detect_false_breakout(df.iloc[:i+1], direction='bullish', price_tolerance=self.price_tolerance).iloc[-1]:
-                        logger.debug(f"🚫 False breakout detected for {symbol} at resistance breakout, skipping signal.")
+                # Hybrid tolerance: max(zone_max * price_tolerance, atr * atr_multiplier)
+                tol = max(level['zone_max'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                breakout_prev = previous_candle['close'] <= level['zone_max'] + tol
+                breakout_now = current_candle['close'] > level['zone_max'] + tol
+                if breakout_prev and breakout_now:
+                    # False-breakout filter for bullish breakouts (safe check)
+                    df_slice = df.iloc[:i+1]
+                    if len(df_slice) < 2:
+                        logger.debug(f"Skipping false breakout filter for {symbol} (not enough data)")
+                        continue
+                    fb_series = self.detect_false_breakout(
+                        df_slice,
+                        direction='bullish',
+                        price_tolerance=self.price_tolerance,
+                        volume_threshold=volume_threshold
+                    )
+                    if not fb_series.empty and bool(fb_series.iloc[-1]):
+                        logger.debug(
+                            f"🚫 False breakout detected for {symbol} at resistance breakout, skipping signal.")
                         continue  # skip this candle—likely a fakeout
                     # Generate buy signal
                     entry_price = current_candle['close']
@@ -1912,17 +1870,25 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each support level
             for level in support_levels:
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
-                # Updated breakdown condition: require close < zone_min - price_tolerance*zone_min
-                if (
-                    previous_candle['close'] >= level['zone_min'] * (1 - self.price_tolerance)
-                    and current_candle['close'] < level['zone_min'] * (1 - self.price_tolerance)
-                    and self._is_strong_candle(current_candle)
-                    and volume_quality < 0
-                    and h1_trend == 'bearish'
-                ):
-                    # False-breakout filter for bearish breakdowns
-                    if self.detect_false_breakout(df.iloc[:i+1], direction='bearish', price_tolerance=self.price_tolerance).iloc[-1]:
-                        logger.debug(f"🚫 False breakdown detected for {symbol} at support breakdown, skipping signal.")
+                # Hybrid tolerance: max(zone_min * price_tolerance, atr * atr_multiplier)
+                tol = max(level['zone_min'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                breakdown_prev = previous_candle['close'] >= level['zone_min'] - tol
+                breakdown_now = current_candle['close'] < level['zone_min'] - tol
+                if (breakdown_prev and breakdown_now and self._is_strong_candle(current_candle)
+                    and volume_quality < 0 and h1_trend == 'bearish'):
+                    df_slice = df.iloc[:i+1]
+                    if len(df_slice) < 2:
+                        logger.debug(f"Skipping false breakdown filter for {symbol} (not enough data)")
+                        continue
+                    fb_series = self.detect_false_breakout(
+                        df_slice,
+                        direction='bearish',
+                        price_tolerance=self.price_tolerance,
+                        volume_threshold=volume_threshold
+                    )
+                    if not fb_series.empty and bool(fb_series.iloc[-1]):
+                        logger.debug(
+                            f"🚫 False breakdown detected for {symbol} at support breakdown, skipping signal.")
                         continue  # skip this candle—likely a fakeout
                     # Generate sell signal
                     entry_price = current_candle['close']
@@ -2077,8 +2043,8 @@ class BreakoutReversalStrategy(SignalGenerator):
         self._log_candle_samples(df, symbol, count=5)
         volume_threshold = self._compute_volume_threshold(df)
         
-        # Define number of recent candles to check for patterns
-        candles_to_check = 10
+        # Use parameterized number of recent candles to check for patterns
+        candles_to_check = min(self.candles_to_check, len(df) - 1)
         
         # Prepare trend line lists
         trend_lines = self.bullish_trend_lines.get(symbol, []) + self.bearish_trend_lines.get(symbol, [])
@@ -2174,8 +2140,16 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"✓ {symbol}: Price near trend line: {is_near_trendline} (Low: {current_candle['low']:.5f}, Trend line: {line_value:.5f})")
                 
                 if is_near_trendline:
-                    # Detect bullish reversal pattern
-                    pattern_type = self._detect_bullish_reversal_pattern(df, i, is_downtrend)
+                    # Detect bullish reversal pattern using precomputed vectorized series
+                    pattern_types = []
+                    idx = i if i >= 0 else len(df) + i
+                    if hammer_pattern.iloc[idx]:
+                        pattern_types.append("Hammer")
+                    if bullish_engulfing_pattern.iloc[idx]:
+                        pattern_types.append("Bullish Engulfing")
+                    if morning_star_pattern.iloc[idx]:
+                        pattern_types.append("Morning Star")
+                    pattern_type = ", ".join(pattern_types) if pattern_types else None
                     volume_desc = "strong bullish volume" if volume_quality > 1 else "adequate volume"
                     
                     if pattern_type:
@@ -2328,10 +2302,16 @@ class BreakoutReversalStrategy(SignalGenerator):
                 line_value = self._calculate_trend_line_value(trend_line, i)
                 # Price near trend line
                 if abs(current_candle['high'] - line_value) <= self._get_dynamic_tolerance(df, i, fallback_price=line_value):
-                    # Detect bearish reversal pattern
-                    # Get the uptrend state instead of downtrend for bearish pattern
-                    is_uptrend = self._determine_higher_timeframe_trend(h1_df) == 'bullish'
-                    pattern_type = self._detect_bearish_reversal_pattern(df, i, is_uptrend)
+                    # Detect bearish reversal pattern using precomputed vectorized series
+                    pattern_types = []
+                    idx = i if i >= 0 else len(df) + i
+                    if shooting_star_pattern.iloc[idx]:
+                        pattern_types.append("Shooting Star")
+                    if bearish_engulfing_pattern.iloc[idx]:
+                        pattern_types.append("Bearish Engulfing")
+                    if evening_star_pattern.iloc[idx]:
+                        pattern_types.append("Evening Star")
+                    pattern_type = ", ".join(pattern_types) if pattern_types else None
                     volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
 
                     if pattern_type:
@@ -2414,8 +2394,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         if not levels_below:
             return None
         # Return the zone_max of the nearest zone below
-        return max(levels_below, key=lambda z: z['zone_max'])['zone_max']
-    
+        return max(levels_below, key=lambda z: z['zone_max'])['zone_max']    
     
     def _is_strong_candle(self, candle: pd.Series) -> bool:
         """
@@ -2618,142 +2597,6 @@ class BreakoutReversalStrategy(SignalGenerator):
         except (TypeError, ValueError):
             return True
     
-    
-    def _detect_bullish_reversal_pattern(self, df: pd.DataFrame, idx: int, in_downtrend: bool) -> Optional[str]:
-        """
-        Detect bullish reversal patterns with trend context consideration.
-        
-        Args:
-            df: DataFrame with price data
-            idx: Index to check for pattern
-            in_downtrend: Whether we're in a downtrend (makes bullish reversal more reliable)
-            
-        Returns:
-            String describing detected pattern(s) or None
-        """
-        # Precompute vectorized patterns for the DataFrame
-        hammer_pattern = self.detect_hammer(df, self.price_tolerance)
-        bullish_engulfing_pattern = self.detect_bullish_engulfing(df)
-        morning_star_pattern = self.detect_morning_star(df, self.price_tolerance)
-        
-        pattern_types = []
-        
-        # Apply trend context filter - bullish patterns are more reliable in downtrends
-        if not in_downtrend:
-            # If not in downtrend, require stronger confirmation of pattern quality
-            # This is similar to the original implementation which checked confirmation
-            
-            # For hammer, check post-pattern confirmation by looking at next candle (if available)
-            if hammer_pattern.iloc[idx] and idx < len(df) - 1:
-                next_candle = df.iloc[idx + 1]
-                # Only include hammer if next candle confirms with higher close
-                if next_candle['close'] > df.iloc[idx]['close']:
-                    pattern_types.append("Hammer (Confirmed)")
-                else:
-                    # Weaker evidence - still include but note it's unconfirmed
-                    pattern_types.append("Hammer (Unconfirmed)")
-            elif hammer_pattern.iloc[idx]:
-                pattern_types.append("Hammer (Unconfirmed)")
-                
-            # For engulfing, check volume confirmation
-            if bullish_engulfing_pattern.iloc[idx]:
-                current_candle = df.iloc[idx]
-                prev_candle = df.iloc[idx - 1] if idx > 0 else None
-                
-                if prev_candle is not None:
-                    # Check if engulfing candle has higher volume than previous
-                    current_vol = current_candle.get('tick_volume', current_candle.get('volume', 0))
-                    prev_vol = prev_candle.get('tick_volume', prev_candle.get('volume', 0))
-                    
-                    if current_vol > prev_vol:
-                        pattern_types.append("Bullish Engulfing (Volume Confirmed)")
-                    else:
-                        pattern_types.append("Bullish Engulfing")
-                else:
-                    pattern_types.append("Bullish Engulfing")
-                    
-            # Morning star has built-in confirmation in its 3-candle structure
-            if morning_star_pattern.iloc[idx]:
-                pattern_types.append("Morning Star")
-        else:
-            # In a downtrend, patterns are more reliable, so include as is
-            if hammer_pattern.iloc[idx]:
-                pattern_types.append("Hammer")
-            if bullish_engulfing_pattern.iloc[idx]:
-                pattern_types.append("Bullish Engulfing")
-            if morning_star_pattern.iloc[idx]:
-                pattern_types.append("Morning Star")
-        
-        if pattern_types:
-            return ", ".join(pattern_types)
-        return None
-
-    def _detect_bearish_reversal_pattern(self, df: pd.DataFrame, idx: int, in_uptrend: bool) -> Optional[str]:
-        """
-        Detect bearish reversal patterns with trend context consideration.
-        
-        Args:
-            df: DataFrame with price data
-            idx: Index to check for pattern
-            in_uptrend: Whether we're in an uptrend (makes bearish reversal more reliable)
-            
-        Returns:
-            String describing detected pattern(s) or None
-        """
-        shooting_star_pattern = self.detect_shooting_star(df, self.price_tolerance)
-        bearish_engulfing_pattern = self.detect_bearish_engulfing(df)
-        evening_star_pattern = self.detect_evening_star(df, self.price_tolerance)
-        
-        pattern_types = []
-        
-        # Apply trend context filter - bearish patterns are more reliable in uptrends
-        if not in_uptrend:
-            # If not in uptrend, require stronger confirmation 
-            
-            # For shooting star, check post-pattern confirmation
-            if shooting_star_pattern.iloc[idx] and idx < len(df) - 1:
-                next_candle = df.iloc[idx + 1]
-                # Only include shooting star if next candle confirms with lower close
-                if next_candle['close'] < df.iloc[idx]['close']:
-                    pattern_types.append("Shooting Star (Confirmed)")
-                else:
-                    pattern_types.append("Shooting Star (Unconfirmed)")
-            elif shooting_star_pattern.iloc[idx]:
-                pattern_types.append("Shooting Star (Unconfirmed)")
-                
-            # For engulfing, check volume confirmation
-            if bearish_engulfing_pattern.iloc[idx]:
-                current_candle = df.iloc[idx]
-                prev_candle = df.iloc[idx - 1] if idx > 0 else None
-                
-                if prev_candle is not None:
-                    # Check if engulfing candle has higher volume than previous
-                    current_vol = current_candle.get('tick_volume', current_candle.get('volume', 0))
-                    prev_vol = prev_candle.get('tick_volume', prev_candle.get('volume', 0))
-                    
-                    if current_vol > prev_vol:
-                        pattern_types.append("Bearish Engulfing (Volume Confirmed)")
-                    else:
-                        pattern_types.append("Bearish Engulfing")
-                else:
-                    pattern_types.append("Bearish Engulfing")
-                    
-            # Evening star has built-in confirmation in its 3-candle structure
-            if evening_star_pattern.iloc[idx]:
-                pattern_types.append("Evening Star")
-        else:
-            # In an uptrend, patterns are more reliable, so include as is
-            if shooting_star_pattern.iloc[idx]:
-                pattern_types.append("Shooting Star")
-            if bearish_engulfing_pattern.iloc[idx]:
-                pattern_types.append("Bearish Engulfing")
-            if evening_star_pattern.iloc[idx]:
-                pattern_types.append("Evening Star")
-        
-        if pattern_types:
-            return ", ".join(pattern_types)
-        return None
-    
     def _score_signals(self, raw_signals: List[Dict], primary_df: pd.DataFrame, higher_df: pd.DataFrame) -> List[Dict]:
         """Score a list of raw signals using SignalScorer and standardize confidence."""
         scored = []
@@ -2851,43 +2694,32 @@ class BreakoutReversalStrategy(SignalGenerator):
         """Wrapper that delegates volume quality analysis to the shared _SignalScorer instance."""
         return self._scorer.analyze_volume_quality(candle, threshold)
     
+    def _cluster_1d(self, values: List[float], tolerance: float) -> List[List[float]]:
+        """Cluster 1D values using a given tolerance."""
+        if not values:
+            return []
+        sorted_vals = sorted(values)
+        clusters = []
+        current_cluster = [sorted_vals[0]]
+        for i in range(1, len(sorted_vals)):
+            if sorted_vals[i] - sorted_vals[i-1] <= tolerance:
+                current_cluster.append(sorted_vals[i])
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [sorted_vals[i]]
+        clusters.append(current_cluster)
+        return clusters
+    
     def _cluster_trend_lines(self, trend_lines: List[dict]) -> List[dict]:
-        """
-        Cluster similar trend lines to reduce redundancy.
-        """
+        """Cluster similar trend lines to reduce redundancy."""
         if not trend_lines:
             return []
-        angle_tolerance = 5.0  # Degrees
-        intercept_pct_tolerance = 0.0015  # 0.15% of price
-        slope_tolerance = 0.00005
-
-        avg_intercept = np.mean([line['intercept'] for line in trend_lines])
-        intercept_tolerance = avg_intercept * intercept_pct_tolerance
-
+        # Cluster by intercept (using a tolerance based on price)
+        tol = np.mean([line['intercept'] for line in trend_lines]) * 0.0015 if trend_lines else 0
+        clusters = self.cluster_items(trend_lines, metric=lambda x: x['intercept'], tol=tol)
         clustered_lines = []
-        used_indices = set()
-
-        for i, line1 in enumerate(trend_lines):
-            if i in used_indices:
-                continue
-            cluster = [line1]
-            used_indices.add(i)
-            for j, line2 in enumerate(trend_lines):
-                if j in used_indices or i == j:
-                    continue
-                angle_diff = abs(line1['angle'] - line2['angle'])
-                intercept_diff = abs(line1['intercept'] - line2['intercept'])
-                slope_diff = abs(line1['slope'] - line2['slope'])
-                if (angle_diff <= angle_tolerance and
-                    intercept_diff <= intercept_tolerance and
-                    slope_diff <= slope_tolerance):
-                    cluster.append(line2)
-                    used_indices.add(j)
-            # Choose the best line from the cluster
-            if len(cluster) > 1:
-                best_line = max(cluster, key=lambda x: x['quality_score'])
-            else:
-                best_line = cluster[0]
+        for cluster in clusters:
+            best_line = max(cluster, key=lambda x: x['quality_score'])
             clustered_lines.append(best_line)
         return clustered_lines
 
@@ -3003,27 +2835,46 @@ class BreakoutReversalStrategy(SignalGenerator):
         )
 
     @staticmethod
-    def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002) -> pd.Series:
+    def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002, volume_threshold: float = None) -> pd.Series:
         """Vectorized detection of False Breakout pattern (custom, based on wick and volume)."""
+        if len(df) < 2:
+            # Explicitly return empty Series if not enough data
+            return pd.Series(dtype=bool, index=df.index)
         prev_close = df['close'].shift(1)
         tol_val = df['close'] * price_tolerance
         if direction == 'bullish':
             wick = df['close'] - df['low']
             body = (df['close'] - df['open']).abs()
             wick_ok = wick > 2 * body
-            # Volume analysis omitted for vectorized version; can be added if needed
-            return (
-                (prev_close < df['close'] - tol_val) &
-                (wick_ok)
-            )
+            # Volume filter: require volume below threshold if provided
+            if volume_threshold is not None and 'tick_volume' in df.columns:
+                vol_ok = df['tick_volume'] < volume_threshold
+                return (
+                    (prev_close < df['close'] - tol_val) &
+                    wick_ok &
+                    vol_ok
+                )
+            else:
+                return (
+                    (prev_close < df['close'] - tol_val) &
+                    wick_ok
+                )
         else:
             wick = df['high'] - df['close']
             body = (df['close'] - df['open']).abs()
             wick_ok = wick > 2 * body
-            return (
-                (prev_close > df['close'] + tol_val) &
-                (wick_ok)
-            )
+            if volume_threshold is not None and 'tick_volume' in df.columns:
+                vol_ok = df['tick_volume'] < volume_threshold
+                return (
+                    (prev_close > df['close'] + tol_val) &
+                    wick_ok &
+                    vol_ok
+                )
+            else:
+                return (
+                    (prev_close > df['close'] + tol_val) &
+                    wick_ok
+                )
 
     def _get_dynamic_tolerance(self, df: pd.DataFrame, idx: int, fallback_price: float = None) -> float:
         """
@@ -3050,3 +2901,28 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Fallback to close price if nothing else
         close = df['close'].iloc[idx] if idx < len(df) else df['close'].iloc[-1]
         return close * self.price_tolerance
+
+    @staticmethod
+    def cluster_items(items, metric, tol):
+        """
+        Generic 1D clustering utility. Groups items by proximity using a metric and tolerance.
+        Args:
+            items: list of items to cluster
+            metric: function to extract a float value from each item
+            tol: float, maximum distance for clustering
+        Returns:
+            List of clusters (each a list of items)
+        """
+        if not items:
+            return []
+        sorted_items = sorted(items, key=metric)
+        clusters = []
+        current_cluster = [sorted_items[0]]
+        for item in sorted_items[1:]:
+            if abs(metric(item) - metric(current_cluster[-1])) <= tol:
+                current_cluster.append(item)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [item]
+        clusters.append(current_cluster)
+        return clusters
