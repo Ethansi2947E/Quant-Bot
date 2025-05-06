@@ -357,6 +357,17 @@ class RiskManager:
                 'valid': False,
                 'reason': 'Stop-loss and/or take-profit are on the wrong side of the entry price for the trade direction'
             }
+        # Additional: TP must be above entry for buy, below for sell
+        if direction_lower == "buy" and tp <= entry:
+            return {
+                'valid': False,
+                'reason': 'Take profit must be above entry price for buy orders'
+            }
+        elif direction_lower == "sell" and tp >= entry:
+            return {
+                'valid': False,
+                'reason': 'Take profit must be below entry price for sell orders'
+            }
 
         # Enforce minimum R:R
         if (reward_val / risk_val) < self.min_risk_reward:
@@ -369,18 +380,38 @@ class RiskManager:
         if self.use_fixed_lot_size:
             # Use fixed lot size from config, but always align with symbol's constraints
             if self.mt5_handler:
+                # Get minimum lot size for this symbol
                 min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
-                position_size = max(min_lot_size, normalized_lot)
+                
+                # If the symbol has a higher minimum lot size than our fixed lot size, 
+                # use the symbol's minimum lot size directly without trying to normalize
+                if self.fixed_lot_size < min_lot_size:
+                    position_size = min_lot_size
+                    logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum lot size {min_lot_size} for {symbol}, using minimum")
+                else:
+                    # Only normalize if our fixed lot size is at least the minimum
+                    normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
+                    position_size = normalized_lot
+                    logger.info(f"Normalized fixed lot size from {self.fixed_lot_size} to {position_size} for {symbol}")
+                
+                # Apply max lot size cap
                 position_size = min(position_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size from config (normalized): {position_size}")
+                logger.info(f"Using fixed lot size for {symbol}: {position_size}")
             else:
                 position_size = min(self.fixed_lot_size, self.max_lot_size)
                 logger.info(f"Using fixed lot size from config (no mt5_handler): {position_size}")
         elif requested_size > 0:
-            # Use requested size but cap at max lot size
-            position_size = min(requested_size, self.max_lot_size)
-            logger.info(f"Using requested position size (capped): {position_size}")
+            # Use requested size but ensure it meets symbol's constraints
+            if self.mt5_handler:
+                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                position_size = max(requested_size, min_lot_size)
+                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+            else:
+                position_size = requested_size
+                
+            # Apply max lot size cap
+            position_size = min(position_size, self.max_lot_size)
+            logger.info(f"Using requested position size (adjusted): {position_size}")
         else:
             # Calculate position size based on risk
             try:
@@ -394,7 +425,12 @@ class RiskManager:
                 logger.info(f"Calculated position size based on risk: {position_size}")
             except Exception as e:
                 logger.error(f"Error calculating position size: {str(e)}")
-                position_size = min(0.01, self.max_lot_size)  # Fallback to minimum
+                # Use symbol-specific minimum lot size as fallback
+                if self.mt5_handler:
+                    position_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    logger.info(f"Using symbol-specific minimum lot size: {position_size}")
+                else:
+                    position_size = 0.01  # Default minimum
         
         # Validate risk per trade if not using fixed lot size
         if not self.use_fixed_lot_size and stop != 0 and entry != 0:
@@ -404,10 +440,17 @@ class RiskManager:
             if risk_percentage > self.max_risk_per_trade:
                 # Try to adjust position size to meet risk requirement
                 adjusted_position = self.max_risk_per_trade * account_balance / abs(entry - stop)
-                adjusted_position = round(adjusted_position, 2)  # Round to standard lot precision
+                
+                # Ensure adjusted position is valid for the symbol
+                if self.mt5_handler:
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    adjusted_position = max(adjusted_position, min_lot_size)
+                    adjusted_position = self.mt5_handler.normalize_volume(symbol, adjusted_position)
+                else:
+                    adjusted_position = round(adjusted_position, 2)  # Round to standard lot precision
                 
                 # Only adjust if it's a meaningful adjustment
-                if adjusted_position >= 0.01 and adjusted_position < position_size:
+                if adjusted_position < position_size:
                     logger.warning(f"Position size reduced from {position_size} to {adjusted_position} due to risk limits")
                     position_size = adjusted_position
                 else:
@@ -519,22 +562,29 @@ class RiskManager:
                     # Get minimum lot size for this symbol
                     min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
                     
-                    # Make sure fixed lot size is not less than symbol's minimum
+                    # If the fixed lot size is less than the symbol minimum,
+                    # use the symbol minimum directly
                     if position_size < min_lot_size:
                         position_size = min_lot_size
-                        logger.info(f"Adjusted fixed lot size to symbol's minimum: {position_size}")
-                    
-                    # Normalize volume according to symbol's volume_step
-                    position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                        logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum lot size {min_lot_size} for {symbol}, using minimum")
+                    else:
+                        # Normalize volume according to symbol's volume_step
+                        position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                        logger.info(f"Normalized fixed lot size to {position_size} for {symbol}")
                 
-                logger.info(f"Using fixed lot size of {position_size} from config")
+                logger.info(f"Using fixed lot size of {position_size} for {symbol}")
                 return position_size
                 
             # If not using fixed lot size, calculate based on risk
             # Validate inputs first
             if not self._validate_position_inputs(account_balance, risk_per_trade/100, entry_price, stop_loss_price):
                 logger.warning("Invalid position sizing inputs, using default size")
-                return min(0.01, self.max_lot_size)  # Use minimum default
+                # Use symbol-specific minimum as fallback
+                if self.mt5_handler:
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
+                    return min_lot_size
+                return 0.01  # Default minimum
                 
             # Adjust risk percentage based on market condition
             adjusted_risk = risk_per_trade
@@ -549,7 +599,12 @@ class RiskManager:
             stop_distance = abs(entry_price - stop_loss_price)
             if stop_distance <= 0:
                 logger.error(f"Invalid stop distance: {stop_distance}")
-                return min(0.01, self.max_lot_size)  # Use minimum default
+                # Use symbol-specific minimum as fallback
+                if self.mt5_handler:
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
+                    return min_lot_size
+                return 0.01  # Default minimum
                 
             # Calculate risk per pip
             risk_per_pip = risk_amount / stop_distance
@@ -579,13 +634,20 @@ class RiskManager:
                 # Round to 2 decimal places (standard lot precision)
                 position_size = round(position_size, 2)
             
-            logger.info(f"Calculated position size: {position_size} lots based on risk")
+            logger.info(f"Calculated position size: {position_size} lots for {symbol} based on risk")
             return position_size
             
         except Exception as e:
             logger.error(f"Error calculating position size: {str(e)}")
-            # Return minimum position size on error
-            return min(0.01, self.max_lot_size)
+            # Return symbol-specific minimum lot size on error
+            if self.mt5_handler:
+                try:
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
+                    return min_lot_size
+                except:
+                    pass
+            return 0.01  # Default minimum
         
     @classmethod
     def get_instance(cls):
@@ -626,20 +688,41 @@ class RiskManager:
         requested_size = trade.get('size', 0) or trade.get('position_size', 0)
         account_balance = self.get_account_balance() or 10000.0
         open_trades = getattr(self, 'open_trades', [])
+        
         # Calculate lot size
         if self.use_fixed_lot_size:
             # Use fixed lot size from config, but always align with symbol's constraints
             if self.mt5_handler:
                 min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
-                lot_size = max(min_lot_size, normalized_lot)
+                
+                # If fixed lot size is below symbol minimum, use minimum directly
+                if self.fixed_lot_size < min_lot_size:
+                    lot_size = min_lot_size
+                    logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum {min_lot_size} for {symbol}, using minimum")
+                else:
+                    # Normalize the fixed lot size according to symbol constraints
+                    normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
+                    lot_size = normalized_lot
+                    logger.info(f"Normalized fixed lot size from {self.fixed_lot_size} to {lot_size} for {symbol}")
+                
+                # Apply max lot size cap
                 lot_size = min(lot_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size from config (normalized): {lot_size}")
+                logger.info(f"Using fixed lot size for {symbol}: {lot_size}")
             else:
                 lot_size = min(self.fixed_lot_size, self.max_lot_size)
                 logger.info(f"Using fixed lot size from config (no mt5_handler): {lot_size}")
         elif requested_size > 0:
-            lot_size = min(requested_size, self.max_lot_size)
+            # Use requested size but ensure it meets symbol constraints
+            if self.mt5_handler:
+                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                lot_size = max(requested_size, min_lot_size)
+                lot_size = self.mt5_handler.normalize_volume(symbol, lot_size)
+            else:
+                lot_size = requested_size
+                
+            # Apply max lot size cap
+            lot_size = min(lot_size, self.max_lot_size)
+            logger.info(f"Using requested position size (adjusted): {lot_size}")
         else:
             # Ensure required args are not None and correct type
             entry_val = float(entry) if entry is not None else 0.0

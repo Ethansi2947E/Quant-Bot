@@ -230,10 +230,11 @@ class _SignalScorer:
     def __init__(self, strategy: 'BreakoutReversalStrategy'):
         self.strategy = strategy
 
-    def analyze_volume_quality(self, candle: pd.Series, threshold: float) -> float:
+    def analyze_volume_quality(self, candle: pd.Series, threshold: float, df: pd.DataFrame = None) -> float:
         """
         Analyze the quality of volume based on candle structure and wick analysis.
         Returns a score indicating volume quality (-2 to +2).
+        Uses configurable threshold type: percentile, mean, or median.
         """
         try:
             # Check if 'tick_volume' column exists, if not use 'volume', if neither exists use a default
@@ -246,11 +247,23 @@ class _SignalScorer:
                     tick_volume = threshold * 0.8  # Default to 80% of threshold as a reasonable value
             else:
                 tick_volume = candle['tick_volume']
-                
+
+            # Compute threshold based on config
+            lookback = min(50, len(df)) if df is not None else 50
+            if df is not None and 'tick_volume' in df.columns:
+                if self.strategy.volume_threshold_type == 'mean':
+                    threshold = df['tick_volume'].iloc[-lookback:].mean()
+                    self.strategy.logger.debug(f"[VOLUME] Using mean as threshold: {threshold:.1f}")
+                elif self.strategy.volume_threshold_type == 'median':
+                    threshold = df['tick_volume'].iloc[-lookback:].median()
+                    self.strategy.logger.debug(f"[VOLUME] Using median as threshold: {threshold:.1f}")
+                else:
+                    threshold = np.percentile(df['tick_volume'].iloc[-lookback:], self.strategy.volume_percentile)
+                    self.strategy.logger.debug(f"[VOLUME] Using percentile ({self.strategy.volume_percentile}) as threshold: {threshold:.1f}")
+
             # First check if volume is even significant - using a stricter threshold
             volume_ratio = tick_volume / threshold
             self.strategy.logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
-            
             if volume_ratio < 0.8:  # More strict check
                 self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 80% of threshold {threshold:.1f}")
                 return 0  # Insufficient volume
@@ -335,6 +348,7 @@ class _SignalScorer:
     ) -> dict:
         """
         Score a signal dictionary based on multiple weighted factors, matching the old system's explicit weights and bonus logic.
+        Adds a bonus if the entry/level price is near a high-volume node in the most recent consolidation's volume profile.
         """
         symbol = signal.get('symbol')
         direction = signal['direction']
@@ -363,27 +377,33 @@ class _SignalScorer:
                 if direction == 'buy':
                     if any((abs(recent['low']-closest) <= closest*price_tolerance)):
                         level_strength_score = min(level_strength_score+0.2,1.0)
+                        self.strategy.logger.debug(f"[LEVEL] Added recency bonus for {symbol} BUY: {level_strength_score:.2f}")
                 else:
                     if any((abs(recent['high']-closest) <= closest*price_tolerance)):
                         level_strength_score = min(level_strength_score+0.2,1.0)
+                        self.strategy.logger.debug(f"[LEVEL] Added recency bonus for {symbol} SELL: {level_strength_score:.2f}")
         # 2. Volume Quality (20%)
         volume_quality_score = 0
         if 'strong' in reason and 'volume' in reason:
             volume_quality_score = 1.0
+            self.strategy.logger.debug(f"[VOLUME] {symbol}: Detected 'strong volume' in reason, setting score to 1.0")
         elif 'adequate' in reason and 'volume' in reason:
             volume_quality_score = 0.7
+            self.strategy.logger.debug(f"[VOLUME] {symbol}: Detected 'adequate volume' in reason, setting score to 0.7")
         else:
             try:
                 lookback = min(50,len(df)-1)
                 vol_thresh = np.percentile(df['tick_volume'].iloc[-lookback:], volume_percentile)
                 candle = df.iloc[-1]
-                vol_quality = self.analyze_volume_quality(candle, vol_thresh)
+                vol_quality = self.analyze_volume_quality(candle, vol_thresh, df)
                 if direction == 'buy':
                     volume_quality_score = max(0, vol_quality/2)
                 else:
                     volume_quality_score = max(0, -vol_quality/2)
-            except Exception:
+                self.strategy.logger.debug(f"[VOLUME] {symbol}: Calculated volume quality is {vol_quality:.2f}, direction-adjusted score: {volume_quality_score:.2f}")
+            except Exception as e:
                 volume_quality_score = 0.5
+                self.strategy.logger.warning(f"[VOLUME] {symbol}: Error calculating volume quality: {e}. Using default 0.5")
         # 3. Pattern Reliability (20%)
         pattern_reliability = {
             'bullish engulfing': 0.8,
@@ -402,23 +422,30 @@ class _SignalScorer:
         for pat, score in pattern_reliability.items():
             if pat in reason:
                 pattern_reliability_score = score
+                self.strategy.logger.debug(f"[PATTERN] {symbol}: Detected '{pat}' pattern with reliability score {score:.2f}")
                 break
         # 4. Trend Alignment (20%)
         trend_alignment_score = 0
         if direction=='buy':
             if higher_trend=='bullish':
                 trend_alignment_score = 1.0
+                self.strategy.logger.debug(f"[TREND] {symbol}: BUY perfectly aligned with BULLISH higher timeframe")
             elif higher_trend=='neutral':
                 trend_alignment_score = 0.5
+                self.strategy.logger.debug(f"[TREND] {symbol}: BUY with NEUTRAL higher timeframe (moderate alignment)")
             else:
                 trend_alignment_score = 0.0
+                self.strategy.logger.debug(f"[TREND] {symbol}: BUY against BEARISH higher timeframe (counter-trend)")
         else:
             if higher_trend=='bearish':
                 trend_alignment_score = 1.0
+                self.strategy.logger.debug(f"[TREND] {symbol}: SELL perfectly aligned with BEARISH higher timeframe")
             elif higher_trend=='neutral':
                 trend_alignment_score = 0.5
+                self.strategy.logger.debug(f"[TREND] {symbol}: SELL with NEUTRAL higher timeframe (moderate alignment)")
             else:
                 trend_alignment_score = 0.0
+                self.strategy.logger.debug(f"[TREND] {symbol}: SELL against BULLISH higher timeframe (counter-trend)")
         # 5. Risk-Reward (10%)
         if direction=='buy':
             risk = entry-stop
@@ -429,8 +456,16 @@ class _SignalScorer:
         if risk > 0:
             rr_ratio = reward/risk
             risk_reward_score = min(rr_ratio/3, 1.0)
+            self.strategy.logger.debug(f"[R:R] {symbol}: Risk-reward ratio {rr_ratio:.2f}:1, score: {risk_reward_score:.2f}")
         else:
             risk_reward_score = 0
+            self.strategy.logger.warning(f"[R:R] {symbol}: Invalid risk calculation (risk={risk})")
+        
+        # Reset bonus tracking
+        signal['_volume_profile_bonus'] = False
+        signal['_atr_bonus'] = 0
+        signal['consolidation_bonus'] = False
+        
         # ATR bonus (±0.1)
         atr_bonus = 0
         try:
@@ -440,10 +475,16 @@ class _SignalScorer:
                 stop_atr_ratio = abs(risk) / float(atr)
                 if 0.5 <= stop_atr_ratio <= 3.0:
                     atr_bonus = 0.1
+                    self.strategy.logger.debug(f"[BONUS] {symbol}: +0.1 ATR bonus for optimal stop placement (ratio: {stop_atr_ratio:.2f})")
+                    signal['_atr_bonus'] = 0.1
                 else:
                     atr_bonus = -0.1
-        except Exception:
+                    self.strategy.logger.debug(f"[PENALTY] {symbol}: -0.1 ATR penalty for suboptimal stop placement (ratio: {stop_atr_ratio:.2f})")
+                    signal['_atr_bonus'] = -0.1
+        except Exception as e:
             atr_bonus = 0
+            self.strategy.logger.debug(f"[ATR] {symbol}: Error calculating ATR bonus: {e}")
+        
         # Final weighted score
         final = (
             level_strength_score * 0.3 +
@@ -453,14 +494,57 @@ class _SignalScorer:
             risk_reward_score * 0.1
         )
         final = max(0, min(1, final + atr_bonus))
+        
         # Consolidation bonus (+0.05 for reversals in consolidation)
         try:
             if 'reversal' in reason and last_consolidation_ranges and symbol in last_consolidation_ranges:
                 is_consolidation = last_consolidation_ranges[symbol].get('is_consolidation', False)
                 if is_consolidation:
                     final = min(1, final + 0.05)
-        except Exception:
-            pass
+                    self.strategy.logger.debug(f"[BONUS] {symbol}: +0.05 consolidation bonus for reversal inside consolidation range")
+                    signal['consolidation_bonus'] = True
+        except Exception as e:
+            self.strategy.logger.debug(f"[CONSOLIDATION] {symbol}: Error checking consolidation: {e}")
+        
+        # --- VOLUME PROFILE NODE BONUS ---
+        try:
+            if last_consolidation_ranges and symbol in last_consolidation_ranges:
+                vprof = last_consolidation_ranges[symbol].get('volume_profile', [])
+                if vprof:
+                    # Find the highest-volume node(s)
+                    max_vol = max(node['total_volume'] for node in vprof)
+                    high_nodes = [node for node in vprof if node['total_volume'] >= 0.9 * max_vol]
+                    # Use entry or level price
+                    price = entry if entry is not None else level
+                    if price is not None:
+                        for node in high_nodes:
+                            tol = max(abs(price) * 0.0015, (node['bin_max'] - node['bin_min']) / 2)
+                            if abs(price - node['center']) <= tol:
+                                final = min(1, final + 0.07)
+                                self.strategy.logger.debug(f"[VOLUME PROFILE BONUS] {symbol}: Entry/level {price:.5f} near high-volume node {node['center']:.5f} (tol={tol:.5f}) → score +0.07")
+                                signal['_volume_profile_bonus'] = True
+                                break
+        except Exception as e:
+            self.strategy.logger.debug(f"[VOLUME PROFILE BONUS] Exception: {e}")
+            
+        # Comprehensive score breakdown log
+        self.strategy.logger.info(f"📊 SCORE COMPONENTS for {symbol} {direction}:")
+        self.strategy.logger.info(f"  • Level Strength: {level_strength_score:.2f} × 0.3 = {level_strength_score * 0.3:.2f}")
+        self.strategy.logger.info(f"  • Volume Quality: {volume_quality_score:.2f} × 0.2 = {volume_quality_score * 0.2:.2f}")
+        self.strategy.logger.info(f"  • Pattern Reliability: {pattern_reliability_score:.2f} × 0.2 = {pattern_reliability_score * 0.2:.2f}")
+        self.strategy.logger.info(f"  • Trend Alignment: {trend_alignment_score:.2f} × 0.2 = {trend_alignment_score * 0.2:.2f}")
+        self.strategy.logger.info(f"  • Risk-Reward: {risk_reward_score:.2f} × 0.1 = {risk_reward_score * 0.1:.2f}")
+        
+        # Log bonuses
+        if atr_bonus != 0:
+            self.strategy.logger.info(f"  • ATR Bonus/Penalty: {atr_bonus:.2f}")
+        if signal.get('consolidation_bonus', False):
+            self.strategy.logger.info(f"  • Consolidation Bonus: +0.05")
+        if signal.get('_volume_profile_bonus', False):
+            self.strategy.logger.info(f"  • Volume Profile Bonus: +0.07")
+            
+        self.strategy.logger.info(f"  📈 FINAL SCORE: {final:.2f}")
+        
         signal['score'] = final
         signal['score_details'] = {
             'level_strength': level_strength_score,
@@ -599,6 +683,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Initialize ATR and volume percentile settings (new)
         self.atr_multiplier = kwargs.get("atr_multiplier", 1.0)
         self.volume_percentile = kwargs.get("volume_percentile", 80)
+        self.volume_threshold_type = kwargs.get("volume_threshold_type", "percentile")  # 'percentile', 'mean', or 'median'
         
         # Load timeframe-specific parameters from the profile
         # This will override any default values set above
@@ -1211,11 +1296,12 @@ class BreakoutReversalStrategy(SignalGenerator):
     def _identify_consolidation_ranges(self, symbol: str, df: pd.DataFrame) -> None:
         """
         Identify recent consolidation ranges for target calculation using volatility metrics.
-        Detects periods where price range is less than 50% of the average range over recent bars.
-        
-        Args:
-            symbol: Trading symbol
-            df: Price dataframe
+        Also clusters price values in the consolidation window to find volume pockets (using KMeans or 1D clustering),
+        and computes a volume-by-price histogram (volume profile) for the range.
+        These are used to boost signal scoring if a trade entry/level is near a high-volume node.
+        Stores:
+            self.last_consolidation_ranges[symbol]['clusters']: List of dicts with min, max, mean, total_volume, count
+            self.last_consolidation_ranges[symbol]['volume_profile']: List of dicts with bin_min, bin_max, center, total_volume
         """
         # Always set current_time from the last index
         current_time = df.index[-1]
@@ -1361,13 +1447,75 @@ class BreakoutReversalStrategy(SignalGenerator):
                     is_consolidation = False
             
             # Store the range information
+            # --- CLUSTER-BASED CONSOLIDATION ZONES & VOLUME PROFILE ---
+            # Cluster price values (closes) in the consolidation window to find price pockets
+            # and compute a simple volume-by-price histogram (volume profile)
+            clusters = []
+            volume_profile = []
+            try:
+                from sklearn.cluster import KMeans
+                use_kmeans = True
+            except ImportError:
+                use_kmeans = False
+            # Use closes for clustering, fallback to highs/lows if needed
+            price_values = recent_bars['close'].values if 'close' in recent_bars else recent_bars['high'].values
+            price_values = np.array(price_values, dtype=float)
+            volumes = recent_bars['tick_volume'].values if 'tick_volume' in recent_bars else np.ones_like(price_values)
+            n_clusters = min(4, max(2, len(price_values)//5))
+            if use_kmeans and len(price_values) >= n_clusters:
+                # KMeans clustering on price
+                kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+                price_reshape = price_values.reshape(-1, 1)
+                labels = kmeans.fit_predict(price_reshape)
+                for c in range(n_clusters):
+                    mask = labels == c
+                    if np.sum(mask) == 0:
+                        continue
+                    cluster_prices = price_values[mask]
+                    cluster_vols = volumes[mask]
+                    clusters.append({
+                        'min': float(np.min(cluster_prices)),
+                        'max': float(np.max(cluster_prices)),
+                        'mean': float(np.mean(cluster_prices)),
+                        'total_volume': float(np.sum(cluster_vols)),
+                        'count': int(np.sum(mask))
+                    })
+            else:
+                # Fallback: use _cluster_1d
+                tol = np.std(price_values) * 0.5 if len(price_values) > 1 else 0.0001
+                cluster_lists = self._cluster_1d(list(price_values), tol)
+                for cl in cluster_lists:
+                    cl = np.array(cl, dtype=float)
+                    mask = np.isin(price_values, cl)
+                    clusters.append({
+                        'min': float(np.min(cl)),
+                        'max': float(np.max(cl)),
+                        'mean': float(np.mean(cl)),
+                        'total_volume': float(np.sum(volumes[mask])),
+                        'count': int(np.sum(mask))
+                    })
+            # Volume-by-price histogram (simple)
+            n_bins = min(10, max(3, len(price_values)//2))
+            if n_bins > 1:
+                hist, bin_edges = np.histogram(price_values, bins=n_bins, weights=volumes)
+                for i in range(len(hist)):
+                    volume_profile.append({
+                        'bin_min': float(bin_edges[i]),
+                        'bin_max': float(bin_edges[i+1]),
+                        'center': float((bin_edges[i]+bin_edges[i+1])/2),
+                        'total_volume': float(hist[i])
+                    })
+            # Add to last_consolidation_ranges
             self.last_consolidation_ranges[symbol] = {
                 'high': range_high,
                 'low': range_low,
                 'size': range_size,
-                'is_consolidation': is_consolidation
+                'is_consolidation': is_consolidation,
+                'clusters': clusters,
+                'volume_profile': volume_profile
             }
-            
+            logger.debug(f"[CLUSTER] {symbol}: Consolidation clusters: {clusters}")
+            logger.debug(f"[VOLUME PROFILE] {symbol}: Volume-by-price: {volume_profile}")
             if is_consolidation:
                 logger.info(f"📏 Identified consolidation range for {symbol}: High={range_high:.5f}, Low={range_low:.5f}, Size={range_size:.5f}")
             else:
@@ -1651,6 +1799,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                     take_profit = max(calculated_target, min_target)
                 else:
                     take_profit = retest_entry + (risk * self.min_risk_reward)
+                # --- BUY RETEST: Ensure TP is above entry ---
+                assert take_profit > retest_entry, "TP for buy must be above entry!"
                 signal = {
                     "symbol": symbol,
                     "direction": "buy",
@@ -1690,6 +1840,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                     take_profit = min(calculated_target, min_target)
                 else:
                     take_profit = retest_entry - (risk * self.min_risk_reward)
+                # --- SELL RETEST: Ensure TP is below entry ---
+                assert take_profit < retest_entry, "TP for sell must be below entry!"
                 signal = {
                     "symbol": symbol,
                     "direction": "sell",
@@ -1769,19 +1921,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                     logger.info(f"👀 Detected potential breakout for {symbol} at level {level['zone_max']:.5f}")
                     
                     # RELAXED conditions: allow signals with neutral H1 trend, don't require strong volume
-                    if h1_trend != 'bearish':  # Just avoid counter-trend signals
-                        # Generate buy signal
-                        # (existing code for generating signals)
-                        
+                    if h1_trend != 'bearish':  
                         # Add detailed logging
                         logger.debug(f"Breakout details: Close={current_candle['close']:.5f}, " +
                                    f"Level={level['zone_max']:.5f}, Volume quality={volume_quality:.2f}, " +
                                    f"H1 trend={h1_trend}")
-                        
-                        # Generate trade signals...
-                        # (Rest of the existing code)
-                
-            # Check trend line breakouts (bullish) - RELAXED conditions
             for trend_line in bearish_trend_lines:
                 # Calculate trend line value at current and previous candle
                 prev_line_value = self._calculate_trend_line_value(trend_line, i-1)
@@ -1790,9 +1934,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 # DEBUG: Log the trendline values
                 logger.debug(f"Trendline values: prev={prev_line_value:.5f}, curr={curr_line_value:.5f}, " +
                            f"close={current_candle['close']:.5f}, candle index={i}")
-                
-                # RELAXED: Breakout condition - now doesn't require strong candle, allows neutral trend
-                # Previous candle below trend line, current candle closing above
+            
                 if (previous_candle['close'] <= prev_line_value * (1 + self.price_tolerance) and
                     current_candle['close'] > curr_line_value * (1 + self.price_tolerance) and
                     h1_trend != 'bearish'):  # Just avoid counter-trend signals
@@ -2069,8 +2211,8 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.debug(f"📊 {symbol}: Volume quality score: {volume_quality:.1f} (>0 = bullish, <0 = bearish)")
             for level in support_levels:
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_max']:.5f}")
-                is_near_support = abs(current_candle['low'] - level['zone_max']) <= self._get_dynamic_tolerance(df, i, fallback_price=level['zone_max'])
-                logger.debug(f"✓ {symbol}: Price near support: {is_near_support} (Low: {current_candle['low']:.5f}, Support: {level['zone_max']:.5f}, Tolerance: {self._get_dynamic_tolerance(df, i, fallback_price=level['zone_max']):.5f})")
+                is_near_support = abs(current_candle['low'] - level['zone_max']) <= self._get_dynamic_tolerance_band(df, i, level['zone_max'])
+                logger.debug(f"✓ {symbol}: Price near support: {is_near_support} (Low: {current_candle['low']:.5f}, Support: {level['zone_max']:.5f}, Tolerance: {self._get_dynamic_tolerance_band(df, i, level['zone_max']):.5f})")
                 if is_near_support:
                     # Use only precomputed vectorized pattern detection
                     pattern_types = []
@@ -2099,6 +2241,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                                 take_profit = entry_price + min_reward
                         else:
                             take_profit = entry_price + (risk * self.min_risk_reward)
+                        assert take_profit > entry_price, "TP for buy must be above entry!"
+                        # Volume description
+                        volume_desc = "strong bullish volume" if volume_quality > 1 else "adequate volume"
+                        # Create signal
                         signal = {
                             "symbol": symbol,
                             "direction": "buy",
@@ -2136,7 +2282,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"🔄 {symbol}: Checking bullish trend line at price {line_value:.5f}")
                 
                 # Price near trend line
-                is_near_trendline = abs(current_candle['low'] - line_value) <= self._get_dynamic_tolerance(df, i, fallback_price=line_value)
+                is_near_trendline = abs(current_candle['low'] - line_value) <= self._get_dynamic_tolerance_band(df, i, line_value)
                 logger.debug(f"✓ {symbol}: Price near trend line: {is_near_trendline} (Low: {current_candle['low']:.5f}, Trend line: {line_value:.5f})")
                 
                 if is_near_trendline:
@@ -2235,7 +2381,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each resistance level
             for level in resistance_levels:
                 logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}")
-                if abs(current_candle['high'] - level['zone_min']) <= self._get_dynamic_tolerance(df, i, fallback_price=level['zone_min']):
+                if abs(current_candle['high'] - level['zone_min']) <= self._get_dynamic_tolerance_band(df, i, level['zone_min']):
                     # Use only precomputed vectorized pattern detection
                     pattern_types = []
                     idx = i if i >= 0 else len(df) + i
@@ -2257,10 +2403,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                         risk = stop_loss - entry_price
                         # Advanced target calculation - find nearest support below
                         next_support = self._find_next_support(df, entry_price, support_levels)
-                        if next_support and (entry_price - next_support) >= (risk * self.min_risk_reward):
+                        if next_support and (entry_price - next_support) >= (risk * self.min_risk_reward) and next_support < entry_price:
                             take_profit = next_support
                         else:
                             take_profit = entry_price - (risk * self.min_risk_reward)
+                        assert take_profit < entry_price, "TP for sell must be below entry!"
                         # Volume description
                         volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
                         # Create signal
@@ -2301,7 +2448,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 # Calculate trend line value at current position
                 line_value = self._calculate_trend_line_value(trend_line, i)
                 # Price near trend line
-                if abs(current_candle['high'] - line_value) <= self._get_dynamic_tolerance(df, i, fallback_price=line_value):
+                if abs(current_candle['high'] - line_value) <= self._get_dynamic_tolerance_band(df, i, line_value):
                     # Detect bearish reversal pattern using precomputed vectorized series
                     pattern_types = []
                     idx = i if i >= 0 else len(df) + i
@@ -2607,11 +2754,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                 sig,
                 primary_df,
                 higher_df,
-                support_levels=self.support_levels.get(symbol),
-                resistance_levels=self.resistance_levels.get(symbol),
+                support_levels=self.support_levels.get(symbol, []),
+                resistance_levels=self.resistance_levels.get(symbol, []),
                 last_consolidation_ranges=self.last_consolidation_ranges,
                 atr_value=None if primary_df is None else self._compute_atr(primary_df),
-                consolidation_info=self.last_consolidation_ranges.get(symbol),
+                consolidation_info=self.last_consolidation_ranges.get(symbol, {}),
                 risk_manager=getattr(self, 'risk_manager', None),
                 account_balance=getattr(self, 'account_balance', None),
                 extra_context={
@@ -2623,6 +2770,93 @@ class BreakoutReversalStrategy(SignalGenerator):
             )
             # Standardized confidence: direct mapping, clamped to [0, 1]
             scored_sig['confidence'] = max(0.0, min(1.0, scored_sig.get('score', 0)))
+            
+            # Add detailed explanations about why this signal received its score
+            score_details = scored_sig.get('score_details', {})
+            detailed_reasons = []
+            
+            direction = sig.get('direction', '').lower()
+            h1_trend = self._determine_higher_timeframe_trend(higher_df)
+            
+            # Format explanations based on score components
+            if score_details:
+                # Level strength explanation
+                level_strength = score_details.get('level_strength', 0)
+                if level_strength > 0.7:
+                    detailed_reasons.append(f"Very strong {direction} level with multiple touches (Level score: {level_strength:.2f})")
+                elif level_strength > 0.5:
+                    detailed_reasons.append(f"Strong {direction} level with good validation (Level score: {level_strength:.2f})")
+                elif level_strength > 0.3:
+                    detailed_reasons.append(f"Moderate {direction} level support/resistance (Level score: {level_strength:.2f})")
+                elif level_strength > 0:
+                    detailed_reasons.append(f"Weak level structure (Level score: {level_strength:.2f})")
+                
+                # Volume quality explanation
+                volume_quality = score_details.get('volume_quality', 0)
+                if volume_quality > 0.7:
+                    detailed_reasons.append(f"Exceptional volume confirming {direction} move (Volume score: {volume_quality:.2f})")
+                elif volume_quality > 0.5:
+                    detailed_reasons.append(f"Strong volume confirmation (Volume score: {volume_quality:.2f})")
+                elif volume_quality > 0.3:
+                    detailed_reasons.append(f"Adequate volume support (Volume score: {volume_quality:.2f})")
+                elif volume_quality > 0:
+                    detailed_reasons.append(f"Low volume, limited confirmation (Volume score: {volume_quality:.2f})")
+                
+                # Pattern reliability explanation
+                pattern_reliability = score_details.get('pattern_reliability', 0)
+                if pattern_reliability > 0.7:
+                    detailed_reasons.append(f"High-reliability {direction} pattern (Pattern score: {pattern_reliability:.2f})")
+                elif pattern_reliability > 0.5:
+                    detailed_reasons.append(f"Reliable {direction} pattern structure (Pattern score: {pattern_reliability:.2f})")
+                elif pattern_reliability > 0.3:
+                    detailed_reasons.append(f"Moderate pattern reliability (Pattern score: {pattern_reliability:.2f})")
+                elif pattern_reliability > 0:
+                    detailed_reasons.append(f"Basic pattern with limited reliability (Pattern score: {pattern_reliability:.2f})")
+                
+                # Trend alignment explanation
+                trend_alignment = score_details.get('trend_alignment', 0)
+                if trend_alignment > 0.7:
+                    detailed_reasons.append(f"Strong alignment with {h1_trend} higher timeframe trend (H1 trend score: {trend_alignment:.2f})")
+                elif trend_alignment > 0.5:
+                    detailed_reasons.append(f"Good alignment with {h1_trend} market direction (H1 trend score: {trend_alignment:.2f})")
+                elif trend_alignment > 0.3:
+                    detailed_reasons.append(f"Neutral trend alignment (H1 trend score: {trend_alignment:.2f})")
+                elif trend_alignment >= 0:
+                    detailed_reasons.append(f"Counter-trend signal against {h1_trend} direction (H1 trend score: {trend_alignment:.2f})")
+                
+                # Risk-reward explanation
+                risk_reward = score_details.get('risk_reward', 0)
+                if risk_reward > 0.7:
+                    detailed_reasons.append(f"Excellent risk-reward ratio > 2:1 (R:R score: {risk_reward:.2f})")
+                elif risk_reward > 0.5:
+                    detailed_reasons.append(f"Good risk-reward profile (R:R score: {risk_reward:.2f})")
+                elif risk_reward > 0.3:
+                    detailed_reasons.append(f"Acceptable risk-reward (R:R score: {risk_reward:.2f})")
+                elif risk_reward >= 0:
+                    detailed_reasons.append(f"Minimum acceptable risk-reward ratio (R:R score: {risk_reward:.2f})")
+                
+                # Add special bonuses that might have been applied
+                if hasattr(self, '_volume_profile_bonus') and getattr(self, '_volume_profile_bonus', False):
+                    detailed_reasons.append("Bonus: Entry near high-volume node (+0.07)")
+                
+                if hasattr(self, '_atr_bonus') and getattr(self, '_atr_bonus', 0) > 0:
+                    detailed_reasons.append(f"Bonus: Optimal stop-loss placement relative to ATR (+0.1)")
+                elif hasattr(self, '_atr_bonus') and getattr(self, '_atr_bonus', 0) < 0:
+                    detailed_reasons.append(f"Penalty: Suboptimal stop-loss placement (-0.1)")
+                
+                # Add consolidation bonus information if applicable
+                if sig.get('consolidation_bonus', False):
+                    detailed_reasons.append("Bonus: Signal within consolidation zone (+0.05)")
+            
+            # Add the detailed reasons to the signal
+            scored_sig['detailed_reasoning'] = detailed_reasons
+            
+            # Log detailed reasoning for this signal
+            logger.info(f"🔍 SIGNAL SCORE BREAKDOWN - {symbol} {direction}:")
+            for reason in detailed_reasons:
+                logger.info(f"  • {reason}")
+            logger.info(f"  📊 Final score: {scored_sig.get('score', 0):.2f} → Confidence: {scored_sig.get('confidence', 0):.2f}")
+            
             # *** Add the original symbol back for grouping later ***
             scored_sig['original_symbol'] = symbol  # Add this line
             scored.append(scored_sig)
@@ -2836,71 +3070,131 @@ class BreakoutReversalStrategy(SignalGenerator):
 
     @staticmethod
     def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002, volume_threshold: float = None) -> pd.Series:
-        """Vectorized detection of False Breakout pattern (custom, based on wick and volume)."""
+        """
+        Vectorized detection of False Breakout pattern (custom, based on wick and volume).
+        Now requires wick > 50% of range AND volume > 90th percentile (if volume_threshold is provided).
+        """
         if len(df) < 2:
             # Explicitly return empty Series if not enough data
             return pd.Series(dtype=bool, index=df.index)
         prev_close = df['close'].shift(1)
         tol_val = df['close'] * price_tolerance
+        total_range = df['high'] - df['low']
         if direction == 'bullish':
             wick = df['close'] - df['low']
             body = (df['close'] - df['open']).abs()
-            wick_ok = wick > 2 * body
-            # Volume filter: require volume below threshold if provided
+            wick_ok = wick > 0.5 * total_range
+            # Volume filter: require volume above 90th percentile if provided
             if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] < volume_threshold
-                return (
+                vol_ok = df['tick_volume'] > volume_threshold
+                result = (
                     (prev_close < df['close'] - tol_val) &
                     wick_ok &
                     vol_ok
                 )
             else:
-                return (
+                result = (
                     (prev_close < df['close'] - tol_val) &
                     wick_ok
                 )
         else:
             wick = df['high'] - df['close']
             body = (df['close'] - df['open']).abs()
-            wick_ok = wick > 2 * body
+            wick_ok = wick > 0.5 * total_range
             if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] < volume_threshold
-                return (
+                vol_ok = df['tick_volume'] > volume_threshold
+                result = (
                     (prev_close > df['close'] + tol_val) &
                     wick_ok &
                     vol_ok
                 )
             else:
-                return (
+                result = (
                     (prev_close > df['close'] + tol_val) &
                     wick_ok
                 )
+        # Optionally: log the number of detected false breakouts
+        # logger.debug(f"[FALSE BREAKOUT] {direction}: {result.sum()} bars flagged with wick+volume filter")
+        return result
 
     def _get_dynamic_tolerance(self, df: pd.DataFrame, idx: int, fallback_price: float = None) -> float:
         """
         Compute a dynamic tolerance using ATR * atr_multiplier, fallback to price_tolerance if ATR is unavailable.
-        Args:
-            df: DataFrame with price data
-            idx: Index for the current candle
-            fallback_price: Price to use for fallback (e.g., level or close)
-        Returns:
-            Tolerance value (float)
+        Now guards against NaN/zero ATR by falling back to rolling std or previous non-NaN ATR.
         """
         try:
             from src.utils.indicators import calculate_atr
             atr_series = calculate_atr(df.iloc[:idx+1], self.atr_period)
+            atr = None
             if isinstance(atr_series, pd.Series) and not atr_series.empty:
-                atr = float(atr_series.iloc[-1])
-                if not pd.isna(atr) and atr > 0:
-                    return atr * self.atr_multiplier
-        except Exception:
-            pass
-        # Fallback to price_tolerance * fallback_price
+                # Use last valid ATR
+                atr = atr_series[~atr_series.isna()].iloc[-1] if (~atr_series.isna()).any() else None
+            if atr is not None and not pd.isna(atr) and atr > 0:
+                return atr * self.atr_multiplier
+            # Fallback: use rolling std
+            if len(df) > 1:
+                std_val = df['close'].iloc[:idx+1].rolling(window=14, min_periods=3).std().iloc[-1]
+                if not pd.isna(std_val) and std_val > 0:
+                    self.logger.debug(f"[TOLERANCE] ATR ill-conditioned, using rolling std: {std_val:.5f}")
+                    return std_val * self.atr_multiplier
+            self.logger.debug(f"[TOLERANCE] ATR and std ill-conditioned, using price_tolerance fallback.")
+        except Exception as e:
+            self.logger.debug(f"[TOLERANCE] Exception in dynamic tolerance: {e}")
         if fallback_price is not None:
             return fallback_price * self.price_tolerance
-        # Fallback to close price if nothing else
         close = df['close'].iloc[idx] if idx < len(df) else df['close'].iloc[-1]
         return close * self.price_tolerance
+
+    def _get_dynamic_tolerance_band(self, df: pd.DataFrame, idx: int, price: float) -> float:
+        """
+        Compute a dynamic tolerance band: max(price_tolerance * price, ATR * 0.25).
+        Guards against NaN/zero ATR by falling back to rolling std or previous non-NaN ATR.
+        Also guards against indexing errors with proper bounds checking.
+        """
+        # First make sure we have data and idx is in valid range
+        if df is None or df.empty:
+            return self.price_tolerance * price
+
+        # Handle negative indices properly by converting to positive
+        if idx < 0:
+            real_idx = len(df) + idx
+            if real_idx < 0:  # Still negative after adjustment
+                real_idx = 0
+        else:
+            real_idx = min(idx, len(df) - 1)  # Ensure index doesn't exceed dataframe length
+
+        try:
+            from src.utils.indicators import calculate_atr
+            # Use up to real_idx+1 instead of idx+1 to avoid out-of-bounds
+            safe_slice = df.iloc[:real_idx+1]
+            
+            # Make sure we have enough data for ATR calculation
+            if len(safe_slice) >= self.atr_period:
+                atr_series = calculate_atr(safe_slice, self.atr_period)
+                atr = None
+                if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                    atr = atr_series[~atr_series.isna()].iloc[-1] if (~atr_series.isna()).any() else None
+                if atr is not None and not pd.isna(atr) and atr > 0:
+                    return max(self.price_tolerance * price, atr * 0.25)
+            
+            # Fallback: use rolling std with safe indexing
+            if len(safe_slice) > 3:  # Need at least a few points for rolling
+                # Use min_periods=1 to get a value even with limited data
+                std_series = safe_slice['close'].rolling(window=14, min_periods=1).std()
+                if not std_series.empty and not std_series.isna().all():
+                    std_val = std_series.iloc[-1]
+                    if not pd.isna(std_val) and std_val > 0:
+                        self.logger.debug(f"[TOLERANCE BAND] ATR ill-conditioned, using rolling std: {std_val:.5f}")
+                        return max(self.price_tolerance * price, std_val * 0.25)
+            
+            # Final fallback to simple price tolerance
+            self.logger.debug(f"[TOLERANCE BAND] Using price_tolerance fallback: {self.price_tolerance * price:.5f}")
+            
+        except Exception as e:
+            self.logger.debug(f"[TOLERANCE BAND] Exception in dynamic tolerance band: {e}")
+        
+        # Ultimate fallback is always price-based
+        return self.price_tolerance * price
 
     @staticmethod
     def cluster_items(items, metric, tol):

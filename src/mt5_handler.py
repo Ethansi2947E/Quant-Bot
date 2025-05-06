@@ -16,7 +16,7 @@ import re
 import asyncio
 import numpy as np
 
-from config.config import MT5_CONFIG, TRADING_CONFIG
+from config.config import MT5_CONFIG, TRADING_CONFIG, RISK_MANAGER_CONFIG
 # Remove the import for RiskManager - will use type hints instead
 import typing
 if typing.TYPE_CHECKING:
@@ -378,6 +378,47 @@ class MT5Handler:
                 logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
                 take_profit = price - min_stop_distance - symbol_info.point
 
+        # --- RISK-REWARD VALIDATION (NEW) ---
+        # Get min_risk_reward from config, or use a default if not found
+        min_risk_reward = RISK_MANAGER_CONFIG.get('min_risk_reward', 1.0)
+        
+        # Calculate risk-reward ratio
+        if action == mt5.ORDER_TYPE_BUY:
+            risk = price - stop_loss
+            reward = take_profit - price
+        else:  # SELL
+            risk = stop_loss - price
+            reward = price - take_profit
+            
+        # Only validate R:R if both SL and TP are set
+        if risk <= 0 or reward <= 0:
+            logger.error(f"Invalid risk/reward values after adjustment: risk={risk}, reward={reward}")
+            return None
+            
+        risk_reward_ratio = reward / risk
+        if risk_reward_ratio < min_risk_reward:
+            # Instead of rejecting, adjust TP to meet minimum risk:reward
+            if action == mt5.ORDER_TYPE_BUY:
+                new_tp = price + (risk * min_risk_reward)
+                logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
+                take_profit = new_tp
+            else:  # SELL
+                new_tp = price - (risk * min_risk_reward)
+                logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
+                take_profit = new_tp
+            
+            # Recalculate the R:R after adjustment
+            if action == mt5.ORDER_TYPE_BUY:
+                reward = take_profit - price
+            else:  # SELL
+                reward = price - take_profit
+            risk_reward_ratio = reward / risk
+            logger.info(f"New risk:reward ratio after TP adjustment: {risk_reward_ratio:.2f}")
+            
+        # If TP or SL are missing, don't validate R:R
+        if stop_loss == 0 or take_profit == 0:
+            logger.info(f"Skipping R:R validation as SL or TP is not set")
+            
         # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
         try:
             digits = int(getattr(symbol_info, "digits", 2))  # default to 2 if attribute missing

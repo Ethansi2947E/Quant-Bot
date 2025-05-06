@@ -30,8 +30,14 @@ TRADING_CONFIG = {
         "Jump 50 Index",
         "Step Index",
         "Range Break 200 Index",
+        "USDJPY",
+        "EURJPY",
+        "GBPJPY",
+        "AUDJPY",
+        "CADJPY",
+        
     ],
-    "fixed_lot_size": 0.05,  # Fixed lot size to use if use_fixed_lot_size is true
+    "fixed_lot_size": 0.0,  # Fixed lot size to use if use_fixed_lot_size is true (will be adjusted to symbol minimum if needed)
     "use_fixed_lot_size": True,  # When true, use fixed lot size instead of risk-based calculation
     "max_lot_size": 0.3,  # Maximum lot size even when using risk-based calculation
     "max_daily_risk": 0.06,
@@ -55,8 +61,8 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
     
     "signal_generators": [ 
-        "confluence_price_action",
-        #"breakout_reversal"
+        #"confluence_price_action",
+        "breakout_reversal"
     ],
 }
 
@@ -183,6 +189,7 @@ def get_risk_manager_config():
         'max_weekly_loss': 10,
         'max_monthly_loss': 10,
         'max_drawdown_pause': 0.05,
+        'min_risk_reward': 1.0,  # Minimum risk:reward ratio required for trades
         
         # Position management
         'max_concurrent_trades': 1000,

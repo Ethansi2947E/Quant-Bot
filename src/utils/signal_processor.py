@@ -732,7 +732,16 @@ class SignalProcessor:
             # If no position size in signal, calculate based on risk parameters
             if position_size <= 0:
                 if use_fixed_lot_size:
-                    position_size = fixed_lot_size
+                    # Get minimum lot size for this symbol
+                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                    
+                    # Use fixed lot size, but ensure it's not below the symbol's minimum
+                    if fixed_lot_size < min_lot_size:
+                        position_size = min_lot_size
+                        logger.info(f"Fixed lot size {fixed_lot_size} is below minimum {min_lot_size} for {symbol}, using minimum")
+                    else:
+                        position_size = fixed_lot_size
+                    
                     logger.info(f"Using fixed position size: {position_size} lots")
                 else:
                     # Risk-based calculation using account info
@@ -753,17 +762,25 @@ class SignalProcessor:
                         stop_distance = abs(entry_price - stop_loss)
                         if stop_distance > 0:
                             position_size = risk_amount / stop_distance
-                            position_size = min(position_size, 0.1)  # Cap at 0.1 lots
+                            
+                            # Get minimum lot size for this symbol
+                            min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                            position_size = max(position_size, min_lot_size)
                         else:
-                            position_size = 0.01  # Minimum position size
+                            # Get minimum lot size for this symbol
+                            position_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
                             
                     logger.info(f"Calculated risk-based position size: {position_size} lots")
             
-            # Ensure minimum position size
-            position_size = max(position_size, 0.01)
+            # Ensure position size meets symbol's minimum requirements
+            min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+            if position_size < min_lot_size:
+                logger.warning(f"Position size {position_size} is below symbol minimum {min_lot_size} for {symbol}, adjusting")
+                position_size = min_lot_size
             
             # Normalize volume according to symbol's volume_step
             position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+            logger.info(f"Final normalized position size for {symbol}: {position_size} lots")
             
             # Execute the trade
             trade_params = {
@@ -816,33 +833,66 @@ class SignalProcessor:
                     elif score >= 40: return "⭐⭐⭐"
                     elif score >= 20: return "⭐⭐"
                     else: return "⭐"
-                # Check for breakout-style score details
-                if 'score' in signal and isinstance(signal.get('score_details'), dict):
+                
+                # Check for score details in the signal
+                trade_details = ""
+                if 'score_details' in signal and isinstance(signal.get('score_details'), dict):
+                    # BreakoutReversalStrategy scoring format
                     sd = signal['score_details']
-                    final_score_pct = signal.get('score', 0.0) * 100
+                    final_score_pct = signal.get('score', 0.0) * 100 if isinstance(signal.get('score'), (float, int)) else 0.0
+                    confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
+                    
+                    # Extract score components, ensuring they're properly formatted as percentages
                     level_strength_pct = sd.get('level_strength', 0.0) * 100
                     volume_quality_pct = sd.get('volume_quality', 0.0) * 100
                     pattern_reliability_pct = sd.get('pattern_reliability', 0.0) * 100
                     trend_alignment_pct = sd.get('trend_alignment', 0.0) * 100
                     risk_reward_pct = sd.get('risk_reward', 0.0) * 100
+                    
+                    # Get the detailed reasoning if available
+                    detailed_reasoning = signal.get('detailed_reasoning', [])
+                    detailed_analysis = ""
+                    if detailed_reasoning and isinstance(detailed_reasoning, list):
+                        detailed_analysis = "\n".join([f"• {reason}" for reason in detailed_reasoning])
+                    
+                    # If no detailed reasoning is available, use the original reason
+                    if not detailed_analysis:
+                        detailed_analysis = signal.get('reason', 'N/A')
+                    
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {(direction or "").upper()}\n"
+                        f"🔹 Direction: {(direction or '').upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
                         f"🔹 Size: {position_size} lots\n\n"
-                        f"📊 Score: {get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
+                        f"📊 Confidence: {confidence_pct:.1f}%\n"
+                        f"📊 Signal Quality: {get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
                         f"• Level Strength: {level_strength_pct:.1f}% (30% weight)\n"
                         f"• Volume Quality: {volume_quality_pct:.1f}% (20% weight)\n"
                         f"• Pattern Reliability: {pattern_reliability_pct:.1f}% (20% weight)\n"
                         f"• Trend Alignment: {trend_alignment_pct:.1f}% (20% weight)\n"
                         f"• Risk-Reward: {risk_reward_pct:.1f}% (10% weight)\n\n"
-                        f"📝 Analysis:\n{reason_text}"
+                        f"📝 Analysis:\n{detailed_analysis}"
                     )
-                else:
-                    # Confluence-style notification
+                    
+                    # Add any special bonuses that were applied
+                    bonuses = []
+                    if signal.get('_volume_profile_bonus', False):
+                        bonuses.append("📈 Volume Profile Node Bonus (+0.07)")
+                    if signal.get('_atr_bonus', 0) > 0:
+                        bonuses.append("📏 Optimal Stop Placement Bonus (+0.1)")
+                    elif signal.get('_atr_bonus', 0) < 0:
+                        bonuses.append("⚠️ Suboptimal Stop Placement Penalty (-0.1)")
+                    if signal.get('consolidation_bonus', False):
+                        bonuses.append("📦 Inside Consolidation Zone Bonus (+0.05)")
+                    
+                    if bonuses:
+                        trade_details += "\n\n🎯 Applied Score Adjustments:\n" + "\n".join(bonuses)
+                        
+                elif signal.get('signal_quality') is not None:
+                    # Classic confluence-style notification
                     signal_quality = signal.get('signal_quality', 0.0)
                     pattern_score = signal.get('pattern_score', 0.0)
                     confluence_score = signal.get('confluence_score', 0.0)
@@ -857,7 +907,7 @@ class SignalProcessor:
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {(direction or "").upper()}\n"
+                        f"🔹 Direction: {(direction or '').upper()}\n"
                         f"🔹 Entry: {entry_price}\n"
                         f"🔹 Stop Loss: {stop_loss}\n"
                         f"🔹 Take Profit: {take_profit}\n"
@@ -870,6 +920,21 @@ class SignalProcessor:
                         f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
                         f"📝 Analysis:\n{reason_text}"
                     )
+                else:
+                    # Fallback for signals without detailed scoring
+                    confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
+                    trade_details = (
+                        f"🔸 Strategy: {strategy_name}\n"
+                        f"🔹 Symbol: {symbol}\n"
+                        f"🔹 Direction: {(direction or '').upper()}\n"
+                        f"🔹 Entry: {entry_price}\n"
+                        f"🔹 Stop Loss: {stop_loss}\n"
+                        f"🔹 Take Profit: {take_profit}\n"
+                        f"🔹 Size: {position_size} lots\n\n"
+                        f"📊 Confidence: {confidence_pct:.1f}%\n\n"
+                        f"📝 Analysis:\n{reason_text}"
+                    )
+                
                 # Send notification
                 await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
                 

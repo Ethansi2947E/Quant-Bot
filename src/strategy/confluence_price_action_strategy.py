@@ -852,7 +852,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     # -- Pullback detection --
     def _is_pullback(self, df: pd.DataFrame, level: float, direction: str) -> bool:
         """Check if price pulled back to `level` within recent bars
-        Relaxed: Use max(level*self.price_tolerance, ATR*0.5) for tolerance, and increase pullback_bars for M15.
+        Relaxed: Use max(level*self.price_tolerance, ATR*0.5) for tolerance.
         """
         if df is None or len(df) < self.pullback_bars:
             return False
@@ -864,10 +864,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             if isinstance(atr_series, pd.Series):
                 atr_val = float(atr_series.iloc[-1])
         pullback_tolerance = max(level * self.price_tolerance, (atr_val * 0.5) if atr_val else 0)
-        # --- Increase pullback_bars for M15 ---
         pullback_bars = self.pullback_bars
-        if hasattr(self, 'primary_timeframe') and self.primary_timeframe == 'M15':
-            pullback_bars = max(pullback_bars, 24)
         recent = df.iloc[-pullback_bars:]
         last_candle = recent.iloc[-1]
         closes = recent['close']
