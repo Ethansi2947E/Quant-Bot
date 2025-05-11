@@ -1,6 +1,8 @@
 """
 Backtester module for trading strategies.
 
+# TODO: For future: support event-driven batching, parallelized signal generation, and database export.
+
 Supports bar-by-bar simulation of strategies like BreakoutReversalStrategy and ConfluencePriceActionStrategy
 on historical data from CSV or MT5, with multi-symbol and multi-timeframe support.
 """
@@ -12,9 +14,6 @@ from loguru import logger
 import matplotlib.pyplot as plt
 import numpy as np
 import json
-from src.utils.performance_tracker import PerformanceTracker
-from datetime import datetime
-import matplotlib.dates as mdates
 from src.mt5_handler import MT5Handler
 
 class Backtester:
@@ -36,7 +35,8 @@ class Backtester:
                  timeframes: List[str],
                  config: Optional[Dict] = None,
                  risk_manager: Optional[Any] = None,
-                 performance_tracker: Optional[Any] = None):
+                 performance_tracker: Optional[Any] = None,
+                 export_config: Optional[Dict] = None):
         """
         Args:
             strategy: An instance of a SignalGenerator-compatible strategy
@@ -46,6 +46,7 @@ class Backtester:
             config: Optional configuration dictionary
             risk_manager: Optional RiskManager instance for position sizing
             performance_tracker: Optional PerformanceTracker instance for advanced metrics
+            export_config: Optional dict for export settings (paths, formats)
         """
         self.strategy = strategy
         self.data_loader = data_loader
@@ -58,16 +59,9 @@ class Backtester:
         self.trade_log = []
         self.equity_curve = []
         self.performance = None
+        # Unified export config
+        self.export_config = export_config or self.config.get('export_config', {})
         # TODO: Add more attributes as needed (risk manager, performance tracker, etc.)
-
-    def load_data(self) -> Dict[str, Dict[str, pd.DataFrame]]:
-        """
-        Load historical data for all symbols and timeframes.
-        Returns:
-            Nested dict: {symbol: {timeframe: DataFrame}}
-        """
-        # TODO: Implement data loading using self.data_loader
-        raise NotImplementedError
 
     async def run(self):
         """
@@ -79,6 +73,15 @@ class Backtester:
         """
         # Load data
         data = self.data_loader(self.symbols, self.timeframes)
+        # Check all data is present and non-empty before proceeding
+        missing = []
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                if symbol not in data or tf not in data[symbol] or data[symbol][tf] is None or data[symbol][tf].empty:
+                    missing.append(f"{symbol}/{tf}")
+        if missing:
+            logger.error(f"Missing or empty data for: {', '.join(missing)}. Aborting backtest.")
+            return
         # Collect all unique datetimes across all symbols/timeframes
         all_datetimes = set()
         for symbol in self.symbols:
@@ -91,6 +94,21 @@ class Backtester:
         if not all_datetimes:
             logger.error("No data available for backtest.")
             return
+
+        # --- Precompute index pointers for each symbol/timeframe ---
+        # For each symbol/timeframe, build a list of pointers to the last available bar for each dt in all_datetimes
+        pointers = {symbol: {tf: [] for tf in self.timeframes} for symbol in self.symbols}
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = data[symbol][tf]
+                df_idx = 0
+                df_indices = df.index.tolist()
+                for dt in all_datetimes:
+                    # Advance df_idx until df_indices[df_idx] > dt
+                    while df_idx < len(df_indices) and df_indices[df_idx] <= dt:
+                        df_idx += 1
+                    pointers[symbol][tf].append(df_idx)  # pointer is the number of rows <= dt
+
         # Initialize equity and open positions
         initial_balance = self.config.get("initial_balance", 10000)
         equity = initial_balance
@@ -99,18 +117,27 @@ class Backtester:
         self.trade_log = []
         # Main simulation loop
         for i, dt in enumerate(all_datetimes):
-            # Build market_data up to current bar for each symbol/timeframe
+            # Build market_data up to current bar for each symbol/timeframe using precomputed pointers
             market_data = {}
             for symbol in self.symbols:
                 market_data[symbol] = {}
                 for tf in self.timeframes:
                     df = data[symbol][tf]
-                    if not df.empty:
-                        # Only include data up to and including current datetime
-                        market_data[symbol][tf] = df[df.index <= dt].copy()
+                    ptr = pointers[symbol][tf][i]
+                    if ptr > 0:
+                        market_data[symbol][tf] = df.iloc[:ptr].copy()
             # Generate signals for this bar
             try:
-                signals = await self.strategy.generate_signals(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
+                if hasattr(self.strategy, 'generate_signals'):
+                    gen = self.strategy.generate_signals
+                    if getattr(gen, "__code__", None) and getattr(gen, "__code__").co_flags & 0x80:
+                        # Async function
+                        signals = await gen(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
+                    else:
+                        # Sync function
+                        signals = gen(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
+                else:
+                    signals = []
             except Exception as e:
                 logger.warning(f"Error generating signals at {dt}: {e}")
                 signals = []
@@ -228,7 +255,7 @@ class Backtester:
         """
         Generate and print/save performance reports and plots.
         Prints summary statistics, outputs trade log, and plots equity curve and drawdown.
-        Exports trade log/results as CSV/JSON if configured.
+        Exports trade log/results as CSV/JSON/Excel/Markdown/HTML if configured.
         Computes advanced metrics natively if no PerformanceTracker is provided.
         """
         # Check if results are available
@@ -382,7 +409,14 @@ class Backtester:
             plt.xlabel("PnL")
             plt.ylabel("Frequency")
             plt.grid(True)
+            # Save plot
+            plot_dir = os.path.dirname(self.export_config.get('csv', ''))
+            if plot_dir:
+                hist_path = os.path.join(plot_dir, 'hist_pnl.png')
+                plt.savefig(hist_path)
+                print(f"Histogram of PnL saved to {hist_path}")
             plt.show()
+            plt.close()
             # Cumulative PnL by trade
             plt.figure(figsize=(10, 4))
             plt.plot(trade_log["pnl"].cumsum(), label="Cumulative PnL")
@@ -391,7 +425,13 @@ class Backtester:
             plt.ylabel("Cumulative PnL")
             plt.legend()
             plt.grid(True)
+            # Save plot
+            if plot_dir:
+                cum_path = os.path.join(plot_dir, 'cumulative_pnl.png')
+                plt.savefig(cum_path)
+                print(f"Cumulative PnL plot saved to {cum_path}")
             plt.show()
+            plt.close()
             # Monthly returns bar chart
             if "month" in trade_log.columns:
                 monthly_returns = trade_log.groupby("month")["pnl"].sum()
@@ -401,32 +441,87 @@ class Backtester:
                 plt.xlabel("Month")
                 plt.ylabel("Total PnL")
                 plt.grid(True)
+                # Save plot
+                if plot_dir:
+                    month_path = os.path.join(plot_dir, 'monthly_returns.png')
+                    plt.savefig(month_path)
+                    print(f"Monthly returns plot saved to {month_path}")
                 plt.show()
+                plt.close()
         # Output trade log
         print(f"Trade Log (all {len(trade_log)} rows):")
         print(trade_log.to_string(index=False))
-        # Save trade log as CSV if path provided
-        trade_log_path = self.config.get("trade_log_path")
-        if trade_log_path:
-            trade_log.to_csv(trade_log_path, index=False)
-            print(f"Trade log saved to {trade_log_path}")
-        # Save trade log as JSON if path provided
-        trade_log_json_path = self.config.get("trade_log_json_path")
-        if trade_log_json_path:
-            # Drop or convert non-serializable columns before saving
+        # --- Unified Export Logic ---
+        export_cfg = self.export_config
+        # CSV Export
+        csv_path = export_cfg.get('csv') or self.config.get('trade_log_path')
+        if csv_path:
+            trade_log.to_csv(csv_path, index=False)
+            print(f"Trade log saved to {csv_path}")
+        # JSON Export
+        json_path = export_cfg.get('json') or self.config.get('trade_log_json_path')
+        if json_path:
             json_safe_trade_log = trade_log.copy()
             if "month" in json_safe_trade_log.columns:
                 json_safe_trade_log = json_safe_trade_log.drop(columns=["month"])
             if "day" in json_safe_trade_log.columns:
                 json_safe_trade_log["day"] = json_safe_trade_log["day"].astype(str)
-            json_safe_trade_log.to_json(trade_log_json_path, orient="records", date_format="iso")
-            print(f"Trade log saved to {trade_log_json_path}")
-        # Save results as JSON if path provided
-        results_json_path = self.config.get("results_json_path")
-        if results_json_path:
-            with open(results_json_path, "w") as f:
-                json.dump(self.results, f, default=str, indent=2)
-            print(f"Results saved to {results_json_path}")
+            json_safe_trade_log.to_json(json_path, orient="records", date_format="iso")
+            print(f"Trade log saved to {json_path}")
+        # Excel Export
+        excel_path = export_cfg.get('excel')
+        if excel_path:
+            trade_log.to_excel(excel_path, index=False)
+            print(f"Trade log saved to {excel_path}")
+        # Unified machine-readable JSON report
+        report_json_path = export_cfg.get('report_json')
+        if report_json_path:
+            report_obj = {
+                'metadata': {
+                    'symbols': self.symbols,
+                    'timeframes': self.timeframes,
+                    'initial_balance': initial_balance,
+                    'final_equity': final_equity,
+                    'total_trades': total_trades,
+                    'win_rate': win_rate,
+                    'profit_factor': profit_factor,
+                    'max_drawdown': max_drawdown,
+                    'sharpe_ratio': sharpe_ratio,
+                    'config': self.config,
+                },
+                'trade_log': trade_log.to_dict(orient='records'),
+                'equity_curve': equity_curve.to_dict(orient='records'),
+            }
+            with open(report_json_path, "w") as f:
+                json.dump(report_obj, f, default=str, indent=2)
+            print(f"Unified report saved to {report_json_path}")
+        # Markdown Export
+        md_path = export_cfg.get('markdown')
+        if md_path:
+            with open(md_path, "w") as f:
+                f.write(f"# Backtest Summary\n\n")
+                f.write(f"**Initial Equity:** {initial_balance}\n\n")
+                f.write(f"**Final Equity:** {final_equity}\n\n")
+                f.write(f"**Total Trades:** {total_trades}\n\n")
+                if win_rate is not None:
+                    f.write(f"**Win Rate:** {win_rate:.2%}\n\n")
+                if profit_factor is not None:
+                    f.write(f"**Profit Factor:** {profit_factor:.2f}\n\n")
+                if max_drawdown is not None:
+                    f.write(f"**Max Drawdown:** {max_drawdown:.2f}\n\n")
+                if sharpe_ratio is not None:
+                    f.write(f"**Sharpe Ratio:** {sharpe_ratio:.2f}\n\n")
+                f.write(f"\n## Trade Log\n\n")
+                f.write(trade_log.to_markdown(index=False))
+            print(f"Markdown report saved to {md_path}")
+        # HTML Export (stub)
+        html_path = export_cfg.get('html')
+        if html_path:
+            # TODO: Implement HTML export (table, summary, charts)
+            with open(html_path, "w") as f:
+                f.write("<h1>Backtest Report (HTML export coming soon)</h1>")
+            print(f"HTML report stub saved to {html_path}")
+        # TODO: For future: support database export (SQL, NoSQL, etc.)
         # Plot equity curve and drawdown
         if not equity_curve.empty:
             fig, ax1 = plt.subplots(figsize=(12, 6))
@@ -441,7 +536,13 @@ class Backtester:
             plt.title("Equity Curve and Drawdown")
             fig.tight_layout()
             plt.grid(True)
+            # Save plot
+            if plot_dir:
+                eq_path = os.path.join(plot_dir, 'equity_curve.png')
+                plt.savefig(eq_path)
+                print(f"Equity curve plot saved to {eq_path}")
             plt.show()
+            plt.close()
         if "symbol" in trade_log.columns and "pnl" in trade_log.columns:
             print("\nPair Performance Breakdown:")
             pair_stats = trade_log.groupby("symbol").agg(
@@ -455,6 +556,10 @@ class Backtester:
             print(pair_stats.to_string(float_format=lambda x: f"{x:.2f}"))
             print(f"\nBest Performing Pair: {pair_stats.index[0]} (Total PnL: {pair_stats.iloc[0]['total_pnl']:.2f})")
             print(f"Worst Performing Pair: {pair_stats.index[-1]} (Total PnL: {pair_stats.iloc[-1]['total_pnl']:.2f})")
+        # --- Profiling mode warning ---
+        if self.config.get('profile', False):
+            logger.warning("Profiling mode enabled: parallelization is disabled. Results may differ from production performance.")
+        # TODO: For future: support parallelized signal generation (with caveats for profiling mode)
 
     @staticmethod
     def load_csv_data(directory: str, symbols: List[str], timeframes: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
@@ -511,16 +616,20 @@ class Backtester:
     def load_or_fetch_ohlcv_data(directory: str, mt5_handler, symbols: list, timeframes: list, start_date=None, end_date=None, num_bars: int = 1000) -> dict:
         """
         Load OHLCV data from CSV if available, otherwise fetch from MT5, save as CSV, and use it. Use date range if provided.
-        NOW: If a cached file has no rows within the requested date range, or sanitisation removes all rows (e.g. all-zero OHLC), we automatically re-fetch from MT5. A light sanitiser removes rows with NaN or 0 for any of the OHLC columns.
+        Data is stored in: {directory}/{year}/{symbol}/{timeframe}.csv
         """
         import os
         import pandas as pd
         data = {}
-        os.makedirs(directory, exist_ok=True)
+        # Determine year folder from start_date
+        year_str = str(start_date.year) if start_date else 'unknown_year'
         for symbol in symbols:
             data[symbol] = {}
             for tf in timeframes:
-                filename = os.path.join(directory, f"{symbol}_{tf}.csv")
+                # Build path: {directory}/{year}/{symbol}/{timeframe}.csv
+                symbol_dir = os.path.join(directory, year_str, symbol)
+                os.makedirs(symbol_dir, exist_ok=True)
+                filename = os.path.join(symbol_dir, f"{tf}.csv")
                 needs_refetch = False
                 df = None
                 if os.path.exists(filename):
@@ -538,7 +647,7 @@ class Backtester:
                                 # Filter to requested date range *before* accepting cache
                                 df = df[(df.index >= start_date) & (df.index <= end_date)]
                                 if df.empty:
-                                    logger.warning(f"Cached file {filename} has no data in requested range. Will re-fetch from MT5.")
+                                    print(f"WARNING: {filename} has no data in requested range. Will re-fetch from MT5.")
                                     needs_refetch = True
                                     df = None
                             if not needs_refetch and df is not None:
@@ -551,20 +660,20 @@ class Backtester:
                                     df = df[(df[required_cols] != 0).all(axis=1)]
                                     after_rows = len(df)
                                     if after_rows == 0:
-                                        logger.warning(f"Cached file {filename} contained only zero/NaN rows after sanitisation – will re-fetch.")
+                                        print(f"WARNING: {filename} contained only zero/NaN rows after sanitisation – will re-fetch.")
                                         needs_refetch = True
                                         df = None
                                     elif after_rows < before_rows:
-                                        logger.info(f"Sanitised {filename}: removed {before_rows - after_rows} bad rows (now {after_rows}).")
+                                        print(f"Sanitised {filename}: removed {before_rows - after_rows} bad rows (now {after_rows}).")
                                 else:
-                                    logger.warning(f"Cached file {filename} missing OHLC columns – will re-fetch.")
+                                    print(f"WARNING: {filename} missing OHLC columns – will re-fetch.")
                                     needs_refetch = True
                                     df = None
                                 if not needs_refetch and df is not None:
                                     data[symbol][tf] = df
-                                    logger.info(f"Loaded {len(df)} rows for {symbol} {tf} from {filename}")
+                                    print(f"Loaded {len(df)} rows for {symbol} {tf} from {filename}")
                     except Exception as e:
-                        logger.warning(f"Failed to load {filename}: {e}. Will re-fetch from MT5.")
+                        print(f"WARNING: Failed to load {filename}: {e}. Will re-fetch from MT5.")
                         needs_refetch = True
                 else:
                     needs_refetch = True
@@ -599,14 +708,14 @@ class Backtester:
                                 df = df.dropna(subset=required_cols)
                                 df = df[(df[required_cols] != 0).all(axis=1)]
                                 if len(df) < before_rows:
-                                    logger.info(f"Sanitised freshly fetched {symbol} {tf}: removed {before_rows - len(df)} bad rows (now {len(df)}).")
+                                    print(f"Sanitised freshly fetched {symbol} {tf}: removed {before_rows - len(df)} bad rows (now {len(df)}).")
                             data[symbol][tf] = df
-                            logger.info(f"Fetched and saved {len(df)} bars for {symbol} {tf} to {filename}")
+                            print(f"Fetched and saved {len(df)} bars for {symbol} {tf} to {filename}")
                         else:
-                            logger.warning(f"No data returned for {symbol} {tf} from MT5")
+                            print(f"WARNING: No data returned for {symbol} {tf} from MT5")
                             data[symbol][tf] = pd.DataFrame()
                     except Exception as e:
-                        logger.warning(f"Failed to fetch {symbol} {tf} from MT5: {e}")
+                        print(f"WARNING: Failed to fetch {symbol} {tf} from MT5: {e}")
                         data[symbol][tf] = pd.DataFrame()
         return data
 
@@ -703,7 +812,8 @@ async def batch_backtest(configs: list):
             timeframes=cfg['timeframes'],
             config=cfg.get('config', {}),
             risk_manager=cfg.get('risk_manager'),
-            performance_tracker=cfg.get('performance_tracker')
+            performance_tracker=cfg.get('performance_tracker'),
+            export_config=cfg.get('export_config', {})
         )
         # Run backtest
         await backtester.run()

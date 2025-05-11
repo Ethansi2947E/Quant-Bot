@@ -1,15 +1,26 @@
+# config.py -- Centralized configuration for Trading Bot
+"""
+This file contains all configuration for the trading bot system, including:
+- MT5 connection
+- Trading and risk management
+- Telegram integration
+- Logging
+- Trade exit logic
+
+Unused/legacy configs have been removed for clarity.
+"""
+
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-from typing import Dict, Any
 
-# Load environment variables
+# --- Load environment variables ---
 load_dotenv()
 
-# Base paths
+# --- Base paths ---
 BASE_DIR = Path(__file__).parent.parent
 
-# MT5 Configuration
+# ================= MT5 Configuration =================
 MT5_CONFIG = {
     "server": os.getenv("MT5_SERVER", "MetaQuotes-Demo"),
     "login": int(os.getenv("MT5_LOGIN", "0")),
@@ -17,7 +28,7 @@ MT5_CONFIG = {
     "timeout": 10,
 }
 
-# Trading Configuration
+# ================= Trading Configuration =================
 TRADING_CONFIG = {
     "symbols": [
         "Volatility 10 Index",
@@ -30,91 +41,50 @@ TRADING_CONFIG = {
         "Jump 50 Index",
         "Step Index",
         "Range Break 200 Index",
-        "USDJPY",
-        "EURJPY",
-        "GBPJPY",
-        "AUDJPY",
-        "CADJPY",
-        
     ],
-    "fixed_lot_size": 0.0,  # Fixed lot size to use if use_fixed_lot_size is true (will be adjusted to symbol minimum if needed)
-    "use_fixed_lot_size": True,  # When true, use fixed lot size instead of risk-based calculation
-    "max_lot_size": 0.3,  # Maximum lot size even when using risk-based calculation
+    "fixed_lot_size": 1.0,
+    "use_fixed_lot_size": True,
+    "max_lot_size": 1.0,
     "max_daily_risk": 0.06,
     "spread_factor": 1.5,
+    "allow_position_additions": False,
+    "max_position_size": 2.0,
+    "position_addition_threshold": 0.5,
 
-    # Position addition settings
-    "allow_position_additions": False,  # Disable adding to existing positions
-    "max_position_size": 2.0,         # Maximum total position size after additions
-    "position_addition_threshold": 0.5,  # Minimum distance in ATR for adding positions
+    # --- Enhanced Data Management ---
 
-    # Enhanced Data Management Configuration
     "data_management": {
-        "use_direct_fetch": True,      # Use direct fetching for all timeframes
-        "real_time_bars_count": 10,    # Number of recent bars to fetch for validation
-        "price_tolerance": 0.0003,       # 2% price tolerance for validation (increased from 0.0003/0.03%)
-        "validate_trades": True,       # Validate trades against real-time data before execution
-        "tick_delay_tolerance": 2.0,   # Maximum allowed tick delay in seconds
+        "use_direct_fetch": True,
+        "real_time_bars_count": 10,
+        "price_tolerance": 0.0003,
+        "validate_trades": True,
+        "tick_delay_tolerance": 2.0,
     },
-    
-    # Shutdown behavior
-    "close_positions_on_shutdown": False,  # Whether to close all open positions when shutting down
-    
-    "signal_generators": [ 
-        #"confluence_price_action",
-        "breakout_reversal"
+
+    "close_positions_on_shutdown": False,
+    "signal_generators": [
+        "confluence_price_action",
+        "breakout_reversal",
+        "price_action_sr"
     ],
 }
 
-# Telegram Configuration
+# ================= Telegram Configuration =================
 TELEGRAM_CONFIG = {
-       "token": os.getenv("TELEGRAM_BOT_TOKEN"),
-       "allowed_users": [int(id) for id in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",") if id.strip()],
-       "enabled": True
+    "token": os.getenv("TELEGRAM_BOT_TOKEN"),
+    "allowed_users": [int(id) for id in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",") if id.strip()],
+    "enabled": True
 }
 
-# Logging Configuration
+# ================= Logging Configuration =================
 LOG_CONFIG = {
     "format": "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
     "level": "INFO",
-    # No file logging settings
     "use_file_logging": False
 }
 
-# Session Configuration - ALL TIMES IN LOCAL MACHINE TIME
-SESSION_CONFIG: Dict[str, Dict[str, Any]] = {
-    "asia_session": {
-        "enabled": True,
-        "start": "00:00",  # Local machine time
-        "end": "08:00",    # Local machine time
-        "pairs": [],
-        "min_range_pips": 4,
-        "max_range_pips": 115,
-        "volatility_factor": 1
-    },
-    "london_session": {
-        "enabled": True,
-        "start": "08:00",  # Local machine time
-        "end": "16:00",    # Local machine time
-        "pairs": [],
-        "min_range_pips": 5,
-        "max_range_pips": 173,
-        "volatility_factor": 1.2
-    },
-    "new_york_session": {
-        "enabled": True,
-        "start": "13:00",  # Local machine time
-        "end": "21:00",    # Local machine time
-        "pairs": [],
-        "min_range_pips": 5,
-        "max_range_pips": 173,
-        "volatility_factor": 1.2
-    }
-}
-   
-# Risk Management Configuration
+# ================= Risk Management Configuration =================
 def get_risk_config():
-    # Return the same configuration regardless of timeframe
     return {
         'max_daily_trades': 15,
         'max_concurrent_trades': 1000,
@@ -137,22 +107,7 @@ def get_risk_config():
         }
     }
 
-# Position Sizing Configuration
-POSITION_CONFIG = {
-    'volatility_scaling': {
-        'high_volatility': 0.5,
-        'normal_volatility': 1.0,
-        'low_volatility': 0.75,
-        'atr_multipliers': {
-            'high': 1.5,
-            'low': 0.5
-        }
-    }
-}
-
-
-
-# Trade Exit Configuration
+# ================= Trade Exit Configuration =================
 TRADE_EXIT_CONFIG = {
     'partial_tp_ratio': 0.5,
     'tp_levels': [
@@ -162,36 +117,29 @@ TRADE_EXIT_CONFIG = {
     ],
     'trailing_stop': {
         'enabled': True,
-        'activation_ratio': 0.5,  # Activate at 0.5R profit (50% to original TP)
-        'trail_points': 10.0,     # Trail by 10 pips (adjusted based on symbol digits)
-        'trailing_activation_factor': 0.5,  # Alternative way to specify activation (50% of risk)
-        'min_profit_activation': 0.2,  # Minimum profit ratio to activate (20% to TP)
-        'buffer_pips': 2,         # Buffer in pips to avoid unnecessary updates
-        'auto_sl_setup': True,    # Auto-setup a stop loss if none exists
-        'auto_sl_percent': 0.02,  # Auto-setup stop loss at 2% from entry if none exists
-        # --- Break Even Logic ---
-        'break_even_enabled': True,  # Enable/disable break even move
-        'break_even_pips': 5,       # Move SL to break even after 5 pips in profit
-        'break_even_buffer_pips': 0.5, # Add a small buffer to break even SL
+        'activation_ratio': 0.5,
+        'trail_points': 10.0,
+        'trailing_activation_factor': 0.5,
+        'min_profit_activation': 0.2,
+        'buffer_pips': 2,
+        'auto_sl_setup': True,
+        'auto_sl_percent': 0.02,
+        'break_even_enabled': True,
+        'break_even_pips': 5,
+        'break_even_buffer_pips': 0.5,
     }
 }
 
-
-
-# Risk Manager Configuration
+# ================= Risk Manager Configuration =================
 def get_risk_manager_config():
-    # Return the same configuration regardless of timeframe
     return {
-        # Core risk parameters
         'max_risk_per_trade': 0.008,
         'max_daily_loss': 0.015,
         'max_daily_risk': 0.03,
         'max_weekly_loss': 10,
         'max_monthly_loss': 10,
         'max_drawdown_pause': 0.05,
-        'min_risk_reward': 1.0,  # Minimum risk:reward ratio required for trades
-        
-        # Position management
+        'min_risk_reward': 1.0,
         'max_concurrent_trades': 1000,
         'max_daily_trades': 8,
         'max_weekly_trades': 8,
@@ -199,50 +147,38 @@ def get_risk_manager_config():
         'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
         'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
         'max_lot_size': TRADING_CONFIG['max_lot_size'],
-        
-        # Drawdown controls
         'consecutive_loss_limit': 2,
         'drawdown_position_scale': {
-            0.02: 0.75,   # 75% size at 2% drawdown
-            0.03: 0.50,   # 50% size at 3% drawdown
-            0.04: 0.25,   # 25% size at 4% drawdown
-            0.05: 0.0     # Stop trading at 5% drawdown
+            0.02: 0.75,
+            0.03: 0.50,
+            0.04: 0.25,
+            0.05: 0.0
         },
-        
-        # Partial profit targets
         'partial_tp_levels': [
-            {'size': 0.4, 'ratio': 0.5},  # 40% at 0.5R
-            {'size': 0.3, 'ratio': 1.0},  # 30% at 1R
-            {'size': 0.3, 'ratio': 1.5}   # 30% at 1.5R
+            {'size': 0.4, 'ratio': 0.5},
+            {'size': 0.3, 'ratio': 1.0},
+            {'size': 0.3, 'ratio': 1.5}
         ],
-        
-        # Volatility-based sizing
         'volatility_position_scale': {
-            'extreme': 0.25,  # 25% size in extreme volatility
-            'high': 0.50,     # 50% size in high volatility
-            'normal': 1.0,    # Normal size
-            'low': 0.75       # 75% size in low volatility
+            'extreme': 0.25,
+            'high': 0.50,
+            'normal': 1.0,
+            'low': 0.75
         },
-        
-        # Recovery mode
         'recovery_mode': {
             'enabled': True,
-            'threshold': 0.05,        # 5% drawdown activates recovery
-            'position_scale': 0.5,    # 50% position size
-            'win_streak_required': 3,  # Need 3 winners to exit
-            'max_trades_per_day': 2,   # Limited trades in recovery
-            'min_win_rate': 0.40      # Min win rate to exit recovery
+            'threshold': 0.05,
+            'position_scale': 0.5,
+            'win_streak_required': 3,
+            'max_trades_per_day': 2,
+            'min_win_rate': 0.40
         },
-        
-        # Correlation controls
         'correlation_limits': {
             'max_correlation': 0.7,
             'lookback_period': 20,
             'min_trades_for_calc': 50,
             'high_correlation_scale': 0.5
         },
-        
-        # Session-based adjustments
         'session_risk_multipliers': {
             'london_open': 1.0,
             'london_ny_overlap': 1.0,
@@ -255,7 +191,3 @@ def get_risk_manager_config():
 
 # Create a default RISK_MANAGER_CONFIG for imports
 RISK_MANAGER_CONFIG = get_risk_manager_config()
-
-
-
-

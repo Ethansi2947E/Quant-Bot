@@ -2,14 +2,12 @@ import traceback
 from typing import Dict, List, Any, Optional
 from loguru import logger
 import asyncio
-import json
 import time
 import hashlib
 
 from src.risk_manager import RiskManager
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
-from config.config import TELEGRAM_CONFIG, TRADING_CONFIG
 
 class SignalProcessor:
     """
@@ -393,7 +391,7 @@ class SignalProcessor:
                 # Skip signals without confidence
                 confidence_check_start = time.time()
                 confidence = signal.get("confidence", 0)
-                confidence_threshold = 0.60  # Minimum 66% confidence
+                confidence_threshold = 0.50  # Minimum 66% confidence
                 
                 if confidence < confidence_threshold:
                     logger.debug(f"Signal for {symbol} has low confidence ({confidence:.2f}). Skipping.")

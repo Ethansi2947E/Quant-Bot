@@ -419,11 +419,17 @@ class _SignalScorer:
             'retest': 0.85
         }
         pattern_reliability_score = 0.5
-        for pat, score in pattern_reliability.items():
-            if pat in reason:
-                pattern_reliability_score = score
-                self.strategy.logger.debug(f"[PATTERN] {symbol}: Detected '{pat}' pattern with reliability score {score:.2f}")
-                break
+        # Prefer explicit pattern_type in signal dict if provided
+        explicit_pattern = signal.get('pattern_type', '').lower()
+        if explicit_pattern and explicit_pattern in pattern_reliability:
+            pattern_reliability_score = pattern_reliability[explicit_pattern]
+            self.strategy.logger.debug(f"[PATTERN] {symbol}: Explicit pattern '{explicit_pattern}' reliability {pattern_reliability_score:.2f}")
+        else:
+            for pat, score in pattern_reliability.items():
+                if pat in reason:
+                    pattern_reliability_score = score
+                    self.strategy.logger.debug(f"[PATTERN] {symbol}: Detected '{pat}' pattern with reliability score {score:.2f}")
+                    break
         # 4. Trend Alignment (20%)
         trend_alignment_score = 0
         if direction=='buy':
@@ -582,7 +588,7 @@ class BreakoutReversalStrategy(SignalGenerator):
     to generate high-probability trading signals.
     """
     
-    def __init__(self, primary_timeframe="M1", higher_timeframe="H1", use_range_extension_tp=False, backtest_mode=False, **kwargs):
+    def __init__(self, primary_timeframe="M15", higher_timeframe="H1", use_range_extension_tp=False, backtest_mode=False, **kwargs):
         """
         Initialize the Breakout and Reversal strategy.
         
@@ -728,6 +734,15 @@ class BreakoutReversalStrategy(SignalGenerator):
         self.risk_manager = RiskManager.get_instance()
         self.use_range_extension_tp = use_range_extension_tp
         self.swing_window = kwargs.get('swing_window', self.candles_to_check)
+        # --- New: simplified entry mode flag (defaults to True) ---
+        # When enabled, the strategy will first look for minimal-confluence setups
+        # (engulfing + high-volume rejection at support/resistance) and only after
+        # entering will it apply the full scoring system for sizing / confidence.
+        self.use_simple_entry = kwargs.get("use_simple_entry", True)
+        # --- Deduplication tracking ---
+        self.processed_bars = {}  # (symbol, timeframe): last_processed_bar_timestamp (str)
+        self.processed_zones = {} # (symbol, zone_type, rounded_zone_price): last_processed_timestamp (float)
+        self.signal_cooldown = kwargs.get('signal_cooldown', 86400)  # 24h default
     
     def _load_timeframe_profile(self):
         """Load timeframe-specific parameters from the appropriate profile."""
@@ -876,14 +891,37 @@ class BreakoutReversalStrategy(SignalGenerator):
             except Exception as e:
                 logger.exception(f"Error during level detection for {symbol}: {str(e)}")
             
+            # -------------------------------------------------------
+            # (NEW) SIMPLE ENTRY SIGNALS — minimal confluence check
+            # -------------------------------------------------------
+            current_time = time.time()
+            # --- Bar deduplication ---
+            bar_key = (symbol, self.primary_timeframe)
+            try:
+                last_bar_timestamp = str(primary_df.index[-1])
+            except Exception:
+                last_bar_timestamp = str(current_time)
+            if bar_key in self.processed_bars and self.processed_bars[bar_key] == last_bar_timestamp:
+                logger.debug(f"[DEDUP] Already processed latest bar for {symbol}/{self.primary_timeframe} at {last_bar_timestamp}")
+                continue
+            self.processed_bars[bar_key] = last_bar_timestamp
+            simple_signals = []
+            if getattr(self, 'use_simple_entry', False):
+                try:
+                    simple_signals = self._check_simple_entry_signals(symbol, primary_df, higher_df, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time)
+                except Exception as e:
+                    logger.exception(f"Error in simple entry detection for {symbol}: {e}")
+            
             # Check for breakout signals
-            breakout_signals = self._check_breakout_signals(symbol, primary_df, higher_df, skip_plots)
+            breakout_signals = self._check_breakout_signals(symbol, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time)
             
             # Check for reversal signals
-            reversal_signals = self._check_reversal_signals(symbol, primary_df, higher_df, skip_plots)
+            reversal_signals = self._check_reversal_signals(symbol, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time)
             
             # Collect all signals for this symbol
             symbol_signals = []
+            if simple_signals:
+                symbol_signals.extend(simple_signals)
             if breakout_signals:
                 symbol_signals.extend(breakout_signals)
             
@@ -962,6 +1000,27 @@ class BreakoutReversalStrategy(SignalGenerator):
         else:
             logger.info("📭 No signals generated - returning empty list")
         
+        # --- Cleanup old processed_zones entries ---
+        cleanup_time = current_time - (self.signal_cooldown * 2)
+        old_zone_keys = [k for k, v in self.processed_zones.items() if v < cleanup_time]
+        for k in old_zone_keys:
+            del self.processed_zones[k]
+        if old_zone_keys:
+            logger.debug(f"[DEDUP] Cleaned up {len(old_zone_keys)} old zone records")
+        # --- Cleanup old processed_bars entries ---
+        last_bar_str = None
+        try:
+            if 'primary_df' in locals() and primary_df is not None:
+                last_bar_str = str(primary_df.index[-1])
+        except Exception:
+            last_bar_str = None
+        if last_bar_str is not None:
+            old_bar_keys = [k for k, v in self.processed_bars.items() if v != last_bar_str]
+            for k in old_bar_keys:
+                del self.processed_bars[k]
+            if old_bar_keys:
+                logger.debug(f"[DEDUP] Cleaned up {len(old_bar_keys)} old bar records")
+        
         return signals
     
     def _update_key_levels(self, symbol: str, df: pd.DataFrame, debug_force_update: bool = False) -> None:
@@ -1025,8 +1084,8 @@ class BreakoutReversalStrategy(SignalGenerator):
             except Exception as e:
                 logger.warning(f"Error calculating time difference: {e}. Forcing update.")
         logger.debug(f"🔄 Updating key levels for {symbol} with {len(df)} candles")
-        support_levels = self._find_support_levels(df)
-        resistance_levels = self._find_resistance_levels(df)
+        support_levels = self._find_support_levels(df, symbol)
+        resistance_levels = self._find_resistance_levels(df, symbol)
         self.support_levels[symbol] = support_levels
         self.resistance_levels[symbol] = resistance_levels
         self.last_updated['key_levels'][symbol] = current_time
@@ -1160,29 +1219,70 @@ class BreakoutReversalStrategy(SignalGenerator):
         self.last_updated['trend_lines'][symbol] = current_time
     
     def _find_swing_highs(self, df: pd.DataFrame, window: int = 5) -> list:
-        """
-        Vectorized swing high (pivot high) detection using rolling window.
-        Returns a list of (index, high) tuples.
+        """Improved swing-high detection using Bill-Williams fractals filtered by ATR significance.
+
+        Args:
+            df: OHLC dataframe.
+            window: number of candles on each side for fractal confirmation (default 2 for classical fractal, 5 keeps previous behaviour).
+
+        Returns:
+            List of (index, high) tuples representing significant swing-highs.
         """
         if df is None or len(df) < 2 * window + 1:
             return []
-        highs = df['high']
-        roll_max = highs.rolling(window=2*window+1, center=True).max()
-        is_pivot = (highs == roll_max)
-        pivots = [(i, highs.iloc[i]) for i in range(window, len(df) - window) if is_pivot.iloc[i]]
+
+        # Compute latest ATR value for significance filter
+        try:
+            atr_series = calculate_atr(df, self.atr_period)
+            atr_val = float(atr_series.iloc[-1]) if isinstance(atr_series, pd.Series) and not atr_series.empty else 0
+        except Exception:
+            atr_val = 0
+
+        # Significance threshold — at least X * ATR away from last accepted pivot
+        sig_thresh = atr_val * 0.25 if atr_val > 0 else 0  # 0.25×ATR default
+
+        pivots = []
+        last_pivot_price = None
+
+        for i in range(window, len(df) - window):
+            high_slice_prev = df['high'].iloc[i-window:i]
+            high_slice_next = df['high'].iloc[i+1:i+window+1]
+            curr_high = df['high'].iloc[i]
+
+            if curr_high > high_slice_prev.max() and curr_high > high_slice_next.max():
+                # ATR significance check to reduce noise
+                if last_pivot_price is None or abs(curr_high - last_pivot_price) >= sig_thresh:
+                    pivots.append((i, curr_high))
+                    last_pivot_price = curr_high
+
         return pivots
     
     def _find_swing_lows(self, df: pd.DataFrame, window: int = 5) -> list:
-        """
-        Vectorized swing low (pivot low) detection using rolling window.
-        Returns a list of (index, low) tuples.
-        """
+        """Improved swing-low detection using fractals + ATR filter (mirror of swing-high logic)."""
         if df is None or len(df) < 2 * window + 1:
             return []
-        lows = df['low']
-        roll_min = lows.rolling(window=2*window+1, center=True).min()
-        is_pivot = (lows == roll_min)
-        pivots = [(i, lows.iloc[i]) for i in range(window, len(df) - window) if is_pivot.iloc[i]]
+
+        try:
+            atr_series = calculate_atr(df, self.atr_period)
+            atr_val = float(atr_series.iloc[-1]) if isinstance(atr_series, pd.Series) and not atr_series.empty else 0
+        except Exception:
+            atr_val = 0
+
+        sig_thresh = atr_val * 0.25 if atr_val > 0 else 0
+
+        pivots = []
+        last_pivot_price = None
+
+        for i in range(window, len(df) - window):
+            low_slice_prev = df['low'].iloc[i-window:i]
+            low_slice_next = df['low'].iloc[i+1:i+window+1]
+            curr_low = df['low'].iloc[i]
+
+            if curr_low < low_slice_prev.min() and curr_low < low_slice_next.min():
+                if last_pivot_price is None or abs(curr_low - last_pivot_price) >= sig_thresh:
+                    pivots.append((i, curr_low))
+                    last_pivot_price = curr_low
+
         return pivots
     
     def _identify_trend_lines(self, df: pd.DataFrame, swing_points: list, line_type: str, skip_plots: bool = False) -> list:
@@ -1225,7 +1325,7 @@ class BreakoutReversalStrategy(SignalGenerator):
     def _count_trend_line_touches(self, df: pd.DataFrame, slope: float, intercept: float, 
                                   line_type: str, atr: float = None, start_idx: int = None, end_idx: int = None) -> int:
         """
-        Vectorized: Count how many times price has touched a trend line, using ATR-based tolerance and only between start_idx and end_idx.
+        Fully vectorized: Count how many times price has touched a trend line, using ATR-based tolerance and only between start_idx and end_idx.
         """
         import numpy as np
         if atr is None or pd.isna(atr) or atr == 0:
@@ -1233,22 +1333,20 @@ class BreakoutReversalStrategy(SignalGenerator):
         if atr is None or pd.isna(atr) or atr == 0:
             atr = 1e-4
         price_series = df['low'] if line_type == 'bullish' else df['high']
-        # Only check between start_idx and end_idx
         if start_idx is None or end_idx is None:
             start_idx = 0
             end_idx = len(df) - 1
         idx_range = np.arange(start_idx, end_idx + 1)
-        # Convert index to x (timestamp or float)
+        # Vectorized x values (timestamps or index)
         index_slice = df.index[idx_range]
-        x_vals = np.array([
-            ts.timestamp() if isinstance(ts, (pd.Timestamp, datetime)) else float(i)
-            for i, ts in zip(idx_range, index_slice)
-        ])
+        if hasattr(index_slice, 'to_numpy'):
+            x_vals = np.array([ts.timestamp() if hasattr(ts, 'timestamp') else float(i) for i, ts in zip(idx_range, index_slice)])
+        else:
+            x_vals = np.array(idx_range, dtype=float)
         line_values = slope * x_vals + intercept
         prices = price_series.iloc[idx_range].to_numpy(dtype=float)
-        line_values = line_values.astype(float)
         diffs = np.abs(prices - line_values)
-        touches = np.sum(diffs <= atr * 0.25)
+        touches = np.count_nonzero(diffs <= atr * 0.25)
         return int(min(touches, 20))
     
     def _is_near_trend_line(self, df: pd.DataFrame, idx: int, trend_lines: List[Dict], 
@@ -1670,7 +1768,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             retest_info['retest_confirmed'] = True
             self.retest_tracking[symbol] = retest_info
     
-    def _find_support_levels(self, df: pd.DataFrame) -> List[dict]:
+    def _find_support_levels(self, df: pd.DataFrame, symbol: str = None) -> List[dict]:
         """
         Find significant support levels using swing lows.
         Returns a list of support zones (dicts with min, max, avg, width).
@@ -1685,9 +1783,22 @@ class BreakoutReversalStrategy(SignalGenerator):
                 touches = self._count_level_touches(df, level, 'support')
                 if touches >= self.min_level_touches:
                     levels.append(level)
-        return self._cluster_levels(levels)
+        # --- Integrate volume-by-price clusters as dynamic support zones ---
+        volume_profile_zones = []
+        if symbol and symbol in self.last_consolidation_ranges:
+            vprof = self.last_consolidation_ranges[symbol].get('volume_profile', [])
+            if vprof:
+                sorted_nodes = sorted(vprof, key=lambda n: n['total_volume'], reverse=True)
+                for node in sorted_nodes[:2]:
+                    volume_profile_zones.append(node['center'])
+        clustered = self._cluster_levels(levels + volume_profile_zones)
+        # Mark volume-profile derived zones for traceability
+        for zone in clustered:
+            if any(abs(zone['zone_avg'] - vp) < zone['zone_width']*2 for vp in volume_profile_zones):
+                zone['source'] = 'volume_profile'
+        return clustered
 
-    def _find_resistance_levels(self, df: pd.DataFrame) -> List[dict]:
+    def _find_resistance_levels(self, df: pd.DataFrame, symbol: str = None) -> List[dict]:
         """
         Find significant resistance levels using swing highs.
         Returns a list of resistance zones (dicts with min, max, avg, width).
@@ -1702,7 +1813,19 @@ class BreakoutReversalStrategy(SignalGenerator):
                 touches = self._count_level_touches(df, level, 'resistance')
                 if touches >= self.min_level_touches:
                     levels.append(level)
-        return self._cluster_levels(levels)
+        # --- Integrate volume-by-price clusters as dynamic resistance zones ---
+        volume_profile_zones = []
+        if symbol and symbol in self.last_consolidation_ranges:
+            vprof = self.last_consolidation_ranges[symbol].get('volume_profile', [])
+            if vprof:
+                sorted_nodes = sorted(vprof, key=lambda n: n['total_volume'], reverse=True)
+                for node in sorted_nodes[:2]:
+                    volume_profile_zones.append(node['center'])
+        clustered = self._cluster_levels(levels + volume_profile_zones)
+        for zone in clustered:
+            if any(abs(zone['zone_avg'] - vp) < zone['zone_width']*2 for vp in volume_profile_zones):
+                zone['source'] = 'volume_profile'
+        return clustered
 
     def _count_level_touches(self, df: pd.DataFrame, level: float, level_type: str) -> int:
         """
@@ -1736,7 +1859,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             })
         return result
     
-    def _check_breakout_signals(self, symbol: str, df: pd.DataFrame, h1_df: pd.DataFrame, skip_plots: bool = False) -> List[Dict]:
+    def _check_breakout_signals(self, symbol: str, df: pd.DataFrame, h1_df: pd.DataFrame, skip_plots: bool = False, processed_zones=None, signal_cooldown=86400, current_time=None) -> List[Dict]:
         """
         Check for breakout signals across support/resistance levels and trend lines.
         
@@ -1897,19 +2020,9 @@ class BreakoutReversalStrategy(SignalGenerator):
                 breakout_now = current_candle['close'] > level['zone_max'] + tol
                 if breakout_prev and breakout_now:
                     # False-breakout filter for bullish breakouts (safe check)
-                    df_slice = df.iloc[:i+1]
-                    if len(df_slice) < 2:
-                        logger.debug(f"Skipping false breakout filter for {symbol} (not enough data)")
-                        continue
-                    fb_series = self.detect_false_breakout(
-                        df_slice,
-                        direction='bullish',
-                        price_tolerance=self.price_tolerance,
-                        volume_threshold=volume_threshold
-                    )
-                    if not fb_series.empty and bool(fb_series.iloc[-1]):
-                        logger.debug(
-                            f"🚫 False breakout detected for {symbol} at resistance breakout, skipping signal.")
+                    fb = self.detect_false_breakout(df, 'bullish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
+                    if fb.iloc[i]:
+                        logger.debug(f"🚫 False breakout detected for {symbol} at resistance breakout (bar {i}), skipping signal.")
                         continue  # skip this candle—likely a fakeout
                     # Generate buy signal
                     entry_price = current_candle['close']
@@ -1939,6 +2052,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                     current_candle['close'] > curr_line_value * (1 + self.price_tolerance) and
                     h1_trend != 'bearish'):  # Just avoid counter-trend signals
                     
+                    # False-breakout filter for bullish trendline breakouts
+                    fb = self.detect_false_breakout(df, 'bullish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
+                    if fb.iloc[i]:
+                        logger.debug(f"🚫 False breakout detected for {symbol} at trendline breakout (bar {i}), skipping signal.")
+                        continue
                     # Generate buy signal
                     entry_price = current_candle['close']
                     
@@ -1968,7 +2086,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             'entry_price': entry_price,
                             'stop_loss': stop_loss,
                             'start_time': df.index[i],
-                            'confirmed': False,
+                            'retest_confirmed': False,
                             'reason': reason
                         }
                         logger.info(f"👀 TRACKING RETEST: {symbol} bullish trend line breakout at {curr_line_value:.5f}")
@@ -1998,8 +2116,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                         
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🟢 TREND LINE BREAKOUT BUY: {symbol} at {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
         
         # Check for support breakdowns (horizontal levels)
         for i in range(-candles_to_check, 0):
@@ -2018,19 +2136,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                 breakdown_now = current_candle['close'] < level['zone_min'] - tol
                 if (breakdown_prev and breakdown_now and self._is_strong_candle(current_candle)
                     and volume_quality < 0 and h1_trend == 'bearish'):
-                    df_slice = df.iloc[:i+1]
-                    if len(df_slice) < 2:
-                        logger.debug(f"Skipping false breakdown filter for {symbol} (not enough data)")
-                        continue
-                    fb_series = self.detect_false_breakout(
-                        df_slice,
-                        direction='bearish',
-                        price_tolerance=self.price_tolerance,
-                        volume_threshold=volume_threshold
-                    )
-                    if not fb_series.empty and bool(fb_series.iloc[-1]):
-                        logger.debug(
-                            f"🚫 False breakdown detected for {symbol} at support breakdown, skipping signal.")
+                    # False-breakout filter for bearish breakdowns
+                    fb = self.detect_false_breakout(df, 'bearish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
+                    if fb.iloc[i]:
+                        logger.debug(f"🚫 False breakdown detected for {symbol} at support breakdown (bar {i}), skipping signal.")
                         continue  # skip this candle—likely a fakeout
                     # Generate sell signal
                     entry_price = current_candle['close']
@@ -2063,7 +2172,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             'entry_price': entry_price,
                             'stop_loss': stop_loss,
                             'start_time': df.index[i],
-                            'confirmed': False,
+                            'retest_confirmed': False,
                             'reason': reason
                         }
                         logger.info(f"👀 TRACKING RETEST: {symbol} bearish breakdown at {level['zone_max']:.5f}")
@@ -2093,8 +2202,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                         
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🔴 BREAKDOWN SELL: {symbol} at {entry_price:.5f} | Level: {level['zone_max']:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
             
             # Check trend line breakdowns (bearish) - RELAXED conditions
             for trend_line in bullish_trend_lines:
@@ -2104,6 +2213,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                 if (previous_candle['close'] >= prev_line_value * (1 - self.price_tolerance) and
                     current_candle['close'] < curr_line_value * (1 - self.price_tolerance) and
                     h1_trend != 'bullish'):
+                    # False-breakout filter for bearish trendline breakdowns
+                    fb = self.detect_false_breakout(df, 'bearish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
+                    if fb.iloc[i]:
+                        logger.debug(f"🚫 False breakdown detected for {symbol} at trendline breakdown (bar {i}), skipping signal.")
+                        continue
                     # Generate sell signal
                     entry_price = current_candle['close']
                     stop_loss = max(current_candle['high'], previous_candle['high'])
@@ -2118,7 +2232,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             'entry_price': entry_price,
                             'stop_loss': stop_loss,
                             'start_time': df.index[i],
-                            'confirmed': False,
+                            'retest_confirmed': False,
                             'reason': reason
                         }
                         logger.info(f"👀 TRACKING RETEST: {symbol} bearish trend line breakdown (relaxed)")
@@ -2146,12 +2260,12 @@ class BreakoutReversalStrategy(SignalGenerator):
                         }
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🔴 TREND LINE BREAKDOWN SELL (relaxed): {symbol} at {entry_price:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
         
         return signals
     
-    def _check_reversal_signals(self, symbol: str, df: pd.DataFrame, h1_df: pd.DataFrame, skip_plots: bool = False) -> List[Dict]:
+    def _check_reversal_signals(self, symbol: str, df: pd.DataFrame, h1_df: pd.DataFrame, skip_plots: bool = False, processed_zones=None, signal_cooldown=86400, current_time=None) -> List[Dict]:
         """
         Check for reversal signals at key support and resistance levels.
         
@@ -2229,7 +2343,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         logger.info(f"⚡ {symbol}: Detected bullish reversal pattern ({pattern_type}) at support {level['zone_max']:.5f}")
                         # Use the pattern's close as entry, not the latest bar
                         entry_price = df.iloc[i]['close']
-                        stop_loss = current_candle['low'] - max(level['zone_max'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                        stop_loss = current_candle['low'] - self._get_dynamic_tolerance_band(df, i, level['zone_max'])
                         risk = entry_price - stop_loss
                         next_resistance = self._find_next_resistance(df, entry_price, resistance_levels)
                         if next_resistance:
@@ -2268,8 +2382,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                         }
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🟢 REVERSAL BUY: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | Level: {level['zone_max']:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
                     else:
                         if not pattern_type:
                             logger.debug(f"❌ {symbol}: No bullish pattern detected")
@@ -2305,7 +2419,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         entry_price = current_candle['close']
                         
                         # Stop loss below the reversal candle low
-                        stop_loss = current_candle['low'] - max(line_value * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                        stop_loss = current_candle['low'] - self._get_dynamic_tolerance_band(df, i, line_value)
                         
                         # Target: Either next resistance or at least 2x risk
                         risk = entry_price - stop_loss
@@ -2362,8 +2476,8 @@ class BreakoutReversalStrategy(SignalGenerator):
                         
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🟢 TREND LINE REVERSAL BUY: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
+                        signals.append(signal)
                     else:
                         if not pattern_type:
                             logger.debug(f"❌ {symbol}: No bullish pattern detected")
@@ -2398,7 +2512,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         # Generate sell signal
                         entry_price = current_candle['close']
                         # Stop loss above the reversal candle high
-                        stop_loss = current_candle['high'] + max(level['zone_min'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                        stop_loss = current_candle['high'] + self._get_dynamic_tolerance_band(df, i, level['zone_min'])
                         # Target: Either next support or at least 2x risk
                         risk = stop_loss - entry_price
                         # Advanced target calculation - find nearest support below
@@ -2434,7 +2548,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                         }
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🔴 REVERSAL SELL: {symbol} at {entry_price:.5f} | Pattern: {pattern_type} | Level: {level['zone_min']:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
                         signals.append(signal)
                     else:
@@ -2465,7 +2578,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         # Generate sell signal
                         entry_price = current_candle['close']
                         # Stop loss above the reversal candle high
-                        stop_loss = current_candle['high'] + max(line_value * self.price_tolerance, self.atr_multiplier * self.atr_period)
+                        stop_loss = current_candle['high'] + self._get_dynamic_tolerance_band(df, i, line_value)
                         # Target: Either next support or at least 2x risk
                         risk = stop_loss - entry_price
                         # Advanced target calculation - find nearest support below
@@ -2500,7 +2613,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                         }
                         scored = self._scorer.score_signal(signal, df, df)
                         signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        signals.append(signal)
                         logger.info(f"🔴 TREND LINE REVERSAL SELL: {symbol} at {entry_price:.5f} | {pattern_type} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
                         signals.append(signal)
                     else:
@@ -3220,3 +3332,151 @@ class BreakoutReversalStrategy(SignalGenerator):
                 current_cluster = [item]
         clusters.append(current_cluster)
         return clusters
+
+    def _cluster_by_metric(self, items, metric, tol):
+        """Cluster items by a metric and tolerance (shared logic for levels and trend lines)."""
+        if not items:
+            return []
+        sorted_items = sorted(items, key=metric)
+        clusters = []
+        current_cluster = [sorted_items[0]]
+        for item in sorted_items[1:]:
+            if abs(metric(item) - metric(current_cluster[-1])) <= tol:
+                current_cluster.append(item)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [item]
+        clusters.append(current_cluster)
+        return clusters
+
+    # ------------------------------------------------------------------
+    # NEW: Simplified entry rule — S/R rejection + engulfing + high volume
+    # ------------------------------------------------------------------
+    def _check_simple_entry_signals(self, symbol: str, df: pd.DataFrame, h1_df: pd.DataFrame, processed_zones=None, signal_cooldown=86400, current_time=None) -> List[Dict]:
+        """Generate signals using a minimal-confluence rule set, with deduplication."""
+        signals: List[Dict] = []
+        if df is None or len(df) < 2:
+            return signals
+        self._ensure_tick_volume(df, symbol)
+        vol_threshold = self._compute_volume_threshold(df)
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        def is_bullish_engulfing(prev, curr):
+            return (
+                (prev['close'] < prev['open']) and
+                (curr['close'] > curr['open']) and
+                (curr['close'] > prev['open']) and
+                (curr['open'] < prev['close'])
+            )
+        def is_bearish_engulfing(prev, curr):
+            return (
+                (prev['close'] > prev['open']) and
+                (curr['close'] < curr['open']) and
+                (curr['open'] > prev['close']) and
+                (curr['close'] < prev['open'])
+            )
+        support_levels = self.support_levels.get(symbol, [])
+        resistance_levels = self.resistance_levels.get(symbol, [])
+        def tol(price: float) -> float:
+            return max(price * self.price_tolerance, self._get_dynamic_tolerance_band(df, -1, price))
+        # Bullish Setup
+        if is_bullish_engulfing(previous, current) and current['tick_volume'] >= vol_threshold:
+            for lvl in support_levels:
+                zone_key = (symbol, 'support', round(lvl['zone_max'], 5))
+                if processed_zones and zone_key in processed_zones:
+                    last_used = processed_zones[zone_key]
+                    if current_time is not None and (current_time - last_used) < signal_cooldown:
+                        self.logger.debug(f"[DEDUP] Skipping support zone {lvl['zone_max']:.5f} for {symbol} (on cooldown)")
+                        continue
+                if abs(current['low'] - lvl['zone_max']) <= tol(lvl['zone_max']):
+                    entry = float(current['close'])
+                    sl = float(current['low'] - tol(lvl['zone_max']))
+                    risk = entry - sl if entry > sl else None
+                    if risk is None or risk <= 0:
+                        continue
+                    tp = entry + risk * self.min_risk_reward
+                    reason = f"Bullish engulfing rejection at support {lvl['zone_max']:.5f} with high volume"
+                    base_signal = {
+                        "symbol": symbol,
+                        "direction": "buy",
+                        "entry_price": entry,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "pattern_type": "Bullish Engulfing",
+                        "timeframe": self.primary_timeframe,
+                        "confidence": 0.0,
+                        "source": self.name,
+                        "generator": self.name,
+                        "reason": reason,
+                        "size": self.risk_manager.calculate_position_size(
+                            account_balance=self.risk_manager.get_account_balance(),
+                            risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                            entry_price=entry,
+                            stop_loss_price=sl,
+                            symbol=symbol
+                        ),
+                        "signal_bar_index": len(df) - 1,
+                        "signal_timestamp": str(df.index[-1])
+                    }
+                    result = self.risk_manager.validate_and_size_trade(base_signal)
+                    if result.get('valid', False):
+                        adj = result['adjusted_trade']
+                        for k in base_signal:
+                            if k not in adj:
+                                adj[k] = base_signal[k]
+                        signals.append(adj)
+                        self.logger.info(f"🟢 SIMPLE BUY: {symbol} at {entry:.5f} | SL {sl:.5f} | TP {tp:.5f}")
+                        if processed_zones is not None and current_time is not None:
+                            processed_zones[zone_key] = current_time
+                    break
+        # Bearish Setup
+        if is_bearish_engulfing(previous, current) and current['tick_volume'] >= vol_threshold:
+            for lvl in resistance_levels:
+                zone_key = (symbol, 'resistance', round(lvl['zone_min'], 5))
+                if processed_zones and zone_key in processed_zones:
+                    last_used = processed_zones[zone_key]
+                    if current_time is not None and (current_time - last_used) < signal_cooldown:
+                        self.logger.debug(f"[DEDUP] Skipping resistance zone {lvl['zone_min']:.5f} for {symbol} (on cooldown)")
+                        continue
+                if abs(current['high'] - lvl['zone_min']) <= tol(lvl['zone_min']):
+                    entry = float(current['close'])
+                    sl = float(current['high'] + tol(lvl['zone_min']))
+                    risk = sl - entry if sl > entry else None
+                    if risk is None or risk <= 0:
+                        continue
+                    tp = entry - risk * self.min_risk_reward
+                    reason = f"Bearish engulfing rejection at resistance {lvl['zone_min']:.5f} with high volume"
+                    base_signal = {
+                        "symbol": symbol,
+                        "direction": "sell",
+                        "entry_price": entry,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "pattern_type": "Bearish Engulfing",
+                        "timeframe": self.primary_timeframe,
+                        "confidence": 0.0,
+                        "source": self.name,
+                        "generator": self.name,
+                        "reason": reason,
+                        "size": self.risk_manager.calculate_position_size(
+                            account_balance=self.risk_manager.get_account_balance(),
+                            risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
+                            entry_price=entry,
+                            stop_loss_price=sl,
+                            symbol=symbol
+                        ),
+                        "signal_bar_index": len(df) - 1,
+                        "signal_timestamp": str(df.index[-1])
+                    }
+                    result = self.risk_manager.validate_and_size_trade(base_signal)
+                    if result.get('valid', False):
+                        adj = result['adjusted_trade']
+                        for k in base_signal:
+                            if k not in adj:
+                                adj[k] = base_signal[k]
+                        signals.append(adj)
+                        self.logger.info(f"🔴 SIMPLE SELL: {symbol} at {entry:.5f} | SL {sl:.5f} | TP {tp:.5f}")
+                        if processed_zones is not None and current_time is not None:
+                            processed_zones[zone_key] = current_time
+                    break
+        return signals

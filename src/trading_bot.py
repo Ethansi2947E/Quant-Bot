@@ -2,7 +2,6 @@ import asyncio
 import traceback
 import pytz
 import time
-import MetaTrader5 as mt5  # Add MetaTrader5 import
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Type, Optional, Set
@@ -95,12 +94,11 @@ class TradingBot:
         # Load and merge with default config if not provided or empty
         if not self.config:
             logger.info("No config provided, loading default configuration from config.py")
-            from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, MT5_CONFIG, SESSION_CONFIG
+            from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, MT5_CONFIG
             self.config = {
                 "trading": TRADING_CONFIG,
                 "telegram": TELEGRAM_CONFIG,
                 "mt5": MT5_CONFIG,
-                "session": SESSION_CONFIG,
             }
         self.trading_config = self.config.get("trading", {})
         self.telegram_config = self.config.get("telegram", {})
@@ -110,19 +108,19 @@ class TradingBot:
         self.market_status = {}  # Track market open/closed status for each symbol
         
         # Initialize MT5 handler first (needed by other components)
-        self.mt5_handler = MT5Handler()
-        
+        mt5_handler_candidate = self.config.get('mt5_handler')
+        if isinstance(mt5_handler_candidate, MT5Handler):
+            self.mt5_handler = mt5_handler_candidate
+            logger.info(f"Using provided MT5Handler instance")
+        else:
+            self.mt5_handler = MT5Handler()
+            logger.info(f"Created new MT5Handler instance")
         # Verify MT5 connection is working
         if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
             self.mt5_handler.initialize()
-        
-        # Track connection status
         self.mt5_connected = self.mt5_handler.connected
-        
         # Initialize symbols list and state tracking variables
         self.symbols = []
-        self.trading_symbols = []
-        
         # Load symbols from configuration
         self._load_symbols_from_config()
         
@@ -203,11 +201,6 @@ class TradingBot:
         self.startup_notification_sent = False  # Flag to track startup notification
         self.stop_requested = False
         
-        # Extract trading symbols from config (this is already done in _load_symbols_from_config)
-        # Don't override the symbols that were already loaded
-        if not self.trading_symbols:
-            self.trading_symbols = self.config.get('trading_symbols', ['EURUSD', 'GBPUSD', 'USDJPY'])
-        
         self.start_time = datetime.now()
         self.active_trades = {}
         self.pending_trades = {}
@@ -232,18 +225,6 @@ class TradingBot:
         self.trailing_stop_data = {}  # Store trailing stop data for open positions
         
         logger.info("TradingBot initialized with enhanced multi-timeframe analysis capabilities")
-
-        # Create or use provided MT5Handler
-        if self.config.get('mt5_handler'):
-            self.mt5_handler = self.config.get('mt5_handler')
-            logger.info(f"Using provided MT5Handler instance")
-        else:
-            self.mt5_handler = MT5Handler()
-            logger.info(f"Created new MT5Handler instance")
-            
-        # Initialize MT5 connection (if not already connected)
-        if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
-            self.mt5_handler.initialize()
 
         self.main_loop_task = None
         self._monitor_trades_task = None
@@ -475,10 +456,21 @@ class TradingBot:
             self.shutdown_monitor_task = asyncio.create_task(self._monitor_shutdown())
             
             # Send startup notification
-            startup_message = f"🚀 Trading Bot started\n\n"
-            startup_message += f"📊 Symbols: {', '.join(self.symbols)}\n"
-            startup_message += f"🧠 Signal Generator: {self.signal_generators[0].__class__.__name__ if self.signal_generators else 'None'}\n"
-            startup_message += f"⚙️ Trading Enabled: {'✅' if self.trading_enabled else '❌'}"
+            startup_message = (
+                "🚀 <b>Trading Bot Started</b>\n"
+                "\n"
+                "<b>📊 Symbols:</b> <code>{symbols}</code>\n"
+                "<b>🧠 Strategy:</b> <code>{strategy}</code>\n"
+                "<b>⚙️ Trading Enabled:</b> {enabled}\n"
+                "\n"
+                "<b>ℹ️ Tip:</b> Use /start in this chat to view the Telegram command keyboard and available bot commands.\n"
+                "\n"
+                "<i>Happy trading! If you need help, type /help or use the keyboard.</i>"
+            ).format(
+                symbols=', '.join(self.symbols),
+                strategy=(self.signal_generators[0].__class__.__name__ if self.signal_generators else 'None'),
+                enabled='✅' if self.trading_enabled else '❌',
+            )
             
             # Send notification directly through signal processor instead of using the wrapper method
             if self.signal_processor:
@@ -667,9 +659,6 @@ class TradingBot:
         # Get open positions
         positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
         
-        # Determine current session
-        current_session = self.analyze_session()
-        
         # Build status message
         status = f"🤖 Trading Bot Status\n{'='*20}\n"
         
@@ -678,7 +667,6 @@ class TradingBot:
         status += f"Trailing Stop: {'✅' if self.trailing_stop_enabled else '❌'}\n"
         status += f"Position Additions: {'✅' if self.allow_position_additions else '❌'}\n"
         status += f"Close on Shutdown: {'✅' if self.close_positions_on_shutdown else '❌'}\n"
-        status += f"Current Session: {current_session}\n"
         status += f"Signal Generator: {self.signal_generator_class.__name__ if self.signal_generator_class is not None else 'None'}\n\n"
 
             
@@ -1285,43 +1273,6 @@ class TradingBot:
         # Ensure no duplicates
         self.symbols = list(dict.fromkeys(self.symbols))
     
-    def analyze_session(self):
-        """
-        Determine the current trading session based on time.
-        
-        Returns:
-            str: The current trading session (e.g. "Asian", "European", "US", "Closed")
-        """
-        try:
-            # Get current UTC time
-            now_utc = datetime.now(pytz.UTC)
-            
-            # Convert to New York time for market sessions
-            ny_time = now_utc.astimezone(self.ny_timezone)
-            current_hour = ny_time.hour
-            weekday = ny_time.weekday()  # 0-6, Monday is 0
-            
-            # Weekend check
-            if weekday >= 5:  # Saturday or Sunday
-                return "Weekend (Markets Closed)"
-                
-            # Session times based on New York time
-            if 0 <= current_hour < 3:
-                return "Late US/Early Asian Session"
-            elif 3 <= current_hour < 8:
-                return "Asian Session"
-            elif 8 <= current_hour < 12:
-                return "European Session"
-            elif 12 <= current_hour < 16:
-                return "European/US Overlap Session"
-            elif 16 <= current_hour < 20:
-                return "US Session"
-            else:  # 20-24
-                return "Late US Session"
-        except Exception as e:
-            logger.error(f"Error analyzing session: {str(e)}")
-            return "Unknown Session"
-    
     def _load_available_signal_generators(self):
         """
         Load and register all available signal generators from the strategy module.
@@ -1343,7 +1294,15 @@ class TradingBot:
                     self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
                     logger.info("Imported BreakoutReversalStrategy directly from file")
                 
-                # Try importing the new confluence strategy
+                # Try importing the new price action SR strategy
+                try:
+                    from src.strategy.price_action_sr_strategy import PriceActionSRStrategy
+                    self.available_signal_generators["price_action_sr"] = PriceActionSRStrategy
+                    logger.info("Successfully imported PriceActionSRStrategy")
+                except ImportError as e:
+                    logger.warning(f"PriceActionSRStrategy not found in strategy module: {str(e)}")
+                
+                # Try importing the confluence strategy
                 try:
                     from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy  # type: ignore
                     self.available_signal_generators["confluence_price_action"] = ConfluencePriceActionStrategy

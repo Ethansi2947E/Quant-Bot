@@ -6,18 +6,15 @@ import MetaTrader5 as mt5  # type: ignore
 from datetime import datetime, timedelta, UTC
 import pandas as pd
 from loguru import logger
-from typing import Optional, List, Dict, Any, cast
+from typing import Optional, List, Dict, Any
 import time
 import traceback
-import json
-import math
-import sys
-import re
+import re 
+import math 
 import asyncio
-import numpy as np
+import json
 
 from config.config import MT5_CONFIG, TRADING_CONFIG, RISK_MANAGER_CONFIG
-# Remove the import for RiskManager - will use type hints instead
 import typing
 if typing.TYPE_CHECKING:
     from src.risk_manager import RiskManager  # For type hints only, no circular import
@@ -992,136 +989,6 @@ class MT5Handler:
         # Default fallback if none of the above patterns match
         return 0.0003  # Conservative default for unknown symbols
 
-    def execute_trade(self, trade_params: Dict[str, Any]) -> Optional[List[int]]:
-        """
-        Execute a trade with the given parameters.
-
-        Args:
-            trade_params: Dictionary with trade parameters
-
-        Returns:
-            Optional[List[int]]: List of ticket numbers if successful, None otherwise
-        """
-        try:
-            # Validate input parameters
-            required_params = ['symbol', 'signal_type', 'entry_price', 'stop_loss',
-                             'position_size', 'partial_tp_levels']
-            if not all(param in trade_params for param in required_params):
-                logger.error(f"Missing required trade parameters. Required: {required_params}")
-                return None
-
-            # Calculate base risk
-            risk = abs(trade_params['entry_price'] - trade_params['stop_loss'])
-            base_volume = trade_params['position_size']
-            orders = []
-
-            # Get appropriate filling mode for this symbol
-            symbol = trade_params['symbol']
-            filling_mode = self.get_symbol_filling_mode(symbol)
-
-            # Process each partial take profit level
-            for i, tp_level in enumerate(trade_params['partial_tp_levels']):
-                # Calculate take profit price based on R-multiple
-                if trade_params['signal_type'] == "BUY":
-                    tp_price = trade_params['entry_price'] + (risk * tp_level['ratio'])
-                else:  # SELL
-                    tp_price = trade_params['entry_price'] - (risk * tp_level['ratio'])
-
-                # Calculate volume for this partial
-                partial_volume = base_volume * tp_level['size']
-                if i == len(trade_params['partial_tp_levels']) - 1:
-                    # Adjust last partial to account for any rounding errors
-                    partial_volume = base_volume - sum(order['volume'] for order in orders)
-
-                # Round volume to valid lot size
-                symbol_info = mt5.symbol_info(trade_params['symbol'])
-                if not symbol_info:
-                    logger.error(f"Failed to get symbol info for {trade_params['symbol']}")
-                    return None
-
-                lot_step = symbol_info.volume_step
-                partial_volume = round(partial_volume / lot_step) * lot_step
-
-                if partial_volume > 0:  # Only create order if volume is positive
-                    request = {
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": trade_params['symbol'],
-                        "volume": partial_volume,
-                        "type": mt5.ORDER_TYPE_BUY if trade_params['signal_type'] == 'BUY' else mt5.ORDER_TYPE_SELL,
-                        "price": trade_params['entry_price'],
-                        "sl": trade_params['stop_loss'],
-                        "tp": tp_price,
-                        "deviation": 10,
-                        "magic": 234000,
-                        "comment": f"Python Bot - {trade_params['signal_type']} TP{i+1} ({tp_level['ratio']:.1f}R)",
-                        "type_time": mt5.ORDER_TIME_GTC,
-                        "type_filling": filling_mode,  # Use appropriate filling mode for this symbol
-                    }
-                    orders.append(request)
-
-            # Ensure the symbol is selected before executing orders
-            if not mt5.symbol_select(trade_params['symbol'], True):
-                logger.error(f"Failed to select symbol: {trade_params['symbol']}")
-                return None
-
-            # Wait for fresh tick data
-            retry_count = 0
-            last_tick = mt5.symbol_info_tick(trade_params['symbol'])
-            while not last_tick and retry_count < 3:
-                time.sleep(0.5)
-                last_tick = mt5.symbol_info_tick(trade_params['symbol'])
-                retry_count += 1
-            if not last_tick:
-                logger.error("No tick data available for trade execution after retrying")
-                return None
-
-            # Update orders with current tick prices
-            for order in orders:
-                if order["type"] == mt5.ORDER_TYPE_BUY:
-                    order["price"] = last_tick.ask
-                else:
-                    order["price"] = last_tick.bid
-
-            # Execute all orders
-            results = []
-            for order in orders:
-                result = mt5.order_send(order)
-                if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
-                    logger.warning(f"Order requote detected: {result.comment}. Retrying with increased deviation.")
-                    if "No prices" in result.comment:
-                        tick = mt5.symbol_info_tick(order["symbol"])
-                        if not tick:
-                            logger.error("No tick data available to update order price")
-                            raise Exception("No tick data available")
-                        if order["type"] == mt5.ORDER_TYPE_BUY:
-                            order["price"] = tick.ask
-                        else:
-                            order["price"] = tick.bid
-                        logger.info(f"Updated order price to current market price: {order['price']}")
-                    order["deviation"] += 10
-                    result_retry = mt5.order_send(order)
-                    if result_retry.retcode != mt5.TRADE_RETCODE_DONE:
-                        raise Exception(f"Order failed after retry: {result_retry.comment}")
-                    result = result_retry
-                elif result.retcode != mt5.TRADE_RETCODE_DONE:
-                    raise Exception(f"Order failed: {result.comment}")
-
-                results.append(result)
-
-            log_message = (
-                f"Successfully opened {len(results)} partial positions for {trade_params['symbol']} {trade_params['signal_type']}\n" +
-                "\n".join([
-                    f"  Partial {i+1}: {order['volume']:.2f} lots, TP at {order['tp']:.5f} ({tp_level['ratio']:.1f}R)"
-                    for i, (order, tp_level) in enumerate(zip(orders, trade_params['partial_tp_levels']))
-                ])
-            )
-            logger.info(log_message)
-
-            return [result.order for result in results]
-
-        except Exception as e:
-            logger.error(f"Error executing trade: {str(e)}")
-            return None
 
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """Get symbol information from MT5.
@@ -1467,108 +1334,6 @@ class MT5Handler:
                 # For win rate, we need trade data - this is a placeholder
                 # In a real system, you'd calculate this from actual trade results
                 day["win_rate"] = 50 + (i * 2) # Placeholder that increases daily
-
-    def open_buy(self, symbol: str, volume: float, stop_loss: float = 0.0,
-                take_profit: float = 0.0, comment: str = "") -> Optional[int]:
-        """
-        Open a buy position for the specified symbol.
-
-        Args:
-            symbol: Trading instrument symbol
-            volume: Trade volume in lots
-            stop_loss: Stop loss level
-            take_profit: Take profit level
-            comment: Order comment
-
-        Returns:
-            Position ticket on success, None on failure
-        """
-        try:
-            # Get the current ask price for buying
-            symbol_info = self.get_symbol_info(symbol)
-            if not symbol_info:
-                logger.error(f"Symbol {symbol} not found")
-                return None
-
-            entry_price = symbol_info.ask
-
-            # Format parameters for execute_trade
-            trade_params = {
-                'symbol': symbol,
-                'signal_type': 'BUY',
-                'entry_price': entry_price,
-                'stop_loss': stop_loss,
-                'position_size': volume,
-                'partial_tp_levels': [{'ratio': 1.0, 'size': 1.0}]  # Single TP level
-            }
-
-            # If take profit is provided, set it
-            if take_profit > 0:
-                trade_params['partial_tp_levels'][0]['ratio'] = abs(take_profit - entry_price) / abs(entry_price - stop_loss) if stop_loss > 0 else 1.0
-
-            # Execute the trade
-            logger.debug(f"Executing BUY trade for {symbol} with volume {volume}, SL {stop_loss}, TP {take_profit}")
-            result = self.execute_trade(trade_params)
-
-            # Return the first ticket if successful
-            if result and len(result) > 0:
-                return result[0]
-            return None
-
-        except Exception as e:
-            logger.error(f"Error in open_buy: {str(e)}")
-            return None
-
-    def open_sell(self, symbol: str, volume: float, stop_loss: float = 0.0,
-                take_profit: float = 0.0, comment: str = "") -> Optional[int]:
-        """
-        Open a sell position for the specified symbol.
-
-        Args:
-            symbol: Trading instrument symbol
-            volume: Trade volume in lots
-            stop_loss: Stop loss level
-            take_profit: Take profit level
-            comment: Order comment
-
-        Returns:
-            Position ticket on success, None on failure
-        """
-        try:
-            # Get the current bid price for selling
-            symbol_info = self.get_symbol_info(symbol)
-            if not symbol_info:
-                logger.error(f"Symbol {symbol} not found")
-                return None
-
-            entry_price = symbol_info.bid
-
-            # Format parameters for execute_trade
-            trade_params = {
-                'symbol': symbol,
-                'signal_type': 'SELL',
-                'entry_price': entry_price,
-                'stop_loss': stop_loss,
-                'position_size': volume,
-                'partial_tp_levels': [{'ratio': 1.0, 'size': 1.0}]  # Single TP level
-            }
-
-            # If take profit is provided, set it
-            if take_profit > 0:
-                trade_params['partial_tp_levels'][0]['ratio'] = abs(entry_price - take_profit) / abs(stop_loss - entry_price) if stop_loss > 0 else 1.0
-
-            # Execute the trade
-            logger.debug(f"Executing SELL trade for {symbol} with volume {volume}, SL {stop_loss}, TP {take_profit}")
-            result = self.execute_trade(trade_params)
-
-            # Return the first ticket if successful
-            if result and len(result) > 0:
-                return result[0]
-            return None
-
-        except Exception as e:
-            logger.error(f"Error in open_sell: {str(e)}")
-            return None
 
     def get_error_info(self, error_code: Optional[int] = None) -> str:
         """
