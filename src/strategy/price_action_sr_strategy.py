@@ -170,6 +170,7 @@ class PriceActionSRStrategy(SignalGenerator):
     def get_sr_zones(self, df: pd.DataFrame) -> Dict[str, List[float]]:
         """
         Compute and return the top N support and resistance zones.
+        Dynamically adjust max_zones based on volatility.
         Args:
             df (pd.DataFrame): Price data with 'high' and 'low' columns
         Returns:
@@ -184,14 +185,38 @@ class PriceActionSRStrategy(SignalGenerator):
             return [sum(abs(p - z) <= z * 0.003 for p in prices) for z in zones]
         res_counts = count_touches(highs, res_zones)
         sup_counts = count_touches(lows, sup_zones)
-        # Select top N by touches
-        top_res = [z for _, z in sorted(zip(res_counts, res_zones), reverse=True)[:self.max_zones]]
-        top_sup = [z for _, z in sorted(zip(sup_counts, sup_zones), reverse=True)[:self.max_zones]]
+        # Dynamic max_zones based on volatility
+        close_std = df['close'].rolling(50).std().iloc[-1] if len(df) >= 50 else df['close'].std()
+        close_mean = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else df['close'].mean()
+        volatility = close_std / close_mean if close_mean > 0 else 0
+        dynamic_max_zones = 4 if volatility > 0.01 else self.max_zones  # 1% threshold, else fallback
+        logger.info(f"Volatility: {volatility:.4f}, using max_zones={dynamic_max_zones}")
+        top_res = [z for _, z in sorted(zip(res_counts, res_zones), reverse=True)[:dynamic_max_zones]]
+        top_sup = [z for _, z in sorted(zip(sup_counts, sup_zones), reverse=True)[:dynamic_max_zones]]
         return {'support': top_sup, 'resistance': top_res}
 
     def _is_in_zone(self, price: float, zone: float, tol: float = 0.003) -> bool:
         """Check if price is inside a zone (±tol)."""
         return abs(price - zone) <= zone * tol
+
+    def _bar_touches_zone(self, candle, zone: float, direction: str, tol: float = 0.003) -> bool:
+        """
+        Check if the candle's close OR (low for support, high for resistance) touches the zone.
+        Args:
+            candle: pd.Series with open, high, low, close
+            zone: float, zone price
+            direction: 'buy' or 'sell'
+            tol: float, tolerance
+        Returns:
+            bool: True if candle touches zone
+        """
+        close_in_zone = self._is_in_zone(candle['close'], zone, tol)
+        if direction == 'buy':
+            low_in_zone = self._is_in_zone(candle['low'], zone, tol)
+            return close_in_zone or low_in_zone
+        else:
+            high_in_zone = self._is_in_zone(candle['high'], zone, tol)
+            return close_in_zone or high_in_zone
 
     def _is_bullish_engulfing(self, prev, curr) -> bool:
         return (
@@ -245,10 +270,24 @@ class PriceActionSRStrategy(SignalGenerator):
             return upper_wick / total >= self.wick_threshold
 
     def _volume_spike(self, df: pd.DataFrame, idx: int) -> bool:
+        """
+        Adaptive volume spike: True if current volume is above 85th percentile of last 40 bars (or 2x mean if not enough data).
+        """
         if idx < 20:
             return False
-        avg_vol = df['tick_volume'].iloc[idx-20:idx].mean()
-        return df['tick_volume'].iloc[idx] >= self.volume_multiplier * avg_vol
+        window = 40 if idx >= 40 else idx
+        if window < 10:
+            return False
+        recent_vols = df['tick_volume'].iloc[idx-window:idx]
+        current_vol = df['tick_volume'].iloc[idx]
+        if len(recent_vols) >= 10:
+            threshold = np.percentile(recent_vols, 85)
+            logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold}")
+            return current_vol >= threshold
+        else:
+            avg_vol = recent_vols.mean()
+            logger.debug(f"Volume spike fallback: current={current_vol}, 2x mean={2*avg_vol}")
+            return current_vol >= 2 * avg_vol
 
     def _pattern_match(self, df: pd.DataFrame, idx: int, direction: str) -> Optional[str]:
         prev = df.iloc[idx-1]
@@ -408,13 +447,7 @@ class PriceActionSRStrategy(SignalGenerator):
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         """
         Generate trading signals based on S/R zone entry, candlestick pattern, wick rejection, and volume spike.
-        Only processes new bars and zones that haven't been used recently.
-        
-        Args:
-            market_data (Dict[str, Any]): Dict of symbol to DataFrame or dict of timeframes
-            symbol (str, optional): Symbol to process (if only one)
-        Returns:
-            List[Dict]: List of signal dicts ready for signal_processor
+        Implements a scoring system for confluence, allowing for more flexible signal generation.
         """
         signals = []
         current_time = datetime.now().timestamp()
@@ -429,7 +462,6 @@ class PriceActionSRStrategy(SignalGenerator):
                 logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df) if df is not None else 0}")
                 continue
                 
-            # Check if we've already processed this bar for this symbol and timeframe
             bar_key = (sym, self.primary_timeframe)
             last_timestamp = None
             
@@ -444,7 +476,6 @@ class PriceActionSRStrategy(SignalGenerator):
                 logger.debug(f"Already processed latest bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
                 continue
                 
-            # We're processing a new bar, update our tracking
             self.processed_bars[bar_key] = last_timestamp_str
             logger.debug(f"Processing new bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
             
@@ -452,105 +483,83 @@ class PriceActionSRStrategy(SignalGenerator):
             if 'tick_volume' not in df.columns:
                 df['tick_volume'] = df.get('volume', 1)
                 
-            # Get support/resistance zones
             zones = self.get_sr_zones(df)
             symbol_signals = []
             
-            # Process support and resistance zones
             for direction, zone_list in [('buy', zones['support']), ('sell', zones['resistance'])]:
                 zone_type = 'support' if direction == 'buy' else 'resistance'
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
                 
                 for zone in zone_list:
-                    # Check if we've already used this zone recently
                     zone_key = (sym, zone_type, round(zone, 5))
                     if zone_key in self.processed_zones:
                         last_used_time = self.processed_zones[zone_key]
                         time_since_use = current_time - last_used_time
-                        
                         if time_since_use < self.signal_cooldown:
                             cooldown_remaining = self.signal_cooldown - time_since_use
                             hours_remaining = cooldown_remaining / 3600
                             logger.debug(f"Skipping {zone_type} zone {zone:.5f} - on cooldown for {hours_remaining:.1f} more hours")
                             continue
-                    
-                    # Count zone touches for strength
                     zone_touches = sum(1 for i in range(len(df)) if self._is_in_zone(df['close'].iloc[i], zone))
-                    
-                    # We only care about the most recent bar that hasn't been processed yet
-                    # This ensures we only generate signals for new price action
                     idx = len(df) - 1
-                    process_idx = idx - 1  # We use previous completed bar for pattern recognition
-                    
+                    process_idx = idx - 1
                     if process_idx < self.pivot_window + 20:
                         logger.debug(f"Not enough bars to check for patterns at index {process_idx}")
                         continue
-                        
-                    price = df['close'].iloc[process_idx]
-                    if not self._is_in_zone(price, zone):
+                    candle = df.iloc[process_idx]
+                    # Flexible zone touch: close or wick/high/low
+                    in_zone = self._bar_touches_zone(candle, zone, direction)
+                    if not in_zone:
                         continue
-                        
-                    logger.debug(f"Price {price:.5f} is in {zone_type} zone {zone:.5f}")
-                    
-                    # Check pattern
+                    logger.debug(f"Candle at idx {process_idx} touches {zone_type} zone {zone:.5f}")
+                    # Scoring system for confluence
+                    score = 0
+                    reasons = []
+                    # 1. Pattern
                     pattern = self._pattern_match(df, process_idx, direction)
-                    if not pattern:
-                        logger.debug(f"No {direction} pattern detected")
+                    if pattern:
+                        score += 2
+                        reasons.append(f"Pattern: {pattern}")
+                    # 2. Wick rejection
+                    wick = self._wick_rejection(candle, direction)
+                    if wick:
+                        score += 1
+                        reasons.append("Wick rejection")
+                    # 3. Volume spike
+                    vol_spike = self._volume_spike(df, process_idx)
+                    if vol_spike:
+                        score += 1
+                        reasons.append("Volume spike")
+                    # Require at least 2/4 confluences, but pattern+zone or wick+vol+zone is enough
+                    if score < 2:
+                        logger.debug(f"Score {score}: insufficient confluence at {zone_type} zone {zone:.5f}")
                         continue
-                    logger.debug(f"Pattern match: {pattern}")
-                    
-                    # Check wick rejection
-                    if not self._wick_rejection(df.iloc[process_idx], direction):
-                        logger.debug(f"No wick rejection")
-                        continue
-                    logger.debug(f"Wick rejection confirmed")
-                    
-                    # Check volume spike and calculate volume score
-                    if not self._volume_spike(df, process_idx):
-                        logger.debug(f"No volume spike")
-                        continue
-                    logger.debug(f"Volume spike confirmed")
-                    
                     # Calculate volume score (how much above threshold)
                     avg_vol = df['tick_volume'].iloc[process_idx-20:process_idx].mean()
                     current_vol = df['tick_volume'].iloc[process_idx]
-                    volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 2.0)  # Cap at 2.0
-                    
-                    # All conditions met - create signal
-                    entry = df['open'].iloc[idx] if idx < len(df) else price
-                    stop = df['low'].iloc[process_idx] if direction == 'buy' else df['high'].iloc[process_idx]
-                    
-                    # Find next opposite zone for TP
+                    volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 2.0) if avg_vol > 0 else 0
+                    entry = df['open'].iloc[idx] if idx < len(df) else candle['close']
+                    stop = candle['low'] if direction == 'buy' else candle['high']
                     opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
                     tp = None
                     for opp in (sorted(opp_zones) if direction == 'buy' else sorted(opp_zones, reverse=True)):
                         if (direction == 'buy' and opp > entry) or (direction == 'sell' and opp < entry):
                             tp = opp
                             break
-                    
-                    # Fallback TP calculation if no opposite zone
                     if tp is None:
                         risk = abs(entry - stop)
                         tp = entry + 2 * risk if direction == 'buy' else entry - 2 * risk
                         logger.debug(f"Using fallback 2R TP: {tp:.5f}")
-                    
-                    # Position sizing
                     equity = self.risk_manager.get_account_balance() if hasattr(self.risk_manager, 'get_account_balance') else 10000
                     size = (equity * self.risk_per_trade) / max(abs(entry - stop), 1e-6)
-                    
-                    # Calculate risk reward ratio
                     risk_reward = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
-                    
-                    # Confidence: 1.0 if all confluences, else 0.8
-                    confidence = 1.0
-                    
-                    # Enhanced detailed reason for better transparency
+                    # Calculate confidence based on number of confluences (pattern, wick, volume)
+                    # 0.5 base + 0.15 per confluence, capped at 0.95
+                    confidence = min(0.5 + 0.15 * score, 0.95)
                     reason = (
-                        f"{pattern} at {zone_type} zone {zone:.5f} with "
-                        f"wick rejection and volume spike. "
+                        f"Confluence: {', '.join(reasons)} at {zone_type} zone {zone:.5f}. "
                         f"Risk:Reward = {risk_reward:.2f}"
                     )
-                    
                     signal = {
                         'symbol': sym,
                         'direction': direction,
@@ -561,48 +570,29 @@ class PriceActionSRStrategy(SignalGenerator):
                         'size': float(size),
                         'timeframe': self.primary_timeframe,
                         'reason': reason,
-                        'pattern': pattern,
+                        'pattern': pattern if pattern else '',
                         'zone': float(zone),
                         'zone_touches': zone_touches,
                         'volume_score': volume_score,
                         'bar_index': int(process_idx),
                         'risk_reward': float(risk_reward),
-                        'signal_timestamp': str(df.index[process_idx])
+                        'signal_timestamp': str(df.index[process_idx]),
+                        'source': self.name
                     }
-                    
-                    logger.info(f"Signal generated for {sym} {direction.upper()}: {pattern} at {zone_type} zone")
-                    
-                    # Mark this zone as processed with the current timestamp
+                    logger.info(f"Signal generated for {sym} {direction.upper()}: {reason}")
                     self.processed_zones[zone_key] = current_time
-                    
                     symbol_signals.append(signal)
-                    
-                    # Only generate one signal per zone, then move to next zone
                     break
-            
-            # Prioritize signals if there are conflicting ones
             if len(symbol_signals) > 1:
-                # Store all signals for logging purposes
                 all_signals = symbol_signals.copy()
-                
-                # Apply prioritization
                 symbol_signals = self._prioritize_signals(symbol_signals)
-                
                 logger.info(f"Prioritized {len(all_signals)} signals down to {len(symbol_signals)} for {sym}")
-            
-            # Add symbol's signals to overall signals list
             signals.extend(symbol_signals)
-            
-            # Log debug information 
             self._log_debug_info(sym, df, zones, symbol_signals)
-        
-        # Cleanup old processed zones entries (older than 48 hours)
         cleanup_time = current_time - (self.signal_cooldown * 2)
         old_keys = [k for k, v in self.processed_zones.items() if v < cleanup_time]
         for k in old_keys:
             del self.processed_zones[k]
-            
         if old_keys:
             logger.debug(f"Cleaned up {len(old_keys)} old zone records")
-            
         return signals 

@@ -31,7 +31,7 @@ logger.remove()
 logger.add(lambda msg: print(msg, end=""), level="INFO")
 
 # === STRATEGY SELECTION ===
-STRATEGY_NAME = 'BreakoutReversalStrategy'  # e.g. 'PriceActionSRStrategy', 'BreakoutReversalStrategy', 'ConfluencePriceActionStrategy'
+STRATEGY_NAME = 'PriceActionSRStrategy'  # e.g. 'PriceActionSRStrategy', 'BreakoutReversalStrategy', 'ConfluencePriceActionStrategy'
 PRIMARY_TIMEFRAME = 'M15'
 HIGHER_TIMEFRAME = 'H1'  # Only used if strategy requires it
 
@@ -45,15 +45,15 @@ mt5_handler = None  # Will be created only if needed
 # 2. Choose symbol(s) and timeframe(s)
 symbols = [
         #"Volatility 10 Index",
-        # "Crash 500 Index",
+        #"Crash 500 Index",
         # "Crash 1000 Index",
         # "Boom 300 Index",
-        #"XAUUSD",
-         #"BTCUSD",
+        "XAUUSD",
+        #"BTCUSD",
         # "Boom 1000 Index",
-        # "Jump 50 Index",
-        # "Jump 75 Index",
-         "Step Index",
+        #"Jump 50 Index",
+         #"Jump 75 Index",
+        #"Step Index",
         #"Range Break 200 Index",
         ]  # Use a symbol available in your MT5
 timeframes = [PRIMARY_TIMEFRAME]
@@ -61,8 +61,8 @@ if HIGHER_TIMEFRAME and HIGHER_TIMEFRAME != PRIMARY_TIMEFRAME:
     timeframes.append(HIGHER_TIMEFRAME)
 
 # 3. Setup smart data loader (cache mode)
-start_date = datetime(2025, 1, 1)
-end_date = datetime(2025, 1, 31)
+start_date = datetime(2024, 1, 1)
+end_date = datetime(2024, 12, 31)
 data_loader = select_data_loader(
     'cache',
     directory='src/backtest/data',         # Directory to store/load OHLCV CSVs (now structured by year/symbol/timeframe)
