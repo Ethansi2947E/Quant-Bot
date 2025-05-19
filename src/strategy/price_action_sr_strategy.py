@@ -15,7 +15,7 @@ Features:
 import pandas as pd
 import numpy as np
 from loguru import logger
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
@@ -25,6 +25,7 @@ class PriceActionSRStrategy(SignalGenerator):
     Price Action S/R Strategy: Generates signals based on S/R zones, candlestick pattern, wick rejection, and volume spike.
     Parameterized for timeframe and all key thresholds.
     """
+ 
     def __init__(
         self,
         primary_timeframe: str = "M15",
@@ -58,11 +59,6 @@ class PriceActionSRStrategy(SignalGenerator):
         self.volume_multiplier = volume_multiplier
         self.max_zones = max_zones
         self.risk_per_trade = risk_per_trade
-        self.required_timeframes = [primary_timeframe]
-        # Set lookback period to ensure we have enough data for analysis
-        # We need at least pivot_window * 2 + 21 bars for complete analysis
-        self.lookback_period = max(100, pivot_window * 2 + 50)  # Default 100 bars but more if needed
-        self.lookback_periods = {primary_timeframe: self.lookback_period}
         self.risk_manager = RiskManager.get_instance() if hasattr(RiskManager, 'get_instance') else RiskManager()
         
         # State tracking to prevent signal duplication
@@ -105,9 +101,6 @@ class PriceActionSRStrategy(SignalGenerator):
             # Smaller wick threshold for H1
             self.wick_threshold = self.params.get("wick_threshold_h1", 0.4)
         
-        # Ensure required_timeframes is set correctly
-        self.required_timeframes = [self.primary_timeframe]
-        
         logger.info(f"{self.name} initialization complete")
         return True
 
@@ -143,17 +136,48 @@ class PriceActionSRStrategy(SignalGenerator):
                 pivots.append(df['low'].iloc[i])
         return pivots
 
-    def _cluster_levels(self, levels: List[float], tol: float = 0.003) -> List[float]:
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """
+        Calculate the Average True Range (ATR) over the given period.
+        Args:
+            df (pd.DataFrame): Price data with 'high', 'low', 'close'
+            period (int): ATR period (default 14)
+        Returns:
+            float: ATR value
+        """
+        if len(df) < period + 1:
+            return 0.0
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        return float(atr) if not np.isnan(atr) else 0.0
+
+    def _cluster_levels(self, levels: List[float], tol: float = 0.003, df: Optional[pd.DataFrame] = None) -> List[float]:
         """
         Cluster price levels into horizontal zones within ±tol (as a fraction of price).
+        If df is provided, tol is dynamically set as max(0.003, 0.5 * ATR / latest_price).
         Args:
             levels (List[float]): List of price levels
             tol (float): Tolerance as a fraction of price (default 0.003 = 0.3%)
+            df (pd.DataFrame, optional): Price data for ATR-based tolerance
         Returns:
             List[float]: Clustered zone center prices
         """
         if not levels:
             return []
+        if df is not None and len(df) > 15:
+            latest_price = df['close'].iloc[-1]
+            atr = self._calculate_atr(df)
+            dynamic_tol = max(0.003, 0.5 * atr / latest_price) if latest_price > 0 else 0.003
+            tol = dynamic_tol
+            self.logger.debug(f"Dynamic zone tolerance set to {tol:.5f} (ATR={atr:.5f}, price={latest_price:.5f})")
         levels = sorted(levels)
         clusters = []
         current = [levels[0]]
@@ -167,10 +191,25 @@ class PriceActionSRStrategy(SignalGenerator):
         # Use mean of each cluster as zone center
         return [float(np.mean(cluster)) for cluster in clusters]
 
+    def _is_in_zone(self, price, zone: float, tol: float = 0.003):
+        """
+        Vectorized: Check if price(s) is/are inside a zone (±tol).
+        Args:
+            price: float, pd.Series, or np.ndarray
+            zone: float
+            tol: float
+        Returns:
+            bool or np.ndarray: True/False or boolean mask
+        """
+        if isinstance(price, (np.ndarray, pd.Series)):
+            return np.abs(price - zone) <= zone * tol
+        return abs(price - zone) <= zone * tol
+
     def get_sr_zones(self, df: pd.DataFrame) -> Dict[str, List[float]]:
         """
         Compute and return the top N support and resistance zones.
-        Dynamically adjust max_zones based on volatility.
+        Dynamically adjust max_zones based on volatility and use ATR-based tolerance for clustering.
+        Uses vectorized zone touch counting for performance.
         Args:
             df (pd.DataFrame): Price data with 'high' and 'low' columns
         Returns:
@@ -178,11 +217,12 @@ class PriceActionSRStrategy(SignalGenerator):
         """
         highs = self._find_pivot_highs(df)
         lows = self._find_pivot_lows(df)
-        res_zones = self._cluster_levels(highs, tol=0.003)
-        sup_zones = self._cluster_levels(lows, tol=0.003)
-        # Count touches for each zone
+        res_zones = self._cluster_levels(highs, df=df)
+        sup_zones = self._cluster_levels(lows, df=df)
+        # Vectorized count touches for each zone
         def count_touches(prices, zones):
-            return [sum(abs(p - z) <= z * 0.003 for p in prices) for z in zones]
+            prices_arr = np.array(prices)
+            return [self._is_in_zone(prices_arr, z).sum() for z in zones]
         res_counts = count_touches(highs, res_zones)
         sup_counts = count_touches(lows, sup_zones)
         # Dynamic max_zones based on volatility
@@ -195,10 +235,6 @@ class PriceActionSRStrategy(SignalGenerator):
         top_sup = [z for _, z in sorted(zip(sup_counts, sup_zones), reverse=True)[:dynamic_max_zones]]
         return {'support': top_sup, 'resistance': top_res}
 
-    def _is_in_zone(self, price: float, zone: float, tol: float = 0.003) -> bool:
-        """Check if price is inside a zone (±tol)."""
-        return abs(price - zone) <= zone * tol
-
     def _bar_touches_zone(self, candle, zone: float, direction: str, tol: float = 0.003) -> bool:
         """
         Check if the candle's close OR (low for support, high for resistance) touches the zone.
@@ -210,12 +246,12 @@ class PriceActionSRStrategy(SignalGenerator):
         Returns:
             bool: True if candle touches zone
         """
-        close_in_zone = self._is_in_zone(candle['close'], zone, tol)
+        close_in_zone = bool(self._is_in_zone(candle['close'], zone, tol))
         if direction == 'buy':
-            low_in_zone = self._is_in_zone(candle['low'], zone, tol)
+            low_in_zone = bool(self._is_in_zone(candle['low'], zone, tol))
             return close_in_zone or low_in_zone
         else:
-            high_in_zone = self._is_in_zone(candle['high'], zone, tol)
+            high_in_zone = bool(self._is_in_zone(candle['high'], zone, tol))
             return close_in_zone or high_in_zone
 
     def _is_bullish_engulfing(self, prev, curr) -> bool:
@@ -272,21 +308,21 @@ class PriceActionSRStrategy(SignalGenerator):
     def _volume_spike(self, df: pd.DataFrame, idx: int) -> bool:
         """
         Adaptive volume spike: True if current volume is above 85th percentile of last 40 bars (or 2x mean if not enough data).
+        Uses rolling quantile and mean columns for speed.
         """
+        if 'vol_85q' not in df.columns or 'vol_rolling_mean' not in df.columns:
+            df['vol_85q'] = df['tick_volume'].rolling(40, min_periods=10).quantile(0.85)
+            df['vol_rolling_mean'] = df['tick_volume'].rolling(40, min_periods=10).mean()
         if idx < 20:
             return False
-        window = 40 if idx >= 40 else idx
-        if window < 10:
-            return False
-        recent_vols = df['tick_volume'].iloc[idx-window:idx]
         current_vol = df['tick_volume'].iloc[idx]
-        if len(recent_vols) >= 10:
-            threshold = np.percentile(recent_vols, 85)
-            logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold}")
+        threshold = df['vol_85q'].iloc[idx]
+        avg_vol = df['vol_rolling_mean'].iloc[idx]
+        if not np.isnan(threshold):
+            self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold}")
             return current_vol >= threshold
         else:
-            avg_vol = recent_vols.mean()
-            logger.debug(f"Volume spike fallback: current={current_vol}, 2x mean={2*avg_vol}")
+            self.logger.debug(f"Volume spike fallback: current={current_vol}, 2x mean={2*avg_vol}")
             return current_vol >= 2 * avg_vol
 
     def _pattern_match(self, df: pd.DataFrame, idx: int, direction: str) -> Optional[str]:
@@ -309,6 +345,92 @@ class PriceActionSRStrategy(SignalGenerator):
             if self._wick_rejection(curr, 'sell') and abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.3:
                 return 'Pin-bar'
         return None
+
+    def _score_signal_01(self, pattern: str, wick: bool, volume_score: float, risk_reward: float, zone_touches: int, other_confluence: float = 0.0) -> Tuple[float, dict]:
+        """
+        Compute a normalized 0-1 score for a trading signal based on pattern, wick rejection, volume, risk-reward, zone strength, and optional other confluence.
+
+        Args:
+            pattern (str): Candlestick pattern name
+            wick (bool): Whether wick rejection is present
+            volume_score (float): Volume spike score (0-1, e.g. 1 if strong spike, 0 if not)
+            risk_reward (float): Risk-reward ratio (e.g. 2.5 for 2.5:1)
+            zone_touches (int): Number of times price has touched/respected the zone
+            other_confluence (float): Reserved for future use (0-1)
+        Returns:
+            (float, dict): Tuple of (score, breakdown dict)
+        """
+        # Pattern reliability mapping
+        pattern_map = {
+            'Bullish Engulfing': 1.0,
+            'Bearish Engulfing': 1.0,
+            'Hammer': 0.7,
+            'Shooting Star': 0.7,
+            'Pin-bar': 0.5,
+            '': 0.0,
+            None: 0.0
+        }
+        pattern_score = pattern_map.get(pattern, 0.0)
+        wick_score = 1.0 if wick else 0.0
+        # Volume: allow float for partial spike (e.g. 0.5 if just above threshold)
+        volume_score = max(0.0, min(volume_score, 1.0))
+        # Risk-reward: 0 if <1, 0.5 at 2:1, 1.0 at 3:1 or higher
+        if risk_reward < 1.0:
+            risk_reward_score = 0.0
+        elif risk_reward >= 3.0:
+            risk_reward_score = 1.0
+        elif risk_reward >= 2.0:
+            risk_reward_score = 0.5 + 0.5 * (risk_reward - 2.0)
+            risk_reward_score = min(risk_reward_score, 1.0)
+        else:
+            risk_reward_score = 0.5 * (risk_reward - 1.0)
+        risk_reward_score = max(0.0, min(risk_reward_score, 1.0))
+        # Zone strength: 0 if 1 touch, 0.5 at 3, 1.0 at 5+
+        if zone_touches <= 1:
+            zone_strength_score = 0.0
+        elif zone_touches >= 5:
+            zone_strength_score = 1.0
+        elif zone_touches >= 3:
+            zone_strength_score = 0.5 + 0.5 * (zone_touches - 3) / 2
+        else:
+            zone_strength_score = 0.5 * (zone_touches - 1) / 2
+        zone_strength_score = max(0.0, min(zone_strength_score, 1.0))
+        # Other confluence (future)
+        other_confluence_score = max(0.0, min(other_confluence, 1.0))
+        # Weights
+        w_pattern = 0.30
+        w_wick = 0.15
+        w_volume = 0.15
+        w_risk = 0.20
+        w_zone = 0.10
+        w_other = 0.10
+        score = (
+            pattern_score * w_pattern +
+            wick_score * w_wick +
+            volume_score * w_volume +
+            risk_reward_score * w_risk +
+            zone_strength_score * w_zone +
+            other_confluence_score * w_other
+        )
+        breakdown = {
+            'pattern_score': pattern_score,
+            'wick_score': wick_score,
+            'volume_score': volume_score,
+            'risk_reward_score': risk_reward_score,
+            'zone_strength_score': zone_strength_score,
+            'other_confluence_score': other_confluence_score,
+            'weights': {
+                'pattern': w_pattern,
+                'wick': w_wick,
+                'volume': w_volume,
+                'risk_reward': w_risk,
+                'zone_strength': w_zone,
+                'other_confluence': w_other
+            },
+            'final_score': score
+        }
+        self.logger.debug(f"[Scoring01] pattern={pattern}({pattern_score}), wick={wick_score}, volume={volume_score}, risk_reward={risk_reward_score}, zone={zone_strength_score}, other={other_confluence_score} -> score={score:.2f}")
+        return score, breakdown
 
     def _log_debug_info(self, symbol: str, df: pd.DataFrame, zones: Dict, signals: List[Dict]) -> None:
         """
@@ -381,78 +503,81 @@ class PriceActionSRStrategy(SignalGenerator):
         """
         Prioritize signals when there are conflicts for the same symbol.
         Returns only the highest-priority signal for each symbol.
-        
-        Args:
-            signals: List of signal dictionaries
-            
-        Returns:
-            List[Dict]: Prioritized signals (one per symbol)
+        Now uses the normalized 0-1 score ('score_01') for ranking, with tie-breakers:
+        1. score_01 (higher is better)
+        2. risk_reward (higher is better)
+        3. bar_index (most recent is better)
+        4. pattern reliability (higher is better)
         """
         if not signals:
             return []
-            
-        # Group signals by symbol
         signals_by_symbol = {}
         for signal in signals:
             symbol = signal.get('symbol')
             if symbol not in signals_by_symbol:
                 signals_by_symbol[symbol] = []
             signals_by_symbol[symbol].append(signal)
-            
-        # For each symbol, if there's more than one signal, select the best one
         prioritized_signals = []
-        
         for symbol, symbol_signals in signals_by_symbol.items():
             if len(symbol_signals) == 1:
-                # Only one signal for this symbol, use it
                 prioritized_signals.append(symbol_signals[0])
                 continue
-                
             logger.warning(f"Found {len(symbol_signals)} conflicting signals for {symbol}, prioritizing best one")
-            
-            # Score each signal based on multiple factors
-            for signal in symbol_signals:
-                score = 0.0
-                
-                # Factor 1: Risk-Reward ratio (higher is better)
-                risk_reward = signal.get('risk_reward', 0)
-                score += min(risk_reward * 10, 50)  # Cap at 50 points
-                
-                # Factor 2: Pattern strength (more reliable patterns score higher)
-                pattern = signal.get('pattern', '')
-                pattern_score = self._rank_patterns(pattern)
-                score += pattern_score * 10  # Up to 50 points
-                
-                # Factor 3: Volume strength (higher volume spike is better)
-                volume_score = signal.get('volume_score', 0)
-                score += volume_score * 20  # Up to 20 points
-
-                # Factor 4: Zone strength (how many times price has respected this zone)
-                zone_strength = signal.get('zone_touches', 1)
-                score += min(zone_strength * 5, 20)  # Up to 20 points
-                
-                # Store the score in the signal
-                signal['priority_score'] = score
-                
-                logger.info(f"Signal {signal.get('direction')} {pattern} scored {score:.1f} points")
-                
-            # Sort signals by score (descending) and take the top one
-            best_signal = sorted(symbol_signals, key=lambda s: s.get('priority_score', 0), reverse=True)[0]
-            logger.info(f"Selected {best_signal.get('direction')} {best_signal.get('pattern')} as best signal for {symbol} with score {best_signal.get('priority_score', 0):.1f}")
-            
+            # Use multi-level tie-breaker
+            def pattern_reliability(s):
+                pattern = s.get('pattern', '')
+                pattern_map = {
+                    'Bullish Engulfing': 1.0,
+                    'Bearish Engulfing': 1.0,
+                    'Hammer': 0.7,
+                    'Shooting Star': 0.7,
+                    'Pin-bar': 0.5,
+                    '': 0.0,
+                    None: 0.0
+                }
+                return pattern_map.get(pattern, 0.0)
+            # Sort by: score_01, risk_reward, bar_index, pattern reliability
+            sorted_signals = sorted(
+                symbol_signals,
+                key=lambda s: (
+                    s.get('score_01', 0),
+                    s.get('risk_reward', 0),
+                    s.get('bar_index', 0),
+                    pattern_reliability(s)
+                ),
+                reverse=True
+            )
+            # Log tie-breaker if needed
+            top_score = sorted_signals[0].get('score_01', 0)
+            tied = [s for s in sorted_signals if s.get('score_01', 0) == top_score]
+            if len(tied) > 1:
+                logger.info(f"Tie on score_01 for {symbol}: {len(tied)} signals. Applying tie-breakers (risk_reward, bar_index, pattern reliability).")
+                for s in tied:
+                    logger.info(f"  Signal: risk_reward={s.get('risk_reward', 0):.2f}, bar_index={s.get('bar_index', 0)}, pattern={s.get('pattern', '')}")
+            best_signal = sorted_signals[0]
+            logger.info(f"Selected {best_signal.get('direction')} {best_signal.get('pattern')} as best signal for {symbol} with score_01={best_signal.get('score_01', 0):.2f}")
             prioritized_signals.append(best_signal)
-            
         return prioritized_signals
+
+    @property
+    def required_timeframes(self):
+        return [self.primary_timeframe]
+
+    @property
+    def lookback_periods(self):
+        # Use the minimum bars needed for your logic, e.g. pivot_window + 21
+        return {self.primary_timeframe: max(self.pivot_window + 21, 100)}
 
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         """
         Generate trading signals based on S/R zone entry, candlestick pattern, wick rejection, and volume spike.
-        Implements a scoring system for confluence, allowing for more flexible signal generation.
+        Uses a normalized 0-1 scoring system for signal quality and confidence.
         """
+        logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}, lookback_periods={self.lookback_periods}")
         signals = []
         current_time = datetime.now().timestamp()
         symbols = [symbol] if symbol else list(market_data.keys())
-        
+
         for sym in symbols:
             logger.info(f"Analyzing {sym} with {self.name}")
             df = market_data[sym]
@@ -461,35 +586,35 @@ class PriceActionSRStrategy(SignalGenerator):
             if df is None or len(df) < self.pivot_window + 21:
                 logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df) if df is not None else 0}")
                 continue
-                
+
             bar_key = (sym, self.primary_timeframe)
             last_timestamp = None
-            
+
             try:
                 last_timestamp = pd.to_datetime(df.index[-1])
                 last_timestamp_str = str(last_timestamp)
             except:
                 logger.warning(f"Could not extract timestamp from dataframe for {sym}")
                 last_timestamp_str = str(current_time)
-                
+
             if bar_key in self.processed_bars and self.processed_bars[bar_key] == last_timestamp_str:
                 logger.debug(f"Already processed latest bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
                 continue
-                
+
             self.processed_bars[bar_key] = last_timestamp_str
             logger.debug(f"Processing new bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
-            
+
             df = df.copy()
             if 'tick_volume' not in df.columns:
                 df['tick_volume'] = df.get('volume', 1)
-                
+
             zones = self.get_sr_zones(df)
             symbol_signals = []
-            
+
             for direction, zone_list in [('buy', zones['support']), ('sell', zones['resistance'])]:
                 zone_type = 'support' if direction == 'buy' else 'resistance'
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
-                
+
                 for zone in zone_list:
                     zone_key = (sym, zone_type, round(zone, 5))
                     if zone_key in self.processed_zones:
@@ -500,44 +625,23 @@ class PriceActionSRStrategy(SignalGenerator):
                             hours_remaining = cooldown_remaining / 3600
                             logger.debug(f"Skipping {zone_type} zone {zone:.5f} - on cooldown for {hours_remaining:.1f} more hours")
                             continue
-                    zone_touches = sum(1 for i in range(len(df)) if self._is_in_zone(df['close'].iloc[i], zone))
+                    zone_touches = int(self._is_in_zone(df['close'], zone).sum())
                     idx = len(df) - 1
                     process_idx = idx - 1
                     if process_idx < self.pivot_window + 20:
                         logger.debug(f"Not enough bars to check for patterns at index {process_idx}")
                         continue
                     candle = df.iloc[process_idx]
-                    # Flexible zone touch: close or wick/high/low
                     in_zone = self._bar_touches_zone(candle, zone, direction)
                     if not in_zone:
                         continue
-                    logger.debug(f"Candle at idx {process_idx} touches {zone_type} zone {zone:.5f}")
-                    # Scoring system for confluence
-                    score = 0
-                    reasons = []
-                    # 1. Pattern
                     pattern = self._pattern_match(df, process_idx, direction)
-                    if pattern:
-                        score += 2
-                        reasons.append(f"Pattern: {pattern}")
-                    # 2. Wick rejection
                     wick = self._wick_rejection(candle, direction)
-                    if wick:
-                        score += 1
-                        reasons.append("Wick rejection")
-                    # 3. Volume spike
                     vol_spike = self._volume_spike(df, process_idx)
-                    if vol_spike:
-                        score += 1
-                        reasons.append("Volume spike")
-                    # Require at least 2/4 confluences, but pattern+zone or wick+vol+zone is enough
-                    if score < 2:
-                        logger.debug(f"Score {score}: insufficient confluence at {zone_type} zone {zone:.5f}")
-                        continue
                     # Calculate volume score (how much above threshold)
                     avg_vol = df['tick_volume'].iloc[process_idx-20:process_idx].mean()
                     current_vol = df['tick_volume'].iloc[process_idx]
-                    volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 2.0) if avg_vol > 0 else 0
+                    volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 1.0) if avg_vol > 0 else 0.0
                     entry = df['open'].iloc[idx] if idx < len(df) else candle['close']
                     stop = candle['low'] if direction == 'buy' else candle['high']
                     opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
@@ -553,12 +657,20 @@ class PriceActionSRStrategy(SignalGenerator):
                     equity = self.risk_manager.get_account_balance() if hasattr(self.risk_manager, 'get_account_balance') else 10000
                     size = (equity * self.risk_per_trade) / max(abs(entry - stop), 1e-6)
                     risk_reward = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
-                    # Calculate confidence based on number of confluences (pattern, wick, volume)
-                    # 0.5 base + 0.15 per confluence, capped at 0.95
-                    confidence = min(0.5 + 0.15 * score, 0.95)
+                    # Use new 0-1 scoring system
+                    score_01, score_breakdown = self._score_signal_01(
+                        pattern=pattern or "",
+                        wick=wick,
+                        volume_score=volume_score,
+                        risk_reward=risk_reward,
+                        zone_touches=zone_touches,
+                        other_confluence=0.0
+                    )
+                    # Set confidence directly from score_01, with min/max cap
+                    confidence = min(max(score_01, 0.1), 0.95)
                     reason = (
-                        f"Confluence: {', '.join(reasons)} at {zone_type} zone {zone:.5f}. "
-                        f"Risk:Reward = {risk_reward:.2f}"
+                        f"Confluence: pattern={pattern}, wick={wick}, volume_spike={vol_spike} at {zone_type} zone {zone:.5f}. "
+                        f"Risk:Reward = {risk_reward:.2f}, Score01 = {score_01:.2f}"
                     )
                     signal = {
                         'symbol': sym,
@@ -577,9 +689,12 @@ class PriceActionSRStrategy(SignalGenerator):
                         'bar_index': int(process_idx),
                         'risk_reward': float(risk_reward),
                         'signal_timestamp': str(df.index[process_idx]),
-                        'source': self.name
+                        'source': self.name,
+                        'score_01': score_01,
+                        'score_breakdown': score_breakdown
                     }
                     logger.info(f"Signal generated for {sym} {direction.upper()}: {reason}")
+                    logger.debug(f"Score breakdown: {score_breakdown}")
                     self.processed_zones[zone_key] = current_time
                     symbol_signals.append(signal)
                     break
@@ -595,4 +710,4 @@ class PriceActionSRStrategy(SignalGenerator):
             del self.processed_zones[k]
         if old_keys:
             logger.debug(f"Cleaned up {len(old_keys)} old zone records")
-        return signals 
+        return signals

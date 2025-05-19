@@ -27,6 +27,9 @@ class Backtester:
     
     Note: If 'profile': True is set in config, profiling will be enabled for strategy.generate_signals,
     and parallelization will be automatically disabled to avoid cProfile conflicts.
+    
+    # NOTE: If using BreakoutTradingStrategy, default settings now use a looser consolidation filter (bb_squeeze_factor=1.2, min_consolidation_bars=5),
+    # a more permissive volume filter (>=, 0.9x tolerance), and debugging aids (processed_bars clearing, wait_for_confirmation_candle=False).
     """
     def __init__(self, 
                  strategy, 

@@ -356,8 +356,12 @@ class MT5Handler:
         # Log current prices
         logger.debug(f"Current prices for {symbol}: Ask={symbol_info.ask}, Bid={symbol_info.bid}, Spread={symbol_info.ask - symbol_info.bid}")
 
-        # Validate stop loss and take profit
-        min_stop_distance = symbol_info.point * symbol_info.trade_stops_level
+        # --- ENFORCE TRUE MIN STOP DISTANCE ---
+        # Use get_min_stop_distance to get the most accurate min stop distance
+        min_stop_distance_mt5 = symbol_info.point * symbol_info.trade_stops_level
+        min_stop_distance_fallback = self.get_min_stop_distance(symbol)
+        min_stop_distance = max(min_stop_distance_mt5, min_stop_distance_fallback)
+        logger.debug(f"[Order] {symbol}: min_stop_distance_mt5={min_stop_distance_mt5}, min_stop_distance_fallback={min_stop_distance_fallback}, used={min_stop_distance}")
 
         # Adjust stop loss and take profit if they're too close to the entry price
         if action == mt5.ORDER_TYPE_BUY:
@@ -488,14 +492,19 @@ class MT5Handler:
             "volume": adjusted_volume,
             "type": action,  # Use MT5 constant instead of string
             "price": price,
-            "sl": stop_loss,
-            "tp": take_profit,
+            "sl": stop_loss if stop_loss != 0 else None,  # Use None instead of 0 for SL
+            "tp": take_profit if take_profit != 0 else None,  # Use None instead of 0 for TP
             "deviation": 20,
             "magic": 234000,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,
         }
+        
+        if stop_loss == 0:
+            logger.debug(f"Converting SL value of 0 to None for {symbol} {order_type} order")
+        if take_profit == 0:
+            logger.debug(f"Converting TP value of 0 to None for {symbol} {order_type} order")
 
         # Try multiple times with increasing deviation and different filling modes if needed
         max_retries = 3

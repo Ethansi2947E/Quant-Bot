@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr, calculate_adx
@@ -54,19 +54,17 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                  partial_profit_pct: float = 0.5,
                  max_bars_till_exit: int = 5,
                  trailing_stop_atr_mult: float = 1.5,
-                 # New regime filter kwargs
+                 # Regime filter kwargs (parameterized for easy tuning)
                  use_adx_filter: bool = True,
-                 adx_threshold: float = 20.0,
+                 adx_threshold: float = 15.0,  # Lowered from 18.0 to 15.0
                  use_range_filter: bool = True,
-                 range_ratio_threshold: float = 0.5,
+                 range_ratio_threshold: float = 0.4,
                  **kwargs):
         """
         Args:
             ...
-            use_adx_filter (bool): Whether to use ADX filter for regime. Default True.
-            adx_threshold (float): ADX threshold for trend regime. Default 20.0.
-            use_range_filter (bool): Whether to use range-ratio filter for regime. Default True.
-            range_ratio_threshold (float): Threshold for range_ratio to define ranging. Default 0.5.
+            adx_threshold (float): ADX threshold for trend regime. Default 15.0 (lowered for flexibility).
+            range_ratio_threshold (float): Threshold for range_ratio to define ranging. Default 0.4.
         """
         super().__init__(**kwargs)
         self.name = "ConfluencePriceActionStrategy"
@@ -79,7 +77,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # Timeframes
         self.primary_timeframe = primary_timeframe
         self.higher_timeframe = higher_timeframe
-        self.required_timeframes = [higher_timeframe, primary_timeframe]
+        # self.required_timeframes = [higher_timeframe, primary_timeframe]  # Removed, use property
 
         # Strategy parameters (base values; overridden by timeframe profile)
         self.ma_period = ma_period
@@ -97,7 +95,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # Override risk percent from RiskManager config for this timeframe
         rm_conf = get_risk_manager_config()
         self.risk_percent = rm_conf.get('max_risk_per_trade', self.risk_percent)
-        # Regime filter config
+        # Regime filter config (parameterized for iterative tuning)
         self.use_adx_filter = kwargs.get('use_adx_filter', use_adx_filter)
         self.adx_threshold = kwargs.get('adx_threshold', adx_threshold)
         self.use_range_filter = kwargs.get('use_range_filter', use_range_filter)
@@ -113,6 +111,8 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         self.processed_bars = {}  # {(symbol, timeframe): last_processed_timestamp}
         self.processed_zones = {}  # {(symbol, zone_type, zone_price): last_processed_timestamp}
         self.signal_cooldown = 86400  # 24 hours in seconds
+
+        self.lookback_period = max(self.ma_period, 50) + 50  # Dynamic lookback
 
     def _load_timeframe_profile(self):
         """
@@ -353,56 +353,49 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                             'price_to_ma_distance': abs(level['level'] - ma)
                         }
                     # --- Step 4: Flexible confluence stacking and early scoring ---
-                    # Score pattern strength
+                    # New: Confluence Scoring System (see .cursor/scratchpad.md for rubric)
+                    # Core factors: HTF Trend, HTF S/R, Pattern (all must be present)
+                    htf_trend_score = 1.0 if trend in ('bullish', 'bearish') else 0.0
+                    htf_sr_score = 1.0 if level['strength'] >= 1 else 0.0
                     pattern_score = 0.0
+                    # Expanded pattern recognition with more tolerance and new patterns
                     if self._is_pin_bar(primary, idx, level['level'], trend):
                         pattern = 'Pin Bar'
-                        body = abs(primary.iloc[idx]['close'] - primary.iloc[idx]['open'])
-                        total = primary.iloc[idx]['high'] - primary.iloc[idx]['low']
-                        body_to_range_ratio = body / total if total > 0 else 0
-                        pattern_details = {
-                            'body_size': body,
-                            'wick_size': total - body,
-                            'body_to_range_ratio': body_to_range_ratio,
-                            'price_to_level_distance': abs(primary.iloc[idx]['low' if trend == 'bullish' else 'high'] - level['level'])
-                        }
                         pattern_score = 1.0
-                        logger.debug(f"Pin Bar detected at idx={idx} for {sym}")
                     elif self._is_engulfing(primary, idx, trend, level['level']):
                         pattern = 'Engulfing'
                         pattern_score = 0.9
-                        logger.debug(f"Engulfing detected at idx={idx} for {sym}")
                     elif self._is_inside_bar(primary, idx, level['level']):
                         pattern = 'Inside Bar'
                         pattern_score = 0.7
-                        logger.debug(f"Inside Bar detected at idx={idx} for {sym}")
+                    elif self._is_two_bar_reversal(primary, idx, trend, level['level']):
+                        pattern = 'Two-Bar Reversal'
+                        pattern_score = 0.8
+                    elif self._is_three_bar_reversal(primary, idx, trend, level['level']):
+                        pattern = 'Three-Bar Reversal'
+                        pattern_score = 0.85
                     elif pattern == 'Rejection Reversal' or pattern == 'Breakout Acceptance':
                         pattern_score = 0.8
-                    # Score confluence factors
-                    confluence_score = 0.0
-                    if fib_ok and ma_ok:
-                        confluence_score = 1.0  # Both fib and MA is maximum confluence
-                    elif fib_ok or ma_ok:
-                        confluence_score = 0.6  # Single confluence factor
-                    # Calculate level strength score
-                    level_strength_score = min(1.0, level['strength'] / 5.0)  # Cap at 5 touches
-                    # Calculate advanced volume analysis with wick-based confirmation
+                    # Optional/bonus factors
+                    fib_score = 0.3 if fib_ok else 0.0
+                    ma_score = 0.3 if ma_ok else 0.0
                     volume_score, volume_details = self._analyze_volume_quality(primary, idx=-1, direction=trend)
-                    # Calculate overall signal quality 
-                    signal_quality = (
-                        (pattern_score * 0.35) +
-                        (confluence_score * 0.35) +
-                        (0.2 if volume_score >= 1.0 else 0.0) +
-                        (level_strength_score * 0.1)
-                    )
-                    confidence = max(0.0, min(1.0, signal_quality))
-                    logger.info(f"[SignalScoring] {sym} {pattern} at {level_type} {level['level']:.5f}: pattern_score={pattern_score}, confluence_score={confluence_score}, volume_score={volume_score}, level_strength_score={level_strength_score}, signal_quality={signal_quality}, confidence={confidence}")
-                    # Allow signal if confidence >= 0.6 (threshold can be tuned)
-                    if confidence < 0.6:
-                        logger.debug(f"[SignalScoring] Signal for {sym} at {level['level']:.5f} rejected due to low confidence ({confidence})")
-                        continue
-                    # If strict confluence is desired, can still require fib_ok or ma_ok here (optional)
-                    # --- End Step 4 ---
+                    volume_score = min(max(volume_score, 0.0), 0.2)  # Clamp to [0, 0.2]
+                    level_strength_score = min(0.2, level['strength'] / 5.0)  # Scaled bonus
+                    # Total score
+                    confluence_total = htf_trend_score + htf_sr_score + pattern_score + fib_score + ma_score + volume_score + level_strength_score
+                    # Minimum score to trigger trade
+                    min_score = 2.2
+                    # Allow slightly weaker S/R or filter if total score >= 2.5
+                    if htf_trend_score < 1.0 or htf_sr_score < 1.0 or pattern_score < 0.7:
+                        if confluence_total < 2.5:
+                            logger.debug(f"[ConfluenceScoring] Signal for {sym} at {level['level']:.5f} rejected: missing core factor and total score {confluence_total:.2f} < 2.5")
+                            continue
+                    else:
+                        if confluence_total < min_score:
+                            logger.debug(f"[ConfluenceScoring] Signal for {sym} at {level['level']:.5f} rejected: total score {confluence_total:.2f} < {min_score}")
+                            continue
+                    logger.info(f"[ConfluenceScoring] {sym} {pattern} at {level_type} {level['level']:.5f}: htf_trend={htf_trend_score}, htf_sr={htf_sr_score}, pattern={pattern_score}, fib={fib_score}, ma={ma_score}, volume={volume_score}, sr_strength={level_strength_score}, total={confluence_total}")
                     
                     # 6. Assemble signal
                     # Use the pattern's close as entry, not the latest bar
@@ -522,6 +515,25 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         continue
                     
                     # --- RiskManager integration for validation and sizing ---
+                    # --- Scoring weights and normalization ---
+                    pattern_weight = 0.4
+                    confluence_weight = 0.4
+                    volume_weight = 0.1
+                    recency_weight = 0.1
+                    # Normalize sub-scores to 0-1
+                    norm_pattern_score = min(max(pattern_score, 0.0), 1.0)
+                    # Confluence: sum of htf_trend_score, htf_sr_score, fib_score, ma_score, level_strength_score (max 4.5)
+                    norm_confluence_score = min(max((htf_trend_score + htf_sr_score + fib_score + ma_score + level_strength_score) / 4.5, 0.0), 1.0)
+                    norm_volume_score = min(max(volume_score / 0.2, 0.0), 1.0)  # 0.2 is max volume score
+                    norm_recency_score = 0.0  # Placeholder, set to 0 unless recency logic is added
+                    # Weighted sum for signal quality/confidence
+                    signal_quality = (
+                        norm_pattern_score * pattern_weight +
+                        norm_confluence_score * confluence_weight +
+                        norm_volume_score * volume_weight +
+                        norm_recency_score * recency_weight
+                    )
+                    # Store normalized (0-1) value in signal dict
                     signal = {
                         "symbol": sym,
                         "direction": direction,
@@ -530,7 +542,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         "take_profit": tp,
                         "dynamic_exits": exits,
                         "timeframe": self.primary_timeframe,
-                        "confidence": confidence,
+                        "confidence": signal_quality,  # Normalized 0-1
                         "source": self.name,
                         "pattern": pattern,
                         "confluence": {"fib": fib_ok, "ma": ma_ok},
@@ -541,11 +553,12 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         "risk_pips": risk_pips,
                         "reward_pips": reward_pips,
                         "risk_reward_ratio": reward_pips / risk_pips if risk_pips > 0 else 0,
-                        "signal_quality": signal_quality,
+                        "signal_quality": signal_quality,  # Normalized 0-1
                         "technical_metrics": technical_metrics,
-                        "pattern_score": pattern_score,
-                        "confluence_score": confluence_score,
-                        "volume_score": volume_score,
+                        "pattern_score": norm_pattern_score,
+                        "confluence_score": norm_confluence_score,
+                        "volume_score": norm_volume_score,
+                        "recency_score": norm_recency_score,
                         "level_strength": level['strength'],
                         "level_strength_score": level_strength_score,
                         "description": concise_analysis,
@@ -613,42 +626,38 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     # -- Trend and level detection --
     def _determine_trend(self, df: pd.DataFrame) -> str:
-        """Return 'bullish', 'bearish' or 'neutral' based on both MA and price structure (higher highs/lows).
-
-        Uses:
-        - MA: If price is above MA, bullish; below, bearish.
-        - Price structure: If recent swing highs/lows are rising (bullish) or falling (bearish).
-        Returns 'bullish' if both agree, 'bearish' if both agree, else 'neutral'.
+        """Return 'bullish', 'bearish' or 'neutral' based on MA and price structure (higher highs/lows).
+        Loosened: Allow signal if either MA trend or price structure trend is clear.
+        Assign trend confidence: both agree=1.0, one clear=0.7, both neutral=0.0 (skip).
         Logs the decision process for debugging.
         """
         if df is None or 'close' not in df.columns or len(df) < self.ma_period + 3:
             logger.debug("[Trend] Insufficient data for trend determination.")
             return 'neutral'
-        # MA-based trend
         ma = df['close'].rolling(window=self.ma_period).mean().iloc[-1]
         last = df['close'].iloc[-1]
         ma_trend = 'bullish' if last > ma else 'bearish' if last < ma else 'neutral'
-        # Price structure: check last 3 swing highs/lows
         highs = df['high']
         lows = df['low']
         swing_highs = highs[(highs.shift(1) < highs) & (highs.shift(-1) < highs)]
         swing_lows = lows[(lows.shift(1) > lows) & (lows.shift(-1) > lows)]
-        # Get last 3 swing highs/lows
         last_highs = swing_highs.tail(3)
         last_lows = swing_lows.tail(3)
         price_trend = 'neutral'
         if len(last_highs) == 3 and len(last_lows) == 3:
-            # Bullish: higher highs and higher lows
             if last_highs.iloc[2] > last_highs.iloc[1] > last_highs.iloc[0] and last_lows.iloc[2] > last_lows.iloc[1] > last_lows.iloc[0]:
                 price_trend = 'bullish'
-            # Bearish: lower highs and lower lows
             elif last_highs.iloc[2] < last_highs.iloc[1] < last_highs.iloc[0] and last_lows.iloc[2] < last_lows.iloc[1] < last_lows.iloc[0]:
                 price_trend = 'bearish'
         logger.debug(f"[Trend] MA trend: {ma_trend}, Price structure trend: {price_trend}")
         if ma_trend == price_trend and ma_trend != 'neutral':
             logger.info(f"[Trend] Confirmed {ma_trend} trend (MA + price structure)")
             return ma_trend
-        logger.info("[Trend] No clear trend (MA and price structure disagree or neutral)")
+        elif ma_trend != 'neutral' or price_trend != 'neutral':
+            # Loosened: allow if either is clear
+            logger.info(f"[Trend] Loosened: Accepting {ma_trend if ma_trend != 'neutral' else price_trend} trend (one clear)")
+            return ma_trend if ma_trend != 'neutral' else price_trend
+        logger.info("[Trend] No clear trend (both neutral)")
         return 'neutral'
 
     def _find_key_levels(self, df: pd.DataFrame) -> tuple:
@@ -724,12 +733,8 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     # -- Pullback detection --
     def _is_pullback(self, df: pd.DataFrame, level: float, direction: str) -> bool:
-        """Check if price pulled back to `level` within recent bars.
-
-        Considers:
-        - Depth: Requires price to penetrate the level by at least min_penetration (0.2*ATR or 0.1% of price).
-        - Time: Requires that the last excursion beyond the level was at least min_bars_since_excursion bars ago (default 2).
-        Logs all relevant checks for transparency.
+        """Check for a pullback to the level in the direction of the trend.
+        Loosened: Allow touch (penetration=0) as valid, bars_since_excursion up to 3, min_penetration set to 0.
         """
         if df is None or len(df) < self.pullback_bars:
             logger.debug("[Pullback] Not enough bars for pullback check.")
@@ -741,15 +746,15 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             if isinstance(atr_series, pd.Series):
                 atr_val = float(atr_series.iloc[-1])
         pullback_tolerance = max(level * self.price_tolerance, (atr_val * 0.5) if atr_val else 0)
-        min_penetration = max(0.001 * level, 0.2 * atr_val) if atr_val else 0.001 * level
-        min_bars_since_excursion = 2
+        # Loosened min_penetration
+        min_penetration = 0.0  # Loosened: allow touch
+        min_bars_since_excursion = 1  # was 2
         recent = df.iloc[-self.pullback_bars:]
         last_candle = recent.iloc[-1]
         closes = recent['close']
         penetration = 0.0
         bars_since_excursion = None
         if direction == 'bullish':
-            # Find last bar before recent where close was above level
             prior_beyond_idx = (closes.iloc[:-1] > level)[::-1].idxmax() if (closes.iloc[:-1] > level).any() else None
             if prior_beyond_idx is not None:
                 bars_since_excursion = len(closes) - 1 - list(closes.index).index(prior_beyond_idx)
@@ -772,63 +777,66 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     # -- Candlestick pattern checks --
     def _is_pin_bar(self, df: pd.DataFrame, idx: int, level: float, direction: str) -> bool:
-        """Detect a pin bar touching `level` with a long wick and body in the upper half of the range."""
+        """Loosened: More tolerant pin bar detection. Accept near-miss, log reason if rejected."""
         candle = df.iloc[idx]
         body = abs(candle['close'] - candle['open'])
-        total = candle['high'] - candle['low']
-        if total <= 0:
-            return False
-        tol_val = level * self.price_tolerance
-        wick_body_ratio = 0.6
+        upper_wick = candle['high'] - max(candle['close'], candle['open'])
+        lower_wick = min(candle['close'], candle['open']) - candle['low']
+        total_range = candle['high'] - candle['low']
+        # Loosened ratios
+        min_wick_ratio = 1.5  # was 2.0
+        max_body_ratio = 0.7  # was 0.5
         if direction == 'bullish':
-            lower_wick = min(candle['open'], candle['close']) - candle['low']
-            body_top = max(candle['open'], candle['close'])
-            wick_req = max(body * wick_body_ratio, 0)
-            if (lower_wick > wick_req and
-                abs(candle['low'] - level) <= tol_val and
-                body_top > candle['low'] + 0.5 * total):
+            if lower_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
+                logger.debug(f"[Pattern] Pin Bar (bullish) detected at idx={idx}")
                 return True
+            elif lower_wick >= (min_wick_ratio - 0.3) * body:
+                logger.debug(f"[Pattern] Near-miss Pin Bar (bullish) at idx={idx}: lower_wick={lower_wick}, body={body}, total_range={total_range}")
+                return True  # Accept near-miss
+            else:
+                logger.debug(f"[Pattern] Pin Bar (bullish) rejected at idx={idx}: lower_wick={lower_wick}, body={body}, total_range={total_range}")
+                return False
         else:
-            upper_wick = candle['high'] - max(candle['open'], candle['close'])
-            body_bottom = min(candle['open'], candle['close'])
-            wick_req = max(body * wick_body_ratio, 0)
-            if (upper_wick > wick_req and
-                abs(candle['high'] - level) <= tol_val and
-                body_bottom < candle['high'] - 0.5 * total):
+            if upper_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
+                logger.debug(f"[Pattern] Pin Bar (bearish) detected at idx={idx}")
                 return True
-        return False
+            elif upper_wick >= (min_wick_ratio - 0.3) * body:
+                logger.debug(f"[Pattern] Near-miss Pin Bar (bearish) at idx={idx}: upper_wick={upper_wick}, body={body}, total_range={total_range}")
+                return True  # Accept near-miss
+            else:
+                logger.debug(f"[Pattern] Pin Bar (bearish) rejected at idx={idx}: upper_wick={upper_wick}, body={body}, total_range={total_range}")
+                return False
 
     def _is_engulfing(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
-        """Detect bullish or bearish engulfing at index. Allow prev bar to be within max(tol, ATR*0.2) of level."""
-        if idx <= 0 or idx >= len(candles):
+        """Loosened: More tolerant engulfing detection. Accept near-miss, log reason if rejected."""
+        if idx < 1:
             return False
-        curr = candles.iloc[idx]
         prev = candles.iloc[idx - 1]
-        tol = curr['close'] * self.price_tolerance
-        atr_val = None
-        if len(candles) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
-        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
-        if not isinstance(level, (float, int)):
-            return False  # Level must be provided for correct anchoring
-        level = float(level)
+        curr = candles.iloc[idx]
+        # Loosened: allow 90% engulf
         if direction == 'bullish':
-            if not (curr['close'] > curr['open'] and prev['close'] < prev['open'] and
-                    curr['open'] < prev['close'] and curr['close'] > prev['open']):
-                return False
-            if not abs(prev['low'] - level) <= offset:
-                return False
-            return True
+            if curr['close'] > curr['open'] and prev['close'] < prev['open']:
+                if curr['close'] >= prev['open'] and curr['open'] <= prev['close']:
+                    logger.debug(f"[Pattern] Engulfing (bullish) detected at idx={idx}")
+                    return True
+                elif curr['close'] >= prev['open'] * 0.98:
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bullish) at idx={idx}")
+                    return True
+                else:
+                    logger.debug(f"[Pattern] Engulfing (bullish) rejected at idx={idx}")
+                    return False
         else:
-            if not (curr['close'] < curr['open'] and prev['close'] > prev['open'] and
-                    curr['open'] > prev['close'] and curr['close'] < prev['open']):
-                return False
-            if not abs(prev['high'] - level) <= offset:
-                return False
-            return True
+            if curr['close'] < curr['open'] and prev['close'] > prev['open']:
+                if curr['close'] <= prev['open'] and curr['open'] >= prev['close']:
+                    logger.debug(f"[Pattern] Engulfing (bearish) detected at idx={idx}")
+                    return True
+                elif curr['close'] <= prev['open'] * 1.02:
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bearish) at idx={idx}")
+                    return True
+                else:
+                    logger.debug(f"[Pattern] Engulfing (bearish) rejected at idx={idx}")
+                    return False
+        return False
 
     def _is_inside_bar(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect an inside bar where the current candle is fully contained within the previous candle.
@@ -959,16 +967,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     def _check_fibonacci(self, df: pd.DataFrame, level: float, use_fibonacci: bool = True) -> bool:
         """Check if `level` is near a standard Fibonacci retracement of the most recent swing.
-
-        Args:
-            df (pd.DataFrame): Price data.
-            level (float): Level to check for confluence.
-            use_fibonacci (bool): If False, always return False (for ablation/backtest).
-
-        Returns:
-            bool: True if level is near a Fib retracement, else False.
-
-        Logs swing points, Fib levels, and decision for transparency and future analysis.
+        Now allows a flexible zone: Fib +/- 0.15% of price or 0.5x ATR, whichever is greater.
         """
         if not use_fibonacci:
             logger.debug(f"[Fib] use_fibonacci=False, skipping Fib confluence check for level {level}")
@@ -978,32 +977,42 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             logger.debug(f"[Fib] No valid swing points for Fib check (level={level})")
             return False
         fib_tolerance = getattr(self, 'fib_tolerance', self.price_tolerance if hasattr(self, 'price_tolerance') else 0.001)
-        tol_val = swing_high * fib_tolerance
-        logger.debug(f"[Fib] Checking level {level} against swing_high={swing_high}, swing_low={swing_low}, tol={tol_val}")
+        # Flexible zone: max(0.0015 * price, 0.5 * ATR)
+        atr_val = None
+        if len(df) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(df, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[-1])
+        zone = max(swing_high * 0.0015, (atr_val * 0.5) if atr_val else 0)
         for f in self.fib_levels:
             fib_lv = swing_low + (swing_high - swing_low) * f
-            logger.debug(f"[Fib] Fib level {f:.3f}: {fib_lv}")
-            if abs(level - fib_lv) <= tol_val:
-                logger.info(f"[Fib] Level {level} matches Fib {f:.3f} ({fib_lv}) within tol {tol_val}")
+            if abs(level - fib_lv) <= zone:
+                logger.info(f"[Fib] Level {level} matches Fib {f:.3f} ({fib_lv}) within flexible zone {zone}")
                 return True
-        logger.debug(f"[Fib] Level {level} does not match any Fib retracement within tol {tol_val}")
+        logger.debug(f"[Fib] Level {level} does not match any Fib retracement within flexible zone {zone}")
         return False
 
     def _check_ma(self, df: pd.DataFrame, level: float) -> bool:
-        """Return True if `level` is near the moving-average support/resistance (within 0.2%) and MA slope is in trend direction.
-        Improved: No longer require a cross, just check MA slope and proximity.
+        """Return True if `level` is near the moving-average support/resistance (within a flexible zone).
+        Now allows MA +/- 0.2% of price or 0.5x ATR, whichever is greater.
         """
         if df is None or len(df) < self.ma_period:
             return False
         ma = df['close'].rolling(self.ma_period).mean().iloc[-1]
-        tol_val = ma * 0.002  # 0.2% tolerance
-        # Check if level is within 0.2% of MA
-        if abs(level - ma) > tol_val:
+        # Flexible zone: max(0.002 * price, 0.5 * ATR)
+        atr_val = None
+        if len(df) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(df, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[-1])
+        zone = max(ma * 0.002, (atr_val * 0.5) if atr_val else 0)
+        if abs(level - ma) > zone:
             return False
         # Check MA slope: positive for bullish, negative for bearish
         ma_series = df['close'].rolling(self.ma_period).mean()
         slope = ma_series.iloc[-1] - ma_series.iloc[-2] if len(ma_series) >= 2 else 0
-        # Determine trend direction by slope
         if slope > 0:
             return True  # Bullish
         elif slope < 0:
@@ -1080,20 +1089,20 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         return alignment 
 
     def _is_favorable_regime(self, df: pd.DataFrame) -> bool:
-        """Check if market regime is favorable (trending, not ranging)."""
+        """Check if market regime is favorable (trending, not ranging). Add debug logs for ADX and range ratio."""
         if df is None or len(df) < 20:
+            logger.debug("[Regime] Not enough data for regime check.")
             return False
-        # ADX filter for trend strength
         adx_series, _, _ = calculate_adx(df, period=14)
         adx = adx_series.iloc[-1] if isinstance(adx_series, pd.Series) and not adx_series.empty else None
-        # Range filter
         context = self._analyze_market_context(df)
         adx_ok = True
         if hasattr(self, 'use_adx_filter') and self.use_adx_filter:
-            adx_ok = adx is not None and adx > (self.adx_threshold if hasattr(self, 'adx_threshold') else 20.0)
+            adx_ok = adx is not None and adx > (self.adx_threshold if hasattr(self, 'adx_threshold') else 15.0)
         range_ok = True
         if hasattr(self, 'use_range_filter') and self.use_range_filter:
             range_ok = not context.get('is_ranging', False)
+        logger.debug(f"[Regime] ADX={adx}, threshold={self.adx_threshold}, adx_ok={adx_ok}, range_ratio={context.get('range_ratio', None)}, threshold={self.range_ratio_threshold}, range_ok={range_ok}")
         return adx_ok and range_ok
 
     def _calculate_dynamic_exits(self, primary: pd.DataFrame, direction: str, entry: float, 
@@ -1296,3 +1305,58 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             if 0.7 < volume_ratio < 1.0 and 0.4 < details.get('body_ratio', 0) < 0.6:
                 norm_score = 0.1
         return norm_score, details
+
+    def _is_two_bar_reversal(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
+        """Detect a two-bar reversal pattern (bullish or bearish) near a level."""
+        if idx <= 0 or idx >= len(candles):
+            return False
+        curr = candles.iloc[idx]
+        prev = candles.iloc[idx - 1]
+        tol = curr['close'] * self.price_tolerance
+        atr_val = None
+        if len(candles) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(candles, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
+        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
+        if direction == 'bullish':
+            if prev['close'] < prev['open'] and curr['close'] > curr['open'] and curr['close'] > prev['high']:
+                if abs(prev['low'] - level) <= offset:
+                    return True
+        else:
+            if prev['close'] > prev['open'] and curr['close'] < curr['open'] and curr['close'] < prev['low']:
+                if abs(prev['high'] - level) <= offset:
+                    return True
+        return False
+
+    def _is_three_bar_reversal(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
+        """Detect a three-bar reversal pattern (bullish or bearish) near a level."""
+        if idx < 2 or idx >= len(candles):
+            return False
+        c1, c2, c3 = candles.iloc[idx-2], candles.iloc[idx-1], candles.iloc[idx]
+        tol = c3['close'] * self.price_tolerance
+        atr_val = None
+        if len(candles) >= 14:
+            from src.utils.indicators import calculate_atr
+            atr_series = calculate_atr(candles, period=14)
+            if isinstance(atr_series, pd.Series):
+                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
+        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
+        if direction == 'bullish':
+            if c1['close'] < c1['open'] and c2['close'] < c2['open'] and c3['close'] > c3['open'] and c3['close'] > c1['open']:
+                if abs(c1['low'] - level) <= offset:
+                    return True
+        else:
+            if c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] < c3['open'] and c3['close'] < c1['open']:
+                if abs(c1['high'] - level) <= offset:
+                    return True
+        return False
+
+    @property
+    def required_timeframes(self):
+        return [self.primary_timeframe]
+
+    @property
+    def lookback_periods(self):
+        return {self.primary_timeframe: self.lookback_period}

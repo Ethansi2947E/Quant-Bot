@@ -22,12 +22,9 @@ from loguru import logger
 from typing import Dict, List, Any, Optional, Tuple
 import math
 from datetime import datetime, timedelta
-from scipy import stats
 import matplotlib.pyplot as plt
-import os
 from pathlib import Path
 import time
-import traceback
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr
@@ -612,7 +609,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Timeframes
         self.primary_timeframe = primary_timeframe
         self.higher_timeframe = higher_timeframe
-        self.required_timeframes = [primary_timeframe, higher_timeframe]
+        # self.required_timeframes = [primary_timeframe, higher_timeframe]  # Removed, use property
         
         # Load appropriate timeframe profile
         if primary_timeframe == "M1":
@@ -824,7 +821,8 @@ class BreakoutReversalStrategy(SignalGenerator):
         # Delegate index normalization to module-level helper
         return _ensure_datetime_index(df, timeframe)
     
-    async def generate_signals(self, market_data=None, symbol=None, timeframe=None, debug_visualize=False, force_trendlines=False, skip_plots=False, **kwargs):
+    async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
+        logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}")
         logger.debug(f"[BreakoutReversalStrategy] Analyzing symbol(s): {list(market_data.keys()) if market_data else symbol} | primary_timeframe={self.primary_timeframe}, higher_timeframe={self.higher_timeframe}")
         start_time = time.time()
         logger.info(f"🚀 SIGNAL GENERATION START: {self.name} strategy")
@@ -834,9 +832,9 @@ class BreakoutReversalStrategy(SignalGenerator):
             return []
             
         # Check if we should force visualization for debugging
-        debug_visualize = kwargs.get('debug_visualize', debug_visualize)
-        force_trendlines = kwargs.get('force_trendlines', force_trendlines)
-        skip_plots = kwargs.get('skip_plots', skip_plots)
+        debug_visualize = kwargs.get('debug_visualize', False)
+        force_trendlines = kwargs.get('force_trendlines', False)
+        skip_plots = kwargs.get('skip_plots', False)
         process_immediately = kwargs.get('process_immediately', False)
         
         # Debug logging
@@ -3480,3 +3478,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                             processed_zones[zone_key] = current_time
                     break
         return signals
+
+    @property
+    def required_timeframes(self):
+        return [self.primary_timeframe]
+
+    @property
+    def lookback_periods(self):
+        return {self.primary_timeframe: self.lookback_period}

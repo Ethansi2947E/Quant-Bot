@@ -44,7 +44,7 @@ class SignalGenerator:
             logger.warning(f"No MT5Handler passed to {self.name} - this might cause connection issues")
         
         # Timeframe configuration
-        self.required_timeframes = []  # Subclasses must override
+        # self.required_timeframes = []  # Subclasses must override
         self.primary_timeframe = None  # Subclasses must override
         
     async def initialize(self):
@@ -279,6 +279,8 @@ class TradingBot:
                         if symbol not in symbols:
                             logger.debug(f"Symbol {symbol} not in requirements, skipping for {strategy_name}.")
                             continue
+                        # Add explicit log to show which strategy/symbol/timeframe is being processed
+                        logger.info(f"[TICK LOOP] Running {strategy_name} for {symbol}/{primary_tf}")
                             
                         # Use a unique key for last seen candle per strategy
                         last_seen_key = (symbol, primary_tf, strategy_name)
@@ -302,10 +304,11 @@ class TradingBot:
                         for tf in required_timeframes:
                             lb = lookback_periods.get(tf, default_lookback)
                             df = self.data_manager.get_data_window(symbol, tf, lb)
-                            if df is None or df.empty:
-                                logger.warning(f"Missing data for {symbol}/{tf} (needed for {strategy_name})")
+                            if df is None or df.empty or len(df) < lb:
+                                logger.warning(f"Not enough data for {symbol}/{tf} (needed {lb} bars for {strategy_name}, got {len(df) if df is not None else 0})")
                                 missing_data = True
-                                break  # Break if any required timeframe data is missing
+                                break
+                            logger.debug(f"[DataFetch] {strategy_name} {symbol}/{tf}: fetched {len(df)} bars (required: {lb})")
                             market_data[symbol][tf] = df
                         
                         # Skip signal generation if data is missing
@@ -341,15 +344,22 @@ class TradingBot:
 
     def _normalize_strategy_key(self, key: str) -> str:
         """Normalize strategy key to handle different naming conventions."""
-        # Convert to lowercase and remove any 'strategy' suffix
+        # Convert to lowercase
         key = key.lower()
+        
+        # Print debug info to help troubleshoot
+        logger.info(f"Normalizing strategy key: '{key}'")
+        
         # Handle both underscore and camel case formats
         if '_strategy' in key:
             key = key.replace('_strategy', '')
         elif 'strategy' in key:
             key = key.replace('strategy', '')
+            
         # Remove any remaining underscores
         key = key.replace('_', '')
+        
+        logger.info(f"Normalized strategy key: '{key}'")
         return key
 
     async def _initialize_signal_generators(self):
@@ -382,11 +392,20 @@ class TradingBot:
 
             # Build a normalized lookup for available strategies
             normalized_available = {self._normalize_strategy_key(k): v for k, v in self.available_signal_generators.items()}
+            
+            # Debug logging for normalized keys
+            logger.info(f"Available signal generators: {list(self.available_signal_generators.keys())}")
+            logger.info(f"Normalized available keys: {list(normalized_available.keys())}")
+            
             # Initialize active generators from config
             for generator_name in active_generator_names:
                 norm_key = self._normalize_strategy_key(generator_name)
+                logger.info(f"Looking for generator: {generator_name} (normalized: {norm_key})")
+                
                 if norm_key in normalized_available:
                     generator_class = normalized_available[norm_key]
+                    logger.info(f"Found generator class: {generator_class.__name__}")
+                    
                     # Ensure we're passing the SAME MT5Handler instance
                     generator = generator_class(
                         mt5_handler=self.mt5_handler,  # Use the shared instance
@@ -406,6 +425,11 @@ class TradingBot:
                     logger.warning(f"Unknown signal generator: {generator_name} (normalized: {norm_key})")
             logger.info(f"[TRACE] active_generator_names used: {active_generator_names}")
             logger.info(f"[TRACE] Final signal_generators order: {[gen.__class__.__name__ for gen in self.signal_generators]}")
+            # --- NEW: Log requirements for all loaded strategies ---
+            for gen in self.signal_generators:
+                logger.info(f"[StrategyLoad] {gen.__class__.__name__}: required_timeframes={getattr(gen, 'required_timeframes', None)}, lookback_periods={getattr(gen, 'lookback_periods', None)}")
+                if not getattr(gen, 'required_timeframes', []):
+                    logger.warning(f"[StrategyLoad] {gen.__class__.__name__} has empty required_timeframes and will be skipped in tick_event_loop!")
         except Exception as e:
             logger.error(f"Error initializing signal generators: {str(e)}")
             logger.error(traceback.format_exc())
@@ -868,7 +892,7 @@ class TradingBot:
         """Handle enable trading command from Telegram."""
         result = await self.enable_trading()
         return result
-        
+    
     async def handle_disable_trading_command(self, args):
         """Handle disable trading command from Telegram."""
         result = await self.disable_trading()
@@ -1309,6 +1333,24 @@ class TradingBot:
                     logger.info("Successfully imported ConfluencePriceActionStrategy")
                 except ImportError as e:
                     logger.warning(f"ConfluencePriceActionStrategy not found in strategy module: {str(e)}")
+                # Import the new BreakoutTradingStrategy
+                try:
+                    logger.info("Attempting to import BreakoutTradingStrategy")
+                    from src.strategy.breakout_trading_strategy import BreakoutTradingStrategy
+                    self.available_signal_generators["breakout_trading"] = BreakoutTradingStrategy
+                    logger.info("Successfully imported BreakoutTradingStrategy")
+                    logger.info(f"Available strategies after import: {list(self.available_signal_generators.keys())}")
+                except ImportError as e:
+                    logger.error(f"Error importing BreakoutTradingStrategy: {str(e)}")
+                    logger.error(traceback.format_exc())
+                # Import the new TrendFollowingStrategy
+                try:
+                    from src.strategy.trend_following_strategy import TrendFollowingStrategy
+                    self.available_signal_generators["trend_following"] = TrendFollowingStrategy
+                    logger.info("Successfully imported TrendFollowingStrategy")
+                except ImportError as e:
+                    logger.error(f"Error importing TrendFollowingStrategy: {str(e)}")
+                    logger.error(traceback.format_exc())
             except ImportError as e:
                 logger.warning(f"Could not import BreakoutReversalStrategy: {str(e)}")
             

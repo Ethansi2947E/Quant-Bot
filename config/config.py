@@ -42,12 +42,12 @@ TRADING_CONFIG = {
         "Jump 75 Index",
         "Step Index",
         "Range Break 200 Index",
-        "GBPUSD",
-        "EURUSD",
-        "USDJPY",
-        "USDCAD",
-        "AUDUSD",
-        "NZDUSD",
+        # "GBPUSD",
+        # "EURUSD",
+        # "USDJPY",
+        # "USDCAD",
+        # "AUDUSD",
+        # "NZDUSD",
     ],
     "fixed_lot_size": 1.0,
     "use_fixed_lot_size": True,
@@ -70,8 +70,10 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        "confluence_price_action",
-        "breakout_reversal",
+        #"confluence_price_action",
+        #"breakout_reversal"
+        "breakout_trading",
+        "trend_following",
         "price_action_sr"
     ],
 }

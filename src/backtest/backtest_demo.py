@@ -31,7 +31,7 @@ logger.remove()
 logger.add(lambda msg: print(msg, end=""), level="INFO")
 
 # === STRATEGY SELECTION ===
-STRATEGY_NAME = 'PriceActionSRStrategy'  # e.g. 'PriceActionSRStrategy', 'BreakoutReversalStrategy', 'ConfluencePriceActionStrategy'
+STRATEGY_NAME = 'PriceActionSRStrategy'  # e.g. 'PriceActionSRStrategy', 'BreakoutReversalStrategy', 'ConfluencePriceActionStrategy', 'BreakoutTradingStrategy' (for backtesting)
 PRIMARY_TIMEFRAME = 'M15'
 HIGHER_TIMEFRAME = 'H1'  # Only used if strategy requires it
 
@@ -80,6 +80,9 @@ def camel_to_snake(name):
 module_name = f"src.strategy.{camel_to_snake(STRATEGY_NAME)}"
 strategy_module = importlib.import_module(module_name)
 strategy_class = getattr(strategy_module, STRATEGY_NAME)
+
+# NOTE: If using BreakoutTradingStrategy, default settings now use a looser consolidation filter (bb_squeeze_factor=1.2, min_consolidation_bars=5),
+# a more permissive volume filter (>=, 0.9x tolerance), and debugging aids (processed_bars clearing, wait_for_confirmation_candle=False).
 
 # Inspect the __init__ signature to determine which timeframes to pass
 sig = inspect.signature(strategy_class.__init__)

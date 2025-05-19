@@ -129,7 +129,7 @@ class SignalProcessor:
         if config:
             self.config = config
             # Update derived values
-            self.min_confidence = self.config.get("min_confidence", 0.6)
+            self.min_confidence = self.config.get("min_confidence", 0.2)
             # Always get the latest value from TRADING_CONFIG
             from config.config import TRADING_CONFIG
             self.allow_position_additions = TRADING_CONFIG.get("allow_position_additions", False)
@@ -817,7 +817,7 @@ class SignalProcessor:
                 if self.risk_manager:
                     self.risk_manager.on_trade_opened(signal)
                 # Build notification with strategy and detailed score breakdown
-                strategy_name = signal.get('source', signal.get('generator', 'Unknown'))
+                strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
                 # Prepare analysis text
                 detailed_reason = signal.get('detailed_reasoning', [])
                 if detailed_reason and isinstance(detailed_reason, list):
@@ -857,6 +857,8 @@ class SignalProcessor:
                     if not detailed_analysis:
                         detailed_analysis = signal.get('reason', 'N/A')
                     
+                    # Use strategy_name from signal if available
+                    strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
                         f"🔹 Symbol: {symbol}\n"
@@ -919,7 +921,7 @@ class SignalProcessor:
                         f"📝 Analysis:\n{reason_text}"
                     )
                 else:
-                    # Fallback for signals without detailed scoring
+                    strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
                     confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
                     trade_details = (
                         f"🔸 Strategy: {strategy_name}\n"
