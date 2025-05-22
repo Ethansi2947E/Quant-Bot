@@ -294,6 +294,50 @@ class PriceActionSRStrategy(SignalGenerator):
             lower_wick < body
         )
 
+    def _is_bullish_harami(self, prev, curr) -> bool:
+        # Bullish Harami: large bearish candle, followed by small bullish candle inside previous body
+        return (
+            prev['close'] < prev['open'] and
+            curr['close'] > curr['open'] and
+            curr['open'] > prev['close'] and curr['close'] < prev['open']
+        )
+
+    def _is_bearish_harami(self, prev, curr) -> bool:
+        # Bearish Harami: large bullish candle, followed by small bearish candle inside previous body
+        return (
+            prev['close'] > prev['open'] and
+            curr['close'] < curr['open'] and
+            curr['open'] < prev['close'] and curr['close'] > prev['open']
+        )
+
+    def _is_morning_star(self, df: pd.DataFrame, idx: int) -> bool:
+        # Morning Star: bearish candle, small body (gap down), bullish candle closing into first
+        if idx < 2:
+            return False
+        c1 = df.iloc[idx-2]
+        c2 = df.iloc[idx-1]
+        c3 = df.iloc[idx]
+        return (
+            c1['close'] < c1['open'] and
+            abs(c2['close'] - c2['open']) < 0.5 * abs(c1['close'] - c1['open']) and
+            c3['close'] > c3['open'] and
+            c3['close'] > ((c1['open'] + c1['close']) / 2)
+        )
+
+    def _is_evening_star(self, df: pd.DataFrame, idx: int) -> bool:
+        # Evening Star: bullish candle, small body (gap up), bearish candle closing into first
+        if idx < 2:
+            return False
+        c1 = df.iloc[idx-2]
+        c2 = df.iloc[idx-1]
+        c3 = df.iloc[idx]
+        return (
+            c1['close'] > c1['open'] and
+            abs(c2['close'] - c2['open']) < 0.5 * abs(c1['close'] - c1['open']) and
+            c3['close'] < c3['open'] and
+            c3['close'] < ((c1['open'] + c1['close']) / 2)
+        )
+
     def _wick_rejection(self, candle, direction: str) -> bool:
         total = candle['high'] - candle['low']
         if total == 0:
@@ -325,6 +369,36 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug(f"Volume spike fallback: current={current_vol}, 2x mean={2*avg_vol}")
             return current_vol >= 2 * avg_vol
 
+    def is_valid_volume_spike(self, candle, volume_spike: bool) -> bool:
+        if not volume_spike:
+            return False
+        body = abs(candle['close'] - candle['open'])
+        total_range = candle['high'] - candle['low']
+        if total_range == 0:
+            self.logger.debug("[VolumeWick] Total range is zero, cannot calculate wick ratios")
+            return False
+        upper_wick = candle['high'] - max(candle['open'], candle['close'])
+        lower_wick = min(candle['open'], candle['close']) - candle['low']
+        upper_wick_ratio = upper_wick / total_range
+        lower_wick_ratio = lower_wick / total_range
+        # Relaxed thresholds
+        is_bullish_volume = upper_wick_ratio < 0.6
+        is_bearish_volume = lower_wick_ratio < 0.6
+        combined_valid = body > 0 and ((upper_wick + lower_wick) / body < 2.0)
+        self.logger.debug(f"[VolumeWick] Stats: upper_ratio={upper_wick_ratio:.2f}, lower_ratio={lower_wick_ratio:.2f}, body={body}")
+        self.logger.debug(f"[VolumeWick] Analysis: bullish={is_bullish_volume}, bearish={is_bearish_volume}, combined_valid={combined_valid}")
+        return is_bullish_volume or is_bearish_volume or combined_valid
+
+    def calculate_stop_loss(self, zone: float, direction: str, buffer: float = 0.001) -> float:
+        if direction == "buy":
+            sl = zone - buffer
+            self.logger.debug(f"[SL] BUY: zone={zone}, buffer={buffer}, SL={sl}")
+            return sl
+        else:
+            sl = zone + buffer
+            self.logger.debug(f"[SL] SELL: zone={zone}, buffer={buffer}, SL={sl}")
+            return sl
+
     def _pattern_match(self, df: pd.DataFrame, idx: int, direction: str) -> Optional[str]:
         prev = df.iloc[idx-1]
         curr = df.iloc[idx]
@@ -333,6 +407,10 @@ class PriceActionSRStrategy(SignalGenerator):
                 return 'Bullish Engulfing'
             if self._is_hammer(curr):
                 return 'Hammer'
+            if self._is_bullish_harami(prev, curr):
+                return 'Bullish Harami'
+            if self._is_morning_star(df, idx):
+                return 'Morning Star'
             # Pin-bar: hammer with long lower wick
             if self._wick_rejection(curr, 'buy') and abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.3:
                 return 'Pin-bar'
@@ -341,6 +419,10 @@ class PriceActionSRStrategy(SignalGenerator):
                 return 'Bearish Engulfing'
             if self._is_shooting_star(curr):
                 return 'Shooting Star'
+            if self._is_bearish_harami(prev, curr):
+                return 'Bearish Harami'
+            if self._is_evening_star(df, idx):
+                return 'Evening Star'
             # Pin-bar: shooting star with long upper wick
             if self._wick_rejection(curr, 'sell') and abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.3:
                 return 'Pin-bar'
@@ -568,6 +650,28 @@ class PriceActionSRStrategy(SignalGenerator):
         # Use the minimum bars needed for your logic, e.g. pivot_window + 21
         return {self.primary_timeframe: max(self.pivot_window + 21, 100)}
 
+    def is_uptrend(self, df: pd.DataFrame) -> bool:
+        if len(df) < 6:
+            return False
+        higher_high = df['high'].iloc[-1] > df['high'].iloc[-5]
+        higher_low = df['low'].iloc[-1] > df['low'].iloc[-5]
+        recent_strong_move = df['close'].iloc[-1] > df['close'].iloc[-3]
+        self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}, recent_strong_move={recent_strong_move}")
+        self.logger.debug(f"[TrendCheck] Last 5 bars: highs={df['high'].iloc[-5:].tolist()}, lows={df['low'].iloc[-5:].tolist()}")
+        # Relaxed: pass if any of the three is true
+        return higher_high or higher_low or recent_strong_move
+
+    def is_downtrend(self, df: pd.DataFrame) -> bool:
+        if len(df) < 6:
+            return False
+        lower_high = df['high'].iloc[-1] < df['high'].iloc[-5]
+        lower_low = df['low'].iloc[-1] < df['low'].iloc[-5]
+        recent_strong_move = df['close'].iloc[-1] < df['close'].iloc[-3]
+        self.logger.debug(f"[TrendCheck] Downtrend analysis: lower_high={lower_high}, lower_low={lower_low}, recent_strong_move={recent_strong_move}")
+        self.logger.debug(f"[TrendCheck] Last 5 bars: highs={df['high'].iloc[-5:].tolist()}, lows={df['low'].iloc[-5:].tolist()}")
+        # Relaxed: pass if any of the three is true
+        return lower_high or lower_low or recent_strong_move
+
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         """
         Generate trading signals based on S/R zone entry, candlestick pattern, wick rejection, and volume spike.
@@ -615,6 +719,20 @@ class PriceActionSRStrategy(SignalGenerator):
                 zone_type = 'support' if direction == 'buy' else 'resistance'
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
 
+                # PDF-aligned trend validation
+                if direction == 'buy':
+                    uptrend = self.is_uptrend(df)
+                    self.logger.debug(f"[Trend] {sym} uptrend={uptrend}")
+                    if not uptrend:
+                        self.logger.debug(f"[Skip] {sym} buy: not in uptrend.")
+                        continue
+                else:
+                    downtrend = self.is_downtrend(df)
+                    self.logger.debug(f"[Trend] {sym} downtrend={downtrend}")
+                    if not downtrend:
+                        self.logger.debug(f"[Skip] {sym} sell: not in downtrend.")
+                        continue
+
                 for zone in zone_list:
                     zone_key = (sym, zone_type, round(zone, 5))
                     if zone_key in self.processed_zones:
@@ -633,17 +751,27 @@ class PriceActionSRStrategy(SignalGenerator):
                         continue
                     candle = df.iloc[process_idx]
                     in_zone = self._bar_touches_zone(candle, zone, direction)
-                    if not in_zone:
-                        continue
                     pattern = self._pattern_match(df, process_idx, direction)
                     wick = self._wick_rejection(candle, direction)
                     vol_spike = self._volume_spike(df, process_idx)
+                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike)
+                    # Granular logging for all filters
+                    logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern} wick={wick} vol_spike={vol_spike} vol_wick_ok={vol_wick_ok}")
+                    if not in_zone:
+                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: not in zone.")
+                        continue
+                    if not pattern:
+                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: no valid pattern.")
+                        continue
+                    if not vol_wick_ok:
+                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: volume-wick confirmation failed.")
+                        continue
                     # Calculate volume score (how much above threshold)
                     avg_vol = df['tick_volume'].iloc[process_idx-20:process_idx].mean()
                     current_vol = df['tick_volume'].iloc[process_idx]
                     volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 1.0) if avg_vol > 0 else 0.0
                     entry = df['open'].iloc[idx] if idx < len(df) else candle['close']
-                    stop = candle['low'] if direction == 'buy' else candle['high']
+                    stop = self.calculate_stop_loss(zone, direction)
                     opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
                     tp = None
                     for opp in (sorted(opp_zones) if direction == 'buy' else sorted(opp_zones, reverse=True)):

@@ -5,10 +5,10 @@ A rules-based strategy to trade breakouts from consolidation patterns or key S/R
 confirmed by volume and price action.
 
 Features:
-- Consolidation identification using Bollinger Band Squeeze and/or ATR contraction.
+- Consolidation identification using price structure (narrowing range bars) instead of Bollinger Bands.
 - Breakout from identified S/R levels.
-- Entry on decisive breakout candle with significant volume.
-- Filters for false breakouts (e.g., magnitude of break, confirmation candle).
+- Entry on decisive breakout candle with significant, directional volume (buy/sell spike differentiation).
+- Filters for false breakouts using price rejection logic (pin bars/long wicks at breakout levels).
 - Stop-loss placement based on consolidation structure or ATR.
 - Take-profit targets based on measured moves, R:R, or ATR multiples.
 - Risk management via fixed fractional position sizing.
@@ -77,6 +77,86 @@ def calculate_atr(df, length=14):
         
     return atr
 
+def is_consolidating(df: pd.DataFrame, window=10, tolerance=0.02) -> bool:
+    """
+    Simple consolidation detection based on price range.
+    
+    Args:
+        df: DataFrame with OHLC data
+        window: Number of bars to check for consolidation
+        tolerance: Maximum price range as percentage of min price
+        
+    Returns:
+        bool: True if price is consolidating
+    """
+    if len(df) < window:
+        return False
+        
+    recent = df.iloc[-window:]
+    max_close = recent['close'].max()
+    min_close = recent['close'].min()
+    return (max_close - min_close) / min_close < tolerance
+
+def is_near_support_resistance(df: pd.DataFrame, pivot_window=20, tolerance=0.005) -> bool:
+    """
+    Check if price is near support or resistance levels.
+    
+    Args:
+        df: DataFrame with OHLC data
+        pivot_window: Window to look for pivot points
+        tolerance: How close price needs to be to S/R (as percentage)
+        
+    Returns:
+        bool: True if price is near S/R
+    """
+    if len(df) < pivot_window * 2:
+        return False
+        
+    # Find pivot highs and lows
+    pivot_highs = []
+    pivot_lows = []
+    
+    for i in range(pivot_window, len(df) - pivot_window):
+        window_high = df['high'].iloc[i-pivot_window:i+pivot_window+1]
+        window_low = df['low'].iloc[i-pivot_window:i+pivot_window+1]
+        
+        if df['high'].iloc[i] == window_high.max():
+            pivot_highs.append(df['high'].iloc[i])
+            
+        if df['low'].iloc[i] == window_low.min():
+            pivot_lows.append(df['low'].iloc[i])
+    
+    # Check if current price is near any pivot
+    current_price = df['close'].iloc[-1]
+    
+    near_high = any(abs(ph - current_price) / ph < tolerance for ph in pivot_highs)
+    near_low = any(abs(current_price - pl) / pl < tolerance for pl in pivot_lows)
+    
+    return near_high or near_low
+
+def is_valid_breakout(candle, breakout_level, direction):
+    """
+    Validate breakout quality based on candle structure.
+    
+    Args:
+        candle: Single row of OHLC data (as dict or Series)
+        breakout_level: The S/R level being broken
+        direction: 'BUY' or 'SELL'
+        
+    Returns:
+        bool: True if breakout is valid based on price rejection
+    """
+    body = abs(candle['close'] - candle['open'])
+    if body == 0:  # Avoid division by zero
+        return False
+        
+    if direction == "BUY":
+        wick_ratio = (candle['high'] - candle['close']) / body if body > 0 else 0
+        return wick_ratio < 0.3  # Minimal upper wick = strong acceptance
+    else:
+        wick_ratio = (candle['open'] - candle['low']) / body if body > 0 else 0
+        return wick_ratio < 0.3  # Minimal lower wick = strong acceptance
+
 class BreakoutTradingStrategy(SignalGenerator):
     """
     Breakout Trading Strategy: Identifies consolidation and trades breakouts.
@@ -88,22 +168,21 @@ class BreakoutTradingStrategy(SignalGenerator):
         # Consolidation Identification Parameters
         bb_period: int = 20,
         bb_std_dev: float = 2.0,
-        bb_squeeze_lookback: int = 20, # From 50 to 20 for faster BB squeeze detection
-        bb_squeeze_factor: float = 0.65, # Relaxed: 35% narrower
+        bb_squeeze_lookback: int = 20,
         atr_period_consolidation: int = 14,
-        min_consolidation_bars: int = 12, # Relaxed: 12 bars
+        min_consolidation_bars: int = 12,
         # Breakout Parameters
-        breakout_confirmation_atr_multiplier: float = 0.15, # Default, but will be dynamic
-        volume_confirmation_multiplier: float = 1.3, # Relaxed: 1.3x avg vol (will be dynamic)
+        breakout_confirmation_atr_multiplier: float = 0.15,
+        volume_confirmation_multiplier: float = 1.3,
         volume_avg_period: int = 20,
         stop_loss_atr_multiplier: float = 1.5,
         take_profit_rr_ratio: float = 2.0,
         wait_for_confirmation_candle: int = 0, # 0: no delay, 1: wait 1 bar, 2: wait 2 bars, etc.
         pivot_window: int = 10,
         max_zones: int = 2,
-        take_profit_mode: str = 'rr', # 'rr', 'measured', or 'atr'
-        require_retest: bool = False, # Hybrid: default False, will be dynamic
-        retest_threshold_pct: float = 0.3, # Only for adding to positions
+        take_profit_mode: str = 'rr',
+        require_retest: bool = False,
+        retest_threshold_pct: float = 0.3,
         **kwargs
     ):
         """
@@ -123,7 +202,6 @@ class BreakoutTradingStrategy(SignalGenerator):
         self.bb_period = bb_period
         self.bb_std_dev = bb_std_dev
         self.bb_squeeze_lookback = bb_squeeze_lookback
-        self.bb_squeeze_factor = bb_squeeze_factor
         self.atr_period_consolidation = atr_period_consolidation
         self.min_consolidation_bars = min_consolidation_bars
         if self.min_consolidation_bars < 15:
@@ -197,83 +275,45 @@ class BreakoutTradingStrategy(SignalGenerator):
             'breakout_high': None,
             'breakout_low': None,
             'bars_in_consolidation': 0,
-            'is_squeeze': False,
+            'is_squeeze': False,  # Deprecated, kept for compatibility
             'inside_sr': False
         }
-        if df is None or len(df) < self.bb_squeeze_lookback + self.bb_period:
-            self.logger.debug(f"[Consolidation] Not enough data: len(df)={len(df) if df is not None else 'None'}, required={self.bb_squeeze_lookback + self.bb_period}")
+        if df is None or len(df) < 30:
+            self.logger.debug(f"[Consolidation] Not enough data: len(df)={len(df) if df is not None else 'None'}, required=30 for robust detection")
             return result
 
-        # Use normalized BB width consistently
-        bb_width_col = f"BB_WIDTH_{self.bb_period}_{self.bb_std_dev}"
-        if bb_width_col not in df.columns or pd.isna(df[bb_width_col].iloc[-1]):
-            self.logger.debug("[Consolidation] Normalized BB width not available.")
-            return result
-
-        idx = len(df) - 1
-        bb_width_series = df[bb_width_col].iloc[idx - self.bb_squeeze_lookback: idx + 1]
-        avg_bb_width = bb_width_series.mean()
-        current_bb_width = df[bb_width_col].iloc[-1]
-        min_bb_width = bb_width_series.min()
-
-        # S/R zone detection
-        sr_zones = self.get_sr_zones(df)
-        support_zone = max([z for z in sr_zones.get('support', []) if z <= df['close'].iloc[-1]], default=None)
-        resistance_zone = min([z for z in sr_zones.get('resistance', []) if z >= df['close'].iloc[-1]], default=None)
-        self.logger.debug(f"[Consolidation] S/R zones: support={support_zone}, resistance={resistance_zone}")
-
-        # Check if price is inside S/R zones
-        inside_sr = False
-        if support_zone is not None and resistance_zone is not None:
-            lows = df['low'].iloc[-self.min_consolidation_bars:]
-            highs = df['high'].iloc[-self.min_consolidation_bars:]
-            compliance_threshold = 0.70  # Relaxed compliance threshold
-            pct_bars_above_support = (lows >= support_zone).mean()
-            pct_bars_below_resistance = (highs <= resistance_zone).mean()
-            inside_sr = pct_bars_above_support >= compliance_threshold and pct_bars_below_resistance >= compliance_threshold
-            self.logger.debug(f"[Consolidation] inside_sr={inside_sr} (support compliance: {pct_bars_above_support:.2f}, resistance compliance: {pct_bars_below_resistance:.2f})")
-        else:
-            close_volatility = df['close'].iloc[-self.min_consolidation_bars:].std() / df['close'].iloc[-self.min_consolidation_bars:].mean()
-            inside_sr = close_volatility < 0.005
-            self.logger.debug(f"[Consolidation] S/R fallback: close_volatility={close_volatility:.5f}, inside_sr={inside_sr}")
-
-        # Squeeze detection
-        is_squeeze = current_bb_width <= (avg_bb_width * self.bb_squeeze_factor)
-        self.logger.debug(f"[Consolidation] BB width: current={current_bb_width:.5f}, min={min_bb_width:.5f}, avg={avg_bb_width:.5f}, threshold={avg_bb_width * self.bb_squeeze_factor:.5f}")
-        self.logger.debug(f"[Consolidation] is_squeeze={is_squeeze}")
-
-        # Count bars in consolidation using normalized width
-        bars_in_consolidation = 0
-        for i in range(idx, -1, -1):
-            if i < 0 or df[bb_width_col].iloc[i] > (avg_bb_width * self.bb_squeeze_factor):
-                break
-            bars_in_consolidation += 1
-            self.logger.debug(f"[Consolidation] Bar {i}: bb_width={df[bb_width_col].iloc[i]:.5f}, threshold={avg_bb_width * self.bb_squeeze_factor:.5f}, bars={bars_in_consolidation}")
-
-        # Dynamic minimum bars
-        atr_value = df[f"ATR_{self.atr_period_consolidation}"].iloc[-1] if f"ATR_{self.atr_period_consolidation}" in df.columns else 0
-        atr_volatility = atr_value / df['close'].iloc[-1] if df['close'].iloc[-1] > 0 else 0
-        dynamic_min_bars = self.min_consolidation_bars
-        if atr_volatility > 0.005:
-            dynamic_min_bars = max(int(self.min_consolidation_bars * 0.7), 10)
-            self.logger.debug(f"[Consolidation] High volatility ({atr_volatility:.5f}), min bars={dynamic_min_bars}")
-        # Add dynamic_min_bars to result for downstream use
-        result['dynamic_min_bars'] = dynamic_min_bars
-
-        # Consolidation logic
-        result['is_squeeze'] = is_squeeze
-        result['inside_sr'] = inside_sr
-        result['bars_in_consolidation'] = bars_in_consolidation
-
-        if is_squeeze and inside_sr and bars_in_consolidation >= dynamic_min_bars:
-            result['is_consolidating'] = True
-            result['consolidation_start'] = df.index[idx - bars_in_consolidation + 1]
-            result['consolidation_end'] = df.index[idx]
-            result['breakout_high'] = resistance_zone
-            result['breakout_low'] = support_zone
-            result['bars_in_consolidation'] = bars_in_consolidation
-            self.logger.info(f"Consolidation detected: {bars_in_consolidation} bars, BB width={current_bb_width:.5f}, S/R: {support_zone}-{resistance_zone}")
+        # --- Dynamic Bar Counting Based on Volatility ---
+        atr_col = f"ATR_{self.atr_period_consolidation}"
+        atr_value = df[atr_col].iloc[-1] if atr_col in df.columns else 0
+        close_value = df['close'].iloc[-1] if 'close' in df.columns else 1
+        volatility_ratio = atr_value / close_value if close_value > 0 else 0
         
+        # Dynamic window based on volatility (more volatile = shorter window)
+        dynamic_window = max(5, int(10 * (1 - volatility_ratio * 100)))
+        self.logger.debug(f"[Consolidation] ATR={atr_value:.5f}, close={close_value:.5f}, volatility_ratio={volatility_ratio:.5f}, dynamic_window={dynamic_window}")
+        
+        # Use simpler consolidation detection
+        is_consolidating_simple = is_consolidating(df, window=dynamic_window, tolerance=0.02)
+        is_near_sr = is_near_support_resistance(df, pivot_window=self.pivot_window, tolerance=0.005)
+        
+        # Combined criteria - must be consolidating AND near S/R for good breakout setup
+        is_in_breakout_zone = is_consolidating_simple and is_near_sr
+        
+        # Get S/R zones for breakout levels
+        sr_zones = self.get_sr_zones(df)
+        support_zone = max([z for z in sr_zones.get('support', []) if z <= close_value], default=None)
+        resistance_zone = min([z for z in sr_zones.get('resistance', []) if z >= close_value], default=None)
+        
+        self.logger.info(f"[Consolidation] is_consolidating={is_consolidating_simple}, is_near_sr={is_near_sr}, is_in_breakout_zone={is_in_breakout_zone}, S/R: {support_zone}-{resistance_zone}")
+
+        result['dynamic_min_bars'] = dynamic_window
+        result['inside_sr'] = is_near_sr
+        result['bars_in_consolidation'] = dynamic_window if is_consolidating_simple else 0
+        result['is_consolidating'] = is_in_breakout_zone
+        result['consolidation_start'] = df.index[-dynamic_window] if is_in_breakout_zone else None
+        result['consolidation_end'] = df.index[-1] if is_in_breakout_zone else None
+        result['breakout_high'] = resistance_zone
+        result['breakout_low'] = support_zone
         return result
 
     def _find_pivot_highs(self, df: pd.DataFrame) -> list:
@@ -319,8 +359,7 @@ class BreakoutTradingStrategy(SignalGenerator):
         if df is not None and len(df) > 15:
             latest_price = df['close'].iloc[-1]
             atr = self._calculate_atr(df)
-            dynamic_tol = max(0.003, 0.5 * atr / latest_price) if latest_price > 0 else 0.003
-            tol = dynamic_tol
+            tol = max(0.003, 0.5 * atr / latest_price) if latest_price > 0 else 0.003
             self.logger.debug(f"Dynamic zone tolerance set to {tol:.5f} (ATR={atr:.5f}, price={latest_price:.5f})")
         levels = sorted(levels)
         clusters = []
@@ -373,7 +412,6 @@ class BreakoutTradingStrategy(SignalGenerator):
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}, lookback_periods={self.lookback_periods}")
         signals = []
-        # For local backtests: clear processed_bars to ensure all bars are processed (debugging aid)
         self.processed_bars = {}
         symbols = [symbol] if symbol else list(market_data.keys())
         for sym in symbols:
@@ -381,20 +419,17 @@ class BreakoutTradingStrategy(SignalGenerator):
                 self.logger.debug(f"[Signal] {sym}: No data for timeframe {self.primary_timeframe} or DataFrame is empty.")
                 continue
             df = market_data[sym][self.primary_timeframe].copy()
-            # --- PATCH: Ensure 'tick_volume' column exists with better fallback ---
             if 'tick_volume' not in df.columns:
                 if 'volume' in df.columns:
                     self.logger.debug(f"[Signal] {sym}: Using 'volume' as 'tick_volume' fallback.")
                     df['tick_volume'] = df['volume']
                 else:
                     self.logger.debug(f"[Signal] {sym}: No 'tick_volume' or 'volume' column, using price-based volume proxy.")
-                    # Use price volatility as a proxy for volume (higher volatility often correlates with higher volume)
-                    df['tick_volume'] = df['close'].rolling(20).mean().bfill()  # Proxy with price-based volume
+                    df['tick_volume'] = df['close'].rolling(20).mean().bfill()
             if len(df) < self.lookback_periods[self.primary_timeframe]:
-                self.logger.debug(f"[Signal] {sym}: Not enough bars ({len(df)}) for lookback ({self.lookback_periods[self.primary_timeframe]}).")
+                self.logger.debug(f"[Signal] {sym}: Not enough bars ({len(df)}) for lookback ({self.lookback_periods[self.primary_timeframe]}). Skipping.")
                 continue
             df = self._calculate_indicators(df)
-            # --- Precompute vectorized patterns ---
             hammer = self.detect_hammer(df)
             shooting_star = self.detect_shooting_star(df)
             bullish_engulfing = self.detect_bullish_engulfing(df)
@@ -405,60 +440,46 @@ class BreakoutTradingStrategy(SignalGenerator):
             false_breakout_buy = self.detect_false_breakout(df, 'buy')
             false_breakout_sell = self.detect_false_breakout(df, 'sell')
             idx = len(df) - 1
-            # Entry delay logic: wait N bars after breakout before entry
             n_delay = self.wait_for_confirmation_candle
             idx_breakout_candle = idx - n_delay
             if idx_breakout_candle < 0:
-                self.logger.debug(f"[Signal] {sym}: idx_breakout_candle < 0 ({idx_breakout_candle}).")
+                self.logger.debug(f"[Signal] {sym}: idx_breakout_candle < 0 ({idx_breakout_candle}). Skipping.")
                 continue
-            entry_bar_idx = idx  # Entry at open of this bar
-            confirmation_bar_idx = idx_breakout_candle  # Breakout/confirmation bar
+            entry_bar_idx = idx
+            confirmation_bar_idx = idx_breakout_candle
             current_bar_ts = df.index[entry_bar_idx]
             self.logger.debug(f"[EntryDelay] {sym}: wait_for_confirmation_candle={n_delay}, confirmation_bar_idx={confirmation_bar_idx}, entry_bar_idx={entry_bar_idx}")
             if self.processed_bars.get((sym, self.primary_timeframe)) == current_bar_ts:
-                self.logger.debug(f"[Signal] {sym}: Already processed bar {current_bar_ts}.")
+                self.logger.debug(f"[Signal] {sym}: Already processed bar {current_bar_ts}. Skipping.")
                 continue
-            # Log breakout levels for debugging
-            self.logger.debug(
-                f"[Breakout] {sym}: close={df.iloc[confirmation_bar_idx]['close']}, "
-                f"high={df.iloc[confirmation_bar_idx]['high']}, low={df.iloc[confirmation_bar_idx]['low']}, "
-                f"ATR={df[f'ATR_{self.atr_period_consolidation}'].iloc[confirmation_bar_idx]:.5f}"
-            )
-            
-            # --- Adaptive breakout threshold multiplier ---
+            self.logger.debug(f"[Breakout] {sym}: close={df.iloc[confirmation_bar_idx]['close']}, high={df.iloc[confirmation_bar_idx]['high']}, low={df.iloc[confirmation_bar_idx]['low']}, ATR={df[f'ATR_{self.atr_period_consolidation}'].iloc[confirmation_bar_idx]:.5f}")
+
             atr_col = f"ATR_{self.atr_period_consolidation}"
             volatility_ratio = 0.0
             if atr_col in df.columns and confirmation_bar_idx >= 0 and df[atr_col].iloc[confirmation_bar_idx] > 0 and df['close'].iloc[confirmation_bar_idx] > 0:
                 volatility_ratio = df[atr_col].iloc[confirmation_bar_idx] / df['close'].iloc[confirmation_bar_idx]
             threshold_multiplier = self._get_dynamic_atr_multiplier(df)
-            self.logger.debug(f"[Threshold] Dynamic threshold_multiplier={{threshold_multiplier}} (volatility_ratio={{volatility_ratio:.5f}})")
-            # --- Entry timing improvements ---
+            self.logger.debug(f"[Threshold] {sym}: Dynamic threshold_multiplier={threshold_multiplier} (volatility_ratio={volatility_ratio:.5f})")
             wait_for_confirmation_candle = 1 if volatility_ratio < 0.015 else 0
             n_delay = wait_for_confirmation_candle
             idx_breakout_candle = idx - n_delay
             if idx_breakout_candle < 0:
-                self.logger.debug(f"[Signal] {{sym}}: idx_breakout_candle < 0 ({{idx_breakout_candle}}).")
+                self.logger.debug(f"[Signal] {sym}: idx_breakout_candle < 0 ({idx_breakout_candle}). Skipping.")
                 continue
-            entry_bar_idx = idx  # Entry at open of this bar
-            confirmation_bar_idx = idx_breakout_candle  # Breakout/confirmation bar
+            entry_bar_idx = idx
+            confirmation_bar_idx = idx_breakout_candle
             current_bar_ts = df.index[entry_bar_idx]
             self.logger.debug(f"[EntryDelay] {sym}: wait_for_confirmation_candle={n_delay}, confirmation_bar_idx={confirmation_bar_idx}, entry_bar_idx={entry_bar_idx}")
             if self.processed_bars.get((sym, self.primary_timeframe)) == current_bar_ts:
-                self.logger.debug(f"[Signal] {sym}: Already processed bar {current_bar_ts}.")
+                self.logger.debug(f"[Signal] {sym}: Already processed bar {current_bar_ts}. Skipping.")
                 continue
-            # Log breakout levels for debugging
-            self.logger.debug(
-                f"[Breakout] {sym}: close={df.iloc[confirmation_bar_idx]['close']}, "
-                f"high={df.iloc[confirmation_bar_idx]['high']}, low={df.iloc[confirmation_bar_idx]['low']}, "
-                f"ATR={df[f'ATR_{self.atr_period_consolidation}'].iloc[confirmation_bar_idx]:.5f}"
-            )
-            
-            # --- Step 1: Detect consolidation ---
+            self.logger.debug(f"[Breakout] {sym}: close={df.iloc[confirmation_bar_idx]['close']}, high={df.iloc[confirmation_bar_idx]['high']}, low={df.iloc[confirmation_bar_idx]['low']}, ATR={df[f'ATR_{self.atr_period_consolidation}'].iloc[confirmation_bar_idx]:.5f}")
+
             consolidation = self._detect_consolidation(df)
             bars_in_consolidation = consolidation['bars_in_consolidation']
             dynamic_min = consolidation.get('dynamic_min_bars', self.min_consolidation_bars)
             if bars_in_consolidation < dynamic_min:
-                self.logger.info(f"[Signal] {sym}: Not enough bars in consolidation ({bars_in_consolidation} < {dynamic_min}).")
+                self.logger.info(f"[Signal] {sym}: Not enough bars in consolidation ({bars_in_consolidation} < {dynamic_min}). Skipping signal.")
                 continue
             breakout_high = consolidation['breakout_high']
             breakout_low = consolidation['breakout_low']
@@ -468,23 +489,40 @@ class BreakoutTradingStrategy(SignalGenerator):
             candle = df.iloc[confirmation_bar_idx]
             entry_price, stop_loss, take_profit = None, None, None
             signal_direction = None
-            
+
             # --- Liquidity Check: Volume Z-Score ---
             volume_rolling = df['tick_volume'].rolling(50)
             volume_mean = volume_rolling.mean().iloc[confirmation_bar_idx]
             volume_std = volume_rolling.std().iloc[confirmation_bar_idx]
             volume_z_score = (candle['tick_volume'] - volume_mean) / (volume_std if volume_std > 0 else 1)
-            if volume_z_score < 1.0:
-                self.logger.debug(f"Skipping {sym} - insufficient volume z-score: {volume_z_score:.2f}")
+            min_z = 0.5  # Lowered from 1.0 to 0.5 for all volatility regimes
+            # Volume check temporarily disabled
+            # if volume_z_score < min_z:
+            #     self.logger.info(f"[Signal] {sym}: Skipping - insufficient volume z-score: {volume_z_score:.2f} (min required: {min_z})")
+            #     continue
+
+            up_close = candle['close'] > candle['open']
+            down_close = candle['close'] < candle['open']
+            high_buying_volume = up_close and candle['tick_volume'] > volume_mean + volume_std
+            high_selling_volume = down_close and candle['tick_volume'] > volume_mean + volume_std
+            if signal_direction == "BUY" and not high_buying_volume:
+                self.logger.info(f"[Signal] {sym}: No high buying volume on up close. Skipping BUY signal.")
                 continue
-            
-            # Pre-format for logging to avoid ValueError
+            if signal_direction == "SELL" and not high_selling_volume:
+                self.logger.info(f"[Signal] {sym}: No high selling volume on down close. Skipping SELL signal.")
+                continue
+
+            atr_col = f"ATR_{self.atr_period_consolidation}"
+            volatility_ratio = 0.0
+            if atr_col in df.columns and confirmation_bar_idx >= 0 and df[atr_col].iloc[confirmation_bar_idx] > 0 and df['close'].iloc[confirmation_bar_idx] > 0:
+                volatility_ratio = df[atr_col].iloc[confirmation_bar_idx] / df['close'].iloc[confirmation_bar_idx]
+            threshold_multiplier = self._get_dynamic_atr_multiplier(df)
+
             breakout_high_str = f"{breakout_high:.5f}" if breakout_high is not None else "None"
             breakout_low_str = f"{breakout_low:.5f}" if breakout_low is not None else "None"
             threshold_high_str = f"{(breakout_high + (threshold_multiplier * atr_val)):.5f}" if breakout_high is not None else "None"
             threshold_low_str = f"{(breakout_low - (threshold_multiplier * atr_val)):.5f}" if breakout_low is not None else "None"
 
-            # Log detailed breakout check information
             self.logger.debug(
                 f"[Breakout] {sym}: close={candle['close']:.5f}, "
                 f"breakout_high={breakout_high_str}, "
@@ -493,8 +531,17 @@ class BreakoutTradingStrategy(SignalGenerator):
                 f"threshold_low={threshold_low_str}, "
                 f"ATR={atr_val:.5f}, breakout_mult={threshold_multiplier}"
             )
-            
-            # --- Step 2: Breakout confirmation ---
+
+            pinbar_rejection = False
+            if breakout_high is not None and hammer.iloc[confirmation_bar_idx] and candle['low'] < consolidation['breakout_low']:
+                pinbar_rejection = True
+                self.logger.info(f"[Signal] {sym}: Pin bar/hammer detected at resistance breakout level outside consolidation. Filtering out false breakout.")
+            if breakout_low is not None and shooting_star.iloc[confirmation_bar_idx] and candle['high'] > consolidation['breakout_high']:
+                pinbar_rejection = True
+                self.logger.info(f"[Signal] {sym}: Shooting star detected at support breakout level outside consolidation. Filtering out false breakout.")
+            if pinbar_rejection:
+                self.logger.info(f"[Signal] {sym}: Pinbar rejection filter triggered. Skipping signal.")
+                continue
             # Upside breakout
             if breakout_high is not None and candle["close"] >= breakout_high + (threshold_multiplier * atr_val):
                 # Hybrid retest logic: only require retest for add-ons, not initial breakout
@@ -524,25 +571,44 @@ class BreakoutTradingStrategy(SignalGenerator):
                     avg_vol = df["tick_volume"].iloc[max(0, confirmation_bar_idx - self.volume_avg_period):confirmation_bar_idx].mean()
                     strong_break = candle["close"] >= breakout_high + (2 * threshold_multiplier * atr_val)
                     # Volume confirmation relaxation for crypto/volatile indices
-                    volume_confirmation_multiplier = 1.1 if sym in ["BTCUSD","XAUUSD"] else self.volume_confirmation_multiplier
+                    volume_confirmation_multiplier = 1.1 if volatility_ratio > 0.01 else 1.3
                     if strong_break:
                         vol_ok = candle["tick_volume"] >= avg_vol * volume_confirmation_multiplier
                     else:
                         vol_ok = candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
                     self.logger.debug(f"[Signal] {sym}: Volume check: tick_volume={candle['tick_volume']}, avg_vol={avg_vol}, required={avg_vol * (volume_confirmation_multiplier if strong_break else max(volume_confirmation_multiplier, 1.3))}, strong_break={strong_break}, vol_ok={vol_ok}")
-                    if vol_ok:
+                    
+                    # Price action confirmation (bullish close above S/R)
+                    price_action_ok = candle["close"] > candle["open"]
+                    
+                    # Check wick structure for breakout quality using new function
+                    breakout_structure_ok = is_valid_breakout(candle, breakout_high, "BUY")
+                    
+                    # Volume must be high AND price action must confirm
+                    if vol_ok and price_action_ok and breakout_structure_ok:
                         signal_direction = "BUY"
                         entry_price = df["open"].iloc[entry_bar_idx]
                         # Stop-loss optimization (structural)
                         stop_loss = min(breakout_low, entry_price - 1.0 * atr_val) if breakout_low is not None else entry_price - 1.0 * atr_val
-                        # Take-profit adjustments (adaptive)
-                        if volatility_ratio > 0.025:
-                            take_profit = entry_price + 1.8 * atr_val
+                        
+                        # Use measured move for target (height of consolidation)
+                        if consolidation['is_consolidating'] and breakout_high is not None and breakout_low is not None:
+                            consolidation_height = breakout_high - breakout_low
+                            take_profit = entry_price + consolidation_height
                         else:
-                            take_profit = entry_price + 2.5 * atr_val
-                        self.logger.info(f"BUY Breakout for {sym} at {current_bar_ts}. Level={breakout_high:.5f}, Vol Confirmed={vol_ok}, Retest Confirmed=True, TP={take_profit}")
+                            # Fallback to ATR-based target if consolidation not well defined
+                            if volatility_ratio > 0.025:
+                                take_profit = entry_price + 1.8 * atr_val
+                            else:
+                                take_profit = entry_price + 2.5 * atr_val
+                        
+                        self.logger.info(f"BUY Breakout for {sym} at {current_bar_ts}. Level={breakout_high:.5f}, Vol={vol_ok}, Price Action={price_action_ok}, Structure={breakout_structure_ok}, TP={take_profit}")
                     else:
-                        self.logger.info(f"[Signal] {sym}: Upside breakout volume filter failed.")
+                        failed_reasons = []
+                        if not vol_ok: failed_reasons.append("insufficient volume")
+                        if not price_action_ok: failed_reasons.append("bearish close")
+                        if not breakout_structure_ok: failed_reasons.append("poor breakout structure")
+                        self.logger.info(f"[Signal] {sym}: Upside breakout filters failed: {', '.join(failed_reasons)}")
                 else:
                     self.logger.info(f"[Signal] {sym}: Upside breakout waiting for retest of level {breakout_high:.5f}")
             # Downside breakout
@@ -572,57 +638,73 @@ class BreakoutTradingStrategy(SignalGenerator):
                 if retest_satisfied:
                     avg_vol = df["tick_volume"].iloc[max(0, confirmation_bar_idx - self.volume_avg_period):confirmation_bar_idx].mean()
                     strong_break = candle["close"] <= breakout_low - (2 * threshold_multiplier * atr_val)
-                    volume_confirmation_multiplier = 1.1 if sym in ["BTCUSD","XAUUSD"] else self.volume_confirmation_multiplier
+                    # Volume confirmation relaxation for crypto/volatile indices
+                    volume_confirmation_multiplier = 1.1 if volatility_ratio > 0.01 else 1.3
                     if strong_break:
                         vol_ok = candle["tick_volume"] >= avg_vol * volume_confirmation_multiplier
                     else:
                         vol_ok = candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
                     self.logger.debug(f"[Signal] {sym}: Volume check: tick_volume={candle['tick_volume']}, avg_vol={avg_vol}, required={avg_vol * (volume_confirmation_multiplier if strong_break else max(volume_confirmation_multiplier, 1.3))}, strong_break={strong_break}, vol_ok={vol_ok}")
-                    if vol_ok:
+                    
+                    # Price action confirmation (bearish close below S/R)
+                    price_action_ok = candle["close"] < candle["open"]
+                    
+                    # Check wick structure for breakout quality
+                    breakout_structure_ok = is_valid_breakout(candle, breakout_low, "SELL")
+                    
+                    # Volume must be high AND price action must confirm
+                    if vol_ok and price_action_ok and breakout_structure_ok:
                         signal_direction = "SELL"
                         entry_price = df["open"].iloc[entry_bar_idx]
                         stop_loss = max(breakout_high, entry_price + 1.0 * atr_val) if breakout_high is not None else entry_price + 1.0 * atr_val
-                        if volatility_ratio > 0.025:
-                            take_profit = entry_price - 1.8 * atr_val
+                        
+                        # Use measured move for target (height of consolidation)
+                        if consolidation['is_consolidating'] and breakout_high is not None and breakout_low is not None:
+                            consolidation_height = breakout_high - breakout_low
+                            take_profit = entry_price - consolidation_height
                         else:
-                            take_profit = entry_price - 2.5 * atr_val
-                        self.logger.info(f"SELL Breakout for {sym} at {current_bar_ts}. Level={breakout_low:.5f}, Vol Confirmed={vol_ok}, Retest Confirmed=True, TP={take_profit}")
+                            # Fallback to ATR-based target if consolidation not well defined
+                            if volatility_ratio > 0.025:
+                                take_profit = entry_price - 1.8 * atr_val
+                            else:
+                                take_profit = entry_price - 2.5 * atr_val
+                                
+                        self.logger.info(f"SELL Breakout for {sym} at {current_bar_ts}. Level={breakout_low:.5f}, Vol={vol_ok}, Price Action={price_action_ok}, Structure={breakout_structure_ok}, TP={take_profit}")
                     else:
-                        self.logger.info(f"[Signal] {sym}: Downside breakout volume filter failed.")
+                        failed_reasons = []
+                        if not vol_ok: failed_reasons.append("insufficient volume")
+                        if not price_action_ok: failed_reasons.append("bullish close")
+                        if not breakout_structure_ok: failed_reasons.append("poor breakout structure")
+                        self.logger.info(f"[Signal] {sym}: Downside breakout filters failed: {', '.join(failed_reasons)}")
                 else:
                     self.logger.info(f"[Signal] {sym}: Downside breakout waiting for retest of level {breakout_low:.5f}")
             else:
                 self.logger.info(f"[Signal] {sym}: No breakout detected. close={candle['close']}, breakout_high={breakout_high}, breakout_low={breakout_low}, ATR={atr_val:.5f}")
             # --- Step 3: Signal creation ---
             if signal_direction:
-                # --- Step 4: Stop-loss/TP fallback and position sizing ---
-                # Ensure entry_price is valid before fallback SL/TP
                 if entry_price is None:
                     self.logger.warning(f"[Signal] {sym}: No entry_price, skipping signal.")
                     continue
-                # Fallback for stop_loss with minimum distance validation
-                min_stop_distance = 0.5 * atr_val  # Minimum stop distance is 0.5 * ATR
+                min_stop_distance = 0.5 * atr_val
                 if signal_direction == "BUY" and (stop_loss is None or abs(entry_price - stop_loss) < min_stop_distance):
                     stop_loss = entry_price - self.stop_loss_atr_multiplier * atr_val
                     self.logger.info(f"[Signal] {sym}: BUY - Enforcing minimum SL distance ({min_stop_distance:.5f}), new SL: {stop_loss:.5f}")
                 elif signal_direction == "SELL" and (stop_loss is None or abs(entry_price - stop_loss) < min_stop_distance):
                     stop_loss = entry_price + self.stop_loss_atr_multiplier * atr_val
                     self.logger.info(f"[Signal] {sym}: SELL - Enforcing minimum SL distance ({min_stop_distance:.5f}), new SL: {stop_loss:.5f}")
-                # Fallback for take_profit
                 if take_profit is None or abs(entry_price - stop_loss) < 1e-9:
                     if signal_direction == "BUY":
                         take_profit = entry_price + abs(entry_price - stop_loss) * self.take_profit_rr_ratio
                     else:
                         take_profit = entry_price - abs(entry_price - stop_loss) * self.take_profit_rr_ratio
                     self.logger.info(f"[Signal] {sym}: Fallback TP used: {take_profit:.5f}")
-                # Position sizing
                 size = 1.0
                 risk_reward = abs(take_profit - entry_price) / max(abs(entry_price - stop_loss), 1e-9)
                 reason = f"Breakout {signal_direction} from consolidation. SL: {stop_loss:.5f}, TP: {take_profit:.5f}, R:R={risk_reward:.2f}"
                 if hasattr(self.risk_manager, 'calculate_position_size'):
                     try:
                         account_equity = self.risk_manager.get_account_balance() if hasattr(self.risk_manager, 'get_account_balance') else 10000
-                        pips_per_unit = 1  # Placeholder, adapt as needed
+                        pips_per_unit = 1
                         instrument_price = entry_price
                         stop_loss_pips = abs(entry_price - stop_loss)
                         symbol_for_risk = sym if isinstance(sym, str) else ""
@@ -633,10 +715,9 @@ class BreakoutTradingStrategy(SignalGenerator):
                     except Exception as e:
                         self.logger.warning(f"[Signal] {sym}: RiskManager sizing failed: {e}")
                         size = 1.0
-                # Final runtime checks
                 assert entry_price is not None and stop_loss is not None and take_profit is not None, f"Invalid signal values for {sym}"
                 if abs(entry_price - stop_loss) > 1e-9:
-                    self.logger.info(f"[Signal] {sym}: Signal created: direction={signal_direction}, entry={entry_price}, SL={stop_loss}, TP={take_profit}, size={size}, R:R={risk_reward:.2f}")
+                    self.logger.info(f"[Signal] {sym}: Signal created: direction={signal_direction}, entry={entry_price}, SL={stop_loss}, TP={take_profit}, size={size}, R:R={risk_reward:.2f}, reason={reason}")
                     signals.append({
                         "symbol": sym, "timestamp": df.index[entry_bar_idx], "direction": signal_direction,
                         "entry_price": entry_price, "stop_loss": stop_loss, "take_profit": take_profit,
@@ -651,9 +732,8 @@ class BreakoutTradingStrategy(SignalGenerator):
             if signals:
                 self.logger.debug(f"[Debug] Setting processed_bars for ({sym}, {self.primary_timeframe}) = {current_bar_ts}")
                 self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
-        # --- Ensure retest mode is enabled and robust ---
-        self.require_retest = True  # Force retest mode on
-        return signals 
+        self.require_retest = True
+        return signals
 
     # --- VECTORIZE CANDLESTICK PATTERNS (industry standard) ---
     @staticmethod
@@ -859,5 +939,15 @@ class BreakoutTradingStrategy(SignalGenerator):
         atr_col = f"ATR_{self.atr_period_consolidation}"
         if atr_col in df.columns and df[atr_col].iloc[-1] > 0 and df['close'].iloc[-1] > 0:
             volatility_ratio = df[atr_col].iloc[-1] / df['close'].iloc[-1]
-            return 0.15 if volatility_ratio > 0.02 else 0.10
+            
+            # More granular adjustments based on volatility
+            if volatility_ratio > 0.03:  # Extremely volatile
+                return 0.20  # Wider threshold for confirmation
+            elif volatility_ratio > 0.02:  # Highly volatile
+                return 0.15
+            elif volatility_ratio > 0.01:  # Moderately volatile
+                return 0.12
+            else:  # Low volatility
+                return 0.08  # Tighter threshold for confirmation
+                
         return self.breakout_confirmation_atr_multiplier 
