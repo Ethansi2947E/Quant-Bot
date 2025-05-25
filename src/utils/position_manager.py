@@ -208,16 +208,34 @@ class PositionManager:
             current_price = position.get("current_price", 0.0)
             current_sl = position.get("sl", 0.0)
             
-            # Get the trailing step size
+            # Get the trailing step size from base config
             from config.config import TRADE_EXIT_CONFIG
-            # Use trail_points from config (new name) but fall back to trail_step_pips (old name) for backward compatibility
-            trail_step_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_points', 
-                             TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('trail_step_pips', 20))
+            base_config = TRADE_EXIT_CONFIG.get('trailing_stop', {})
             
-            # Get break even config
-            break_even_enabled = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_enabled', True)
-            break_even_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_pips', 5)
-            break_even_buffer_pips = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('break_even_buffer_pips', 0.5)
+            # Get instrument-specific configuration if adaptive mode is enabled
+            if base_config.get('mode', 'pips') == 'adaptive':
+                instrument_config = self._get_instrument_config(symbol)
+                logger.info(f"Using adaptive config for {symbol}: {instrument_config}")
+                
+                # Use instrument-specific parameters, fallback to base config
+                trailing_mode = instrument_config.get('mode', base_config.get('mode', 'pips'))
+                trail_step_pips = instrument_config.get('trail_points', base_config.get('trail_points', 15.0))
+                atr_multiplier = instrument_config.get('atr_multiplier', base_config.get('atr_multiplier', 2.0))
+                atr_period = instrument_config.get('atr_period', base_config.get('atr_period', 14))
+                percent = instrument_config.get('percent', base_config.get('percent', 0.008))
+                break_even_pips = instrument_config.get('break_even_pips', base_config.get('break_even_pips', 5))
+            else:
+                # Use base configuration only
+                trailing_mode = base_config.get('mode', 'pips')
+                trail_step_pips = base_config.get('trail_points', base_config.get('trail_step_pips', 15.0))
+                atr_multiplier = base_config.get('atr_multiplier', 2.0)
+                atr_period = base_config.get('atr_period', 14)
+                percent = base_config.get('percent', 0.008)
+                break_even_pips = base_config.get('break_even_pips', 5)
+            
+            # Get break even config (always from base config for consistency)
+            break_even_enabled = base_config.get('break_even_enabled', True)
+            break_even_buffer_pips = base_config.get('break_even_buffer_pips', 0.5)
 
             # Get pip value for this symbol using the utility function
             pip_value = calculate_pip_value(symbol, mt5_handler=self.mt5_handler)
@@ -227,16 +245,15 @@ class PositionManager:
             break_even_buffer = break_even_buffer_pips * pip_value
 
             # Trailing stop mode selection
-            trailing_mode = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('mode', 'pips')
-            atr_multiplier = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('atr_multiplier', 1.0)
-            percent = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('percent', 0.005)  # 0.5% default
             atr = None
             if trailing_mode == 'atr':
                 try:
                     from src.utils.indicators import calculate_atr
-                    df = self.mt5_handler.get_market_data(symbol, 'M1', 50)
-                    if df is not None and len(df) >= 14:
-                        atr_series = calculate_atr(df, 14)
+                    # Use minimum of 50 bars or 3x ATR period for calculation
+                    required_bars = max(50, atr_period * 3)
+                    df = self.mt5_handler.get_market_data(symbol, 'M1', required_bars)
+                    if df is not None and len(df) >= atr_period:
+                        atr_series = calculate_atr(df, atr_period)
                         if isinstance(atr_series, pd.Series):
                             atr = float(atr_series.iloc[-1])
                         elif isinstance(atr_series, (np.ndarray, list)):
@@ -255,13 +272,17 @@ class PositionManager:
                     logger.warning(f"Failed to calculate ATR for {symbol}: {e}")
             if trailing_mode == 'atr' and atr is not None:
                 trailing_distance = atr * atr_multiplier
-                logger.info(f"Using ATR-based trailing stop: ATR={atr:.5f}, multiplier={atr_multiplier}, trailing_distance={trailing_distance:.5f}")
+                logger.info(f"Using ATR-based trailing stop for {symbol}: ATR={atr:.5f}, multiplier={atr_multiplier}, trailing_distance={trailing_distance:.5f}")
             elif trailing_mode == 'percent':
                 trailing_distance = current_price * percent
-                logger.info(f"Using percent-based trailing stop: {percent*100:.2f}%, trailing_distance={trailing_distance:.5f}")
+                logger.info(f"Using percent-based trailing stop for {symbol}: {percent*100:.2f}%, trailing_distance={trailing_distance:.5f}")
             else:
                 trailing_distance = trail_step_pips * pip_value
-                logger.info(f"Using pip-based trailing stop: {trail_step_pips} pips, trailing_distance={trailing_distance:.5f}")
+                logger.info(f"Using pip-based trailing stop for {symbol}: {trail_step_pips} pips, trailing_distance={trailing_distance:.5f}")
+
+            # Log the selected parameters for transparency
+            logger.info(f"Trailing stop config for {symbol}: mode={trailing_mode}, trail_pips={trail_step_pips}, "
+                       f"atr_mult={atr_multiplier}, percent={percent*100:.1f}%, break_even={break_even_pips} pips")
 
             # Get minimum stop level from MT5
             min_stop_distance = self.mt5_handler.get_min_stop_distance(symbol)
@@ -778,4 +799,94 @@ class PositionManager:
                 
         except Exception as e:
             logger.error(f"Error updating positions for {symbol}: {str(e)}")
-            logger.error(traceback.format_exc()) 
+            logger.error(traceback.format_exc())
+
+    def _get_instrument_config(self, symbol: str) -> Dict[str, Any]:
+        """
+        Automatically detect instrument type and return appropriate trailing stop configuration.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'EURUSD', 'Volatility 10 Index')
+            
+        Returns:
+            Dictionary containing instrument-specific trailing stop parameters
+        """
+        from config.config import TRADE_EXIT_CONFIG
+        
+        # Get instrument-specific configurations
+        instrument_configs = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('instrument_configs', {})
+        
+        # Check each instrument category
+        for category, config in instrument_configs.items():
+            if symbol in config.get('symbols', []):
+                logger.info(f"Detected {symbol} as {category} - using specialized config")
+                return config
+        
+        # If no exact match, try pattern matching for better detection
+        symbol_upper = symbol.upper()
+        
+        # Forex major pairs pattern matching
+        forex_majors = ['EUR', 'GBP', 'USD', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF']
+        if len(symbol) == 6 and symbol_upper[:3] in forex_majors and symbol_upper[3:] in forex_majors:
+            logger.info(f"Pattern-detected {symbol} as forex_major")
+            return instrument_configs.get('forex_major', {})
+        
+        # Volatility indices pattern matching
+        if 'volatility' in symbol_upper and 'index' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as volatility_indices")
+            return instrument_configs.get('volatility_indices', {})
+        
+        # Crash/Boom indices pattern matching
+        if ('crash' in symbol_upper or 'boom' in symbol_upper) and 'index' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as crash_boom_indices")
+            return instrument_configs.get('crash_boom_indices', {})
+        
+        # Jump indices pattern matching
+        if 'jump' in symbol_upper and 'index' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as jump_indices")
+            return instrument_configs.get('jump_indices', {})
+        
+        # Step/Range indices pattern matching
+        if ('step' in symbol_upper or 'range' in symbol_upper) and 'index' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as step_range_indices")
+            return instrument_configs.get('step_range_indices', {})
+        
+        # Metals pattern matching
+        if symbol_upper.startswith('XAU') or symbol_upper.startswith('XAG') or 'gold' in symbol_upper or 'silver' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as metals")
+            return instrument_configs.get('metals', {})
+        
+        # Crypto pattern matching
+        if 'btc' in symbol_upper or 'eth' in symbol_upper or 'bitcoin' in symbol_upper or 'ethereum' in symbol_upper:
+            logger.info(f"Pattern-detected {symbol} as crypto")
+            return instrument_configs.get('crypto', {})
+        
+        # Default to forex_major if no pattern matches (safest default)
+        logger.warning(f"Could not detect instrument type for {symbol}, using forex_major defaults")
+        return instrument_configs.get('forex_major', {})
+
+    def test_adaptive_detection(self) -> None:
+        """
+        Test the adaptive instrument detection system.
+        This method demonstrates how different symbols are automatically detected and configured.
+        """
+        test_symbols = [
+            'EURUSD', 'GBPUSD', 'USDJPY',  # Forex majors
+            'Volatility 10 Index', 'Volatility 25 Index',  # Volatility indices
+            'Crash 500 Index', 'Boom 1000 Index',  # Crash/Boom indices
+            'XAUUSD', 'BTCUSD',  # Metals and crypto
+            'Jump 50 Index', 'Step Index',  # Jump and step indices
+            'UNKNOWN_SYMBOL'  # Unknown symbol
+        ]
+        
+        logger.info("=== Testing Adaptive Instrument Detection ===")
+        
+        for symbol in test_symbols:
+            config = self._get_instrument_config(symbol)
+            logger.info(f"{symbol:20} -> Mode: {config.get('mode', 'N/A'):8} | "
+                       f"Trail: {config.get('trail_points', 0):6.1f} pips | "
+                       f"ATR: {config.get('atr_multiplier', 0):4.1f}x | "
+                       f"Percent: {config.get('percent', 0)*100:5.1f}% | "
+                       f"BE: {config.get('break_even_pips', 0):3.0f} pips")
+        
+        logger.info("=== End Adaptive Detection Test ===") 

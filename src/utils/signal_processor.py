@@ -816,124 +816,9 @@ class SignalProcessor:
                 # --- RiskManager state update: trade opened ---
                 if self.risk_manager:
                     self.risk_manager.on_trade_opened(signal)
-                # Build notification with strategy and detailed score breakdown
-                strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
-                # Prepare analysis text
-                detailed_reason = signal.get('detailed_reasoning', [])
-                if detailed_reason and isinstance(detailed_reason, list):
-                    reason_text = " | ".join(detailed_reason)
-                else:
-                    reason_text = signal.get('reason', 'N/A')
-                # Helper for emoji ratings
-                def get_score_emoji(score):
-                    if score >= 80: return "⭐⭐⭐⭐⭐"
-                    elif score >= 60: return "⭐⭐⭐⭐"
-                    elif score >= 40: return "⭐⭐⭐"
-                    elif score >= 20: return "⭐⭐"
-                    else: return "⭐"
                 
-                # Check for score details in the signal
-                trade_details = ""
-                if 'score_details' in signal and isinstance(signal.get('score_details'), dict):
-                    # BreakoutReversalStrategy scoring format
-                    sd = signal['score_details']
-                    final_score_pct = signal.get('score', 0.0) * 100 if isinstance(signal.get('score'), (float, int)) else 0.0
-                    confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
-                    
-                    # Extract score components, ensuring they're properly formatted as percentages
-                    level_strength_pct = sd.get('level_strength', 0.0) * 100
-                    volume_quality_pct = sd.get('volume_quality', 0.0) * 100
-                    pattern_reliability_pct = sd.get('pattern_reliability', 0.0) * 100
-                    trend_alignment_pct = sd.get('trend_alignment', 0.0) * 100
-                    risk_reward_pct = sd.get('risk_reward', 0.0) * 100
-                    
-                    # Get the detailed reasoning if available
-                    detailed_reasoning = signal.get('detailed_reasoning', [])
-                    detailed_analysis = ""
-                    if detailed_reasoning and isinstance(detailed_reasoning, list):
-                        detailed_analysis = "\n".join([f"• {reason}" for reason in detailed_reasoning])
-                    
-                    # If no detailed reasoning is available, use the original reason
-                    if not detailed_analysis:
-                        detailed_analysis = signal.get('reason', 'N/A')
-                    
-                    # Use strategy_name from signal if available
-                    strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
-                    trade_details = (
-                        f"🔸 Strategy: {strategy_name}\n"
-                        f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {(direction or '').upper()}\n"
-                        f"🔹 Entry: {entry_price}\n"
-                        f"🔹 Stop Loss: {stop_loss}\n"
-                        f"🔹 Take Profit: {take_profit}\n"
-                        f"🔹 Size: {position_size} lots\n\n"
-                        f"📊 Confidence: {confidence_pct:.1f}%\n"
-                        f"📊 Signal Quality: {get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
-                        f"• Level Strength: {level_strength_pct:.1f}% (30% weight)\n"
-                        f"• Volume Quality: {volume_quality_pct:.1f}% (20% weight)\n"
-                        f"• Pattern Reliability: {pattern_reliability_pct:.1f}% (20% weight)\n"
-                        f"• Trend Alignment: {trend_alignment_pct:.1f}% (20% weight)\n"
-                        f"• Risk-Reward: {risk_reward_pct:.1f}% (10% weight)\n\n"
-                        f"📝 Analysis:\n{detailed_analysis}"
-                    )
-                    
-                    # Add any special bonuses that were applied
-                    bonuses = []
-                    if signal.get('_volume_profile_bonus', False):
-                        bonuses.append("📈 Volume Profile Node Bonus (+0.07)")
-                    if signal.get('_atr_bonus', 0) > 0:
-                        bonuses.append("📏 Optimal Stop Placement Bonus (+0.1)")
-                    elif signal.get('_atr_bonus', 0) < 0:
-                        bonuses.append("⚠️ Suboptimal Stop Placement Penalty (-0.1)")
-                    if signal.get('consolidation_bonus', False):
-                        bonuses.append("📦 Inside Consolidation Zone Bonus (+0.05)")
-                    
-                    if bonuses:
-                        trade_details += "\n\n🎯 Applied Score Adjustments:\n" + "\n".join(bonuses)
-                        
-                elif signal.get('signal_quality') is not None:
-                    # Classic confluence-style notification
-                    signal_quality = signal.get('signal_quality', 0.0)
-                    pattern_score = signal.get('pattern_score', 0.0)
-                    confluence_score = signal.get('confluence_score', 0.0)
-                    volume_score = signal.get('volume_score', 0.0)
-                    recency_score = signal.get('recency_score', 0.0)
-                    # Format as percentages
-                    signal_quality_pct = signal_quality * 100
-                    pattern_score_pct = pattern_score * 100
-                    confluence_score_pct = confluence_score * 100
-                    volume_score_pct = volume_score * 100
-                    recency_score_pct = recency_score * 100
-                    trade_details = (
-                        f"🔸 Strategy: {strategy_name}\n"
-                        f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {(direction or '').upper()}\n"
-                        f"🔹 Entry: {entry_price}\n"
-                        f"🔹 Stop Loss: {stop_loss}\n"
-                        f"🔹 Take Profit: {take_profit}\n"
-                        f"🔹 Size: {position_size} lots\n\n"
-                        f"📊 Confidence: {signal.get('confidence', 0) * 100:.1f}%\n"
-                        f"📊 Signal Quality: {get_score_emoji(signal_quality_pct)} ({signal_quality_pct:.1f}%)\n"
-                        f"• Pattern: {pattern_score_pct:.1f}% (40% weight)\n"
-                        f"• Confluence: {confluence_score_pct:.1f}% (40% weight)\n"
-                        f"• Volume: {volume_score_pct:.1f}% (10% weight)\n"
-                        f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
-                        f"📝 Analysis:\n{reason_text}"
-                    )
-                else:
-                    strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
-                    confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
-                    trade_details = (
-                        f"🔸 Strategy: {strategy_name}\n"
-                        f"🔹 Symbol: {symbol}\n"
-                        f"🔹 Direction: {(direction or '').upper()}\n"
-                        f"🔹 Entry: {entry_price}\n"
-                        f"🔹 Stop Loss: {stop_loss}\n"
-                        f"🔹 Take Profit: {take_profit}\n"
-                        f"🔹 Size: {position_size} lots\n\n"
-                        f"📊 Confidence: {confidence_pct:.1f}%\n\n"
-                        f"📝 Analysis:\n{reason_text}"
-                    )
+                # Build comprehensive notification
+                trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, take_profit, position_size)
                 
                 # Send notification
                 await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
@@ -1306,3 +1191,225 @@ class SignalProcessor:
         updated_signal["take_profit"] = new_tp
         
         return updated_signal 
+
+    def _build_trade_notification(self, signal: Dict, symbol: str, direction: str, entry_price: float, stop_loss: float, take_profit: float, position_size: float) -> str:
+        """
+        Build a comprehensive trade notification message based on the signal format.
+        
+        Args:
+            signal: The signal dictionary
+            symbol: The trading symbol
+            direction: The trading direction
+            entry_price: The entry price
+            stop_loss: The stop loss price
+            take_profit: The take profit price
+            position_size: The trading position size
+            
+        Returns:
+            str: The formatted trade notification message
+        """
+        # Extract relevant information from the signal
+        strategy_name = signal.get('strategy_name') or signal.get('strategy') or signal.get('source') or 'Unknown'
+        confidence = signal.get('confidence', 0.0)
+        confidence_pct = confidence * 100 if isinstance(confidence, (float, int)) else 0.0
+        reason_text = signal.get('reason', 'N/A')
+        
+        # Build the notification based on the signal format
+        if 'score_details' in signal and isinstance(signal.get('score_details'), dict):
+            # BreakoutReversalStrategy scoring format
+            sd = signal['score_details']
+            final_score_pct = signal.get('score', 0.0) * 100 if isinstance(signal.get('score'), (float, int)) else 0.0
+            level_strength_pct = sd.get('level_strength', 0.0) * 100
+            volume_quality_pct = sd.get('volume_quality', 0.0) * 100
+            pattern_reliability_pct = sd.get('pattern_reliability', 0.0) * 100
+            trend_alignment_pct = sd.get('trend_alignment', 0.0) * 100
+            risk_reward_pct = sd.get('risk_reward', 0.0) * 100
+            
+            # Get the detailed reasoning if available
+            detailed_reasoning = signal.get('detailed_reasoning', [])
+            detailed_analysis = ""
+            if detailed_reasoning and isinstance(detailed_reasoning, list):
+                detailed_analysis = "\n".join([f"• {reason}" for reason in detailed_reasoning])
+            
+            # If no detailed reasoning is available, use the original reason
+            if not detailed_analysis:
+                detailed_analysis = signal.get('reason', 'N/A')
+            
+            # Use strategy_name from signal if available
+            strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
+            trade_details = (
+                f"🔸 Strategy: {strategy_name}\n"
+                f"🔹 Symbol: {symbol}\n"
+                f"🔹 Direction: {(direction or '').upper()}\n"
+                f"🔹 Entry: {entry_price}\n"
+                f"🔹 Stop Loss: {stop_loss}\n"
+                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Size: {position_size} lots\n\n"
+                f"📊 Confidence: {confidence_pct:.1f}%\n"
+                f"📊 Signal Quality: {self._get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
+                f"• Level Strength: {level_strength_pct:.1f}% (30% weight)\n"
+                f"• Volume Quality: {volume_quality_pct:.1f}% (20% weight)\n"
+                f"• Pattern Reliability: {pattern_reliability_pct:.1f}% (20% weight)\n"
+                f"• Trend Alignment: {trend_alignment_pct:.1f}% (20% weight)\n"
+                f"• Risk-Reward: {risk_reward_pct:.1f}% (10% weight)\n\n"
+                f"📝 Analysis:\n{detailed_analysis}"
+            )
+            
+            # Add any special bonuses that were applied
+            bonuses = []
+            if signal.get('_volume_profile_bonus', False):
+                bonuses.append("📈 Volume Profile Node Bonus (+0.07)")
+            if signal.get('_atr_bonus', 0) > 0:
+                bonuses.append("📏 Optimal Stop Placement Bonus (+0.1)")
+            elif signal.get('_atr_bonus', 0) < 0:
+                bonuses.append("⚠️ Suboptimal Stop Placement Penalty (-0.1)")
+            if signal.get('consolidation_bonus', False):
+                bonuses.append("📦 Inside Consolidation Zone Bonus (+0.05)")
+            
+            if bonuses:
+                trade_details += "\n\n🎯 Applied Score Adjustments:\n" + "\n".join(bonuses)
+            
+        elif signal.get('signal_quality') is not None:
+            # Classic confluence-style notification
+            signal_quality = signal.get('signal_quality', 0.0)
+            pattern_score = signal.get('pattern_score', 0.0)
+            confluence_score = signal.get('confluence_score', 0.0)
+            volume_score = signal.get('volume_score', 0.0)
+            recency_score = signal.get('recency_score', 0.0)
+            # Format as percentages
+            signal_quality_pct = signal_quality * 100
+            pattern_score_pct = pattern_score * 100
+            confluence_score_pct = confluence_score * 100
+            volume_score_pct = volume_score * 100
+            recency_score_pct = recency_score * 100
+            trade_details = (
+                f"🔸 Strategy: {strategy_name}\n"
+                f"🔹 Symbol: {symbol}\n"
+                f"🔹 Direction: {(direction or '').upper()}\n"
+                f"🔹 Entry: {entry_price}\n"
+                f"🔹 Stop Loss: {stop_loss}\n"
+                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Size: {position_size} lots\n\n"
+                f"📊 Confidence: {signal.get('confidence', 0) * 100:.1f}%\n"
+                f"📊 Signal Quality: {self._get_score_emoji(signal_quality_pct)} ({signal_quality_pct:.1f}%)\n"
+                f"• Pattern: {pattern_score_pct:.1f}% (40% weight)\n"
+                f"• Confluence: {confluence_score_pct:.1f}% (40% weight)\n"
+                f"• Volume: {volume_score_pct:.1f}% (10% weight)\n"
+                f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
+                f"📝 Analysis:\n{reason_text}"
+            )
+        elif signal.get('score_01') is not None:
+            # PriceActionSRStrategy format with score_01 and score_breakdown
+            score_01 = signal.get('score_01', 0.0)
+            score_breakdown = signal.get('score_breakdown', {})
+            score_01_pct = score_01 * 100
+            
+            # Extract breakdown components
+            pattern_score = score_breakdown.get('pattern', 0.0) * 100
+            wick_score = score_breakdown.get('wick', 0.0) * 100
+            volume_score = score_breakdown.get('volume', 0.0) * 100
+            risk_reward_score = score_breakdown.get('risk_reward', 0.0) * 100
+            zone_score = score_breakdown.get('zone_strength', 0.0) * 100
+            
+            # Get pattern and zone information
+            pattern = signal.get('pattern', 'Unknown')
+            zone = signal.get('zone', 0.0)
+            zone_touches = signal.get('zone_touches', 0)
+            
+            trade_details = (
+                f"🔸 Strategy: {strategy_name}\n"
+                f"🔹 Symbol: {symbol}\n"
+                f"🔹 Direction: {(direction or '').upper()}\n"
+                f"🔹 Entry: {entry_price}\n"
+                f"🔹 Stop Loss: {stop_loss}\n"
+                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Size: {position_size} lots\n\n"
+                f"📊 Confidence: {confidence_pct:.1f}%\n"
+                f"📊 Signal Quality: {self._get_score_emoji(score_01_pct)} ({score_01_pct:.1f}%)\n"
+                f"• Pattern: {pattern_score:.1f}% (30% weight)\n"
+                f"• Wick Rejection: {wick_score:.1f}% (25% weight)\n"
+                f"• Volume: {volume_score:.1f}% (25% weight)\n"
+                f"• Risk-Reward: {risk_reward_score:.1f}% (15% weight)\n"
+                f"• Zone Strength: {zone_score:.1f}% (5% weight)\n\n"
+                f"📊 Zone: {zone:.5f} (touched {zone_touches} times)\n"
+                f"📊 Pattern: {pattern}\n\n"
+                f"📝 Analysis:\n{reason_text}"
+            )
+        else:
+            # Enhanced basic format - extract as much useful information as possible
+            strategy_name = signal.get('strategy_name') or signal.get('strategy') or signal.get('source') or 'Unknown'
+            confidence_pct = signal.get('confidence', 0.0) * 100 if isinstance(signal.get('confidence'), (float, int)) else 0.0
+            
+            # Calculate risk-reward ratio
+            risk = abs(entry_price - stop_loss) if stop_loss else 0
+            reward = abs(take_profit - entry_price) if take_profit else 0
+            risk_reward_ratio = reward / risk if risk > 0 else 0
+            
+            # Extract pattern information
+            pattern = signal.get('pattern', 'Price Action')
+            
+            # Build enhanced analysis text
+            analysis_parts = []
+            
+            # Add the basic reason
+            if reason_text and reason_text != 'N/A':
+                analysis_parts.append(reason_text)
+            
+            # Add pattern details if available
+            if pattern and pattern != 'Price Action':
+                analysis_parts.append(f"Pattern: {pattern}")
+            
+            # Add timeframe information
+            timeframe = signal.get('timeframe', 'Unknown')
+            if timeframe != 'Unknown':
+                analysis_parts.append(f"Timeframe: {timeframe}")
+            
+            # Add technical metrics if available
+            technical_metrics = signal.get('technical_metrics', {})
+            if technical_metrics:
+                if 'rsi' in technical_metrics:
+                    rsi_val = technical_metrics['rsi']
+                    analysis_parts.append(f"RSI: {rsi_val:.1f}")
+                if 'atr' in technical_metrics:
+                    atr_val = technical_metrics['atr']
+                    analysis_parts.append(f"ATR: {atr_val:.5f}")
+            
+            # Add level information if available
+            level_strength = signal.get('level_strength', None)
+            if level_strength:
+                analysis_parts.append(f"Level Strength: {level_strength}")
+            
+            # Join analysis parts
+            enhanced_analysis = " | ".join(analysis_parts) if analysis_parts else "Price action signal"
+            
+            trade_details = (
+                f"🔸 Strategy: {strategy_name}\n"
+                f"🔹 Symbol: {symbol}\n"
+                f"🔹 Direction: {(direction or '').upper()}\n"
+                f"🔹 Entry: {entry_price}\n"
+                f"🔹 Stop Loss: {stop_loss}\n"
+                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Size: {position_size} lots\n\n"
+                f"📊 Confidence: {confidence_pct:.1f}%\n"
+                f"📊 Risk:Reward: {risk_reward_ratio:.2f}\n"
+                f"📊 Pattern: {pattern}\n\n"
+                f"📝 Analysis:\n{enhanced_analysis}"
+            )
+        
+        return trade_details
+
+    def _get_score_emoji(self, score: float) -> str:
+        """
+        Get a corresponding emoji based on the score percentage.
+        
+        Args:
+            score: The score percentage
+            
+        Returns:
+            str: The corresponding emoji
+        """
+        if score >= 80: return "⭐⭐⭐⭐⭐"
+        elif score >= 60: return "⭐⭐⭐⭐"
+        elif score >= 40: return "⭐⭐⭐"
+        elif score >= 20: return "⭐⭐"
+        else: return "⭐" 

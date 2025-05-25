@@ -99,7 +99,8 @@ def is_consolidating(df: pd.DataFrame, window=10, tolerance=0.02) -> bool:
 
 def is_near_support_resistance(df: pd.DataFrame, pivot_window=20, tolerance=0.005) -> bool:
     """
-    Check if price is near support or resistance levels.
+    Check if price is near any significant support or resistance level.
+    This ensures levels are properly separated and mutually exclusive.
     
     Args:
         df: DataFrame with OHLC data
@@ -107,10 +108,12 @@ def is_near_support_resistance(df: pd.DataFrame, pivot_window=20, tolerance=0.00
         tolerance: How close price needs to be to S/R (as percentage)
         
     Returns:
-        bool: True if price is near S/R
+        bool: True if price is near any S/R level
     """
     if len(df) < pivot_window * 2:
         return False
+        
+    current_price = df['close'].iloc[-1]
         
     # Find pivot highs and lows
     pivot_highs = []
@@ -126,13 +129,26 @@ def is_near_support_resistance(df: pd.DataFrame, pivot_window=20, tolerance=0.00
         if df['low'].iloc[i] == window_low.min():
             pivot_lows.append(df['low'].iloc[i])
     
-    # Check if current price is near any pivot
-    current_price = df['close'].iloc[-1]
+    # Separate levels by current price (support below, resistance above)
+    support_levels = []
+    resistance_levels = []
     
-    near_high = any(abs(ph - current_price) / ph < tolerance for ph in pivot_highs)
-    near_low = any(abs(current_price - pl) / pl < tolerance for pl in pivot_lows)
+    for level in pivot_lows:
+        # Support must be below current price
+        if level < current_price:
+            support_levels.append(level)
+            
+    for level in pivot_highs:
+        # Resistance must be above current price
+        if level > current_price:
+            resistance_levels.append(level)
     
-    return near_high or near_low
+    # Check proximity to properly separated levels
+    near_support = any(abs(current_price - pl) / pl < tolerance for pl in support_levels)
+    near_resistance = any(abs(ph - current_price) / ph < tolerance for ph in resistance_levels)
+    
+    # Return True if near any properly separated level
+    return near_support or near_resistance
 
 def is_valid_breakout(candle, breakout_level, direction):
     """
@@ -183,6 +199,7 @@ class BreakoutTradingStrategy(SignalGenerator):
         take_profit_mode: str = 'rr',
         require_retest: bool = False,
         retest_threshold_pct: float = 0.3,
+        lookback_period: int = 300,
         **kwargs
     ):
         """
@@ -219,20 +236,13 @@ class BreakoutTradingStrategy(SignalGenerator):
         self.take_profit_mode = take_profit_mode
         self.require_retest = require_retest
         self.retest_threshold_pct = retest_threshold_pct
+        self.lookback_period = lookback_period
         self.params = kwargs
 
         self.risk_manager = RiskManager.get_instance() if hasattr(RiskManager, "get_instance") else RiskManager()
         self.processed_bars = {}
         self.consolidation_state = {}
         self.breakout_levels = {}
-
-        # Set dynamic lookback period based on largest relevant period + buffer
-        self.lookback_period = max(self.bb_period, self.atr_period_consolidation, 50) + 50
-
-        if isinstance(self.wait_for_confirmation_candle, bool):
-            self.wait_for_confirmation_candle = int(self.wait_for_confirmation_candle)
-        if self.wait_for_confirmation_candle > 3:
-            self.logger.warning(f"[Config] wait_for_confirmation_candle={self.wait_for_confirmation_candle} is high. Most guides recommend 1–2 bars max.")
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
@@ -536,7 +546,12 @@ class BreakoutTradingStrategy(SignalGenerator):
             if breakout_high is not None and hammer.iloc[confirmation_bar_idx] and candle['low'] < consolidation['breakout_low']:
                 pinbar_rejection = True
                 self.logger.info(f"[Signal] {sym}: Pin bar/hammer detected at resistance breakout level outside consolidation. Filtering out false breakout.")
-            if breakout_low is not None and shooting_star.iloc[confirmation_bar_idx] and candle['high'] > consolidation['breakout_high']:
+            if (
+                breakout_low is not None and
+                shooting_star.iloc[confirmation_bar_idx] and
+                consolidation['breakout_high'] is not None and
+                candle['high'] > consolidation['breakout_high']
+            ):
                 pinbar_rejection = True
                 self.logger.info(f"[Signal] {sym}: Shooting star detected at support breakout level outside consolidation. Filtering out false breakout.")
             if pinbar_rejection:

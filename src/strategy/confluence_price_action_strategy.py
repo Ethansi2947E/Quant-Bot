@@ -48,6 +48,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                  higher_timeframe: str = "H1",
                  ma_period: int = 21,
                  fib_levels=(0.5, 0.618),
+                 use_fibonacci: bool = False,  # Added: Make Fibonacci optional
                  risk_percent: float = 0.01,
                  min_risk_reward: float = 2.0,
                  partial_profit_rr: float = 1.0,
@@ -59,18 +60,21 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                  adx_threshold: float = 15.0,  # Lowered from 18.0 to 15.0
                  use_range_filter: bool = True,
                  range_ratio_threshold: float = 0.4,
+                 lookback_period: int = 300,
                  **kwargs):
         """
         Args:
             ...
+            use_fibonacci (bool): Whether to use Fibonacci retracement levels for confluence. Default True.
             adx_threshold (float): ADX threshold for trend regime. Default 15.0 (lowered for flexibility).
             range_ratio_threshold (float): Threshold for range_ratio to define ranging. Default 0.4.
         """
         super().__init__(**kwargs)
+        self.use_fibonacci = use_fibonacci  # Move this assignment early
         self.name = "ConfluencePriceActionStrategy"
         self.description = (
             "Trend-follow pullbacks at key levels with candlestick confirmation, "
-            "Fibonacci + MA confluence, fixed-fraction risk sizing"
+            f"{'Fibonacci + ' if self.use_fibonacci else ''}MA confluence, fixed-fraction risk sizing"
         )
         self.version = "1.0.0"
 
@@ -112,7 +116,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         self.processed_zones = {}  # {(symbol, zone_type, zone_price): last_processed_timestamp}
         self.signal_cooldown = 86400  # 24 hours in seconds
 
-        self.lookback_period = max(self.ma_period, 50) + 50  # Dynamic lookback
+        self.lookback_period = lookback_period
 
     def _load_timeframe_profile(self):
         """
@@ -270,21 +274,30 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     acceptance = False
                     rejection = False
                     acceptance_tol = level['level'] * self.price_tolerance
-                    # Acceptance: strong close through level, small wick
+                    
+                    # Get volume confirmation for the current candle
+                    volume_score, volume_details = self._analyze_volume_quality(primary, idx, trend)
+                    volume_confirmed = volume_score >= 0.3  # Reduced threshold from 0.5 to 0.3 for more signals
+                    
+                    # Acceptance: strong close through level, small wick, WITH volume confirmation
                     if trend == 'bullish':
                         if (
                             candle['open'] < level['level'] and
                             candle['close'] > level['level'] and
-                            (candle['high'] - candle['close']) < acceptance_tol
+                            (candle['high'] - candle['close']) < acceptance_tol and
+                            volume_confirmed  # Added volume requirement
                         ):
                             acceptance = True
+                            logger.debug(f"[Acceptance] Bullish breakout acceptance with volume score {volume_score:.2f}")
                     else:
                         if (
                             candle['open'] > level['level'] and
                             candle['close'] < level['level'] and
-                            (candle['close'] - candle['low']) < acceptance_tol
+                            (candle['close'] - candle['low']) < acceptance_tol and
+                            volume_confirmed  # Added volume requirement
                         ):
                             acceptance = True
+                            logger.debug(f"[Acceptance] Bearish breakout acceptance with volume score {volume_score:.2f}")
                     # Rejection: false break then close back inside
                     if trend == 'bullish':
                         if (
@@ -308,9 +321,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                             'close': candle['close'],
                             'level': level['level'],
                             'wick_size': (candle['high'] - candle['close']) if trend == 'bullish' else (candle['close'] - candle['low']),
-                            'acceptance_tol': acceptance_tol
+                            'acceptance_tol': acceptance_tol,
+                            'volume_score': volume_score,
+                            'volume_confirmed': volume_confirmed
                         }
-                        logger.debug(f"Breakout Acceptance detected at idx={idx} for {sym}")
+                        logger.debug(f"Breakout Acceptance detected at idx={idx} for {sym} with volume score {volume_score:.2f}")
                     elif rejection:
                         pattern = 'Rejection Reversal'
                         pattern_details = {
@@ -318,9 +333,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                             'close': candle['close'],
                             'level': level['level'],
                             'wick_size': (candle['high'] - candle['close']) if trend == 'bullish' else (candle['close'] - candle['low']),
-                            'acceptance_tol': acceptance_tol
+                            'acceptance_tol': acceptance_tol,
+                            'volume_score': volume_score,
+                            'volume_confirmed': volume_confirmed
                         }
-                        logger.debug(f"Rejection Reversal detected at idx={idx} for {sym}")
+                        logger.debug(f"Rejection Reversal detected at idx={idx} for {sym} with volume score {volume_score:.2f}")
                     
                     if not pattern:
                         logger.debug(f"No valid pattern detected at idx={idx} for {sym} at level {level['level']:.5f}")
@@ -328,10 +345,10 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     
                     logger.debug(f"{sym}: Found {pattern} pattern at {candle.name}")
                     
-                    # 5. Confluence: Fibonacci or MA
-                    fib_ok = self._check_fibonacci(primary, level['level'], True)
+                    # 5. Confluence: Fibonacci or MA  
+                    fib_ok = self._check_fibonacci(primary, level['level'], self.use_fibonacci)
                     fib_details = {}
-                    if fib_ok:
+                    if fib_ok and self.use_fibonacci:
                         high = primary['high'].max()
                         low = primary['low'].min()
                         for f in self.fib_levels:
@@ -379,11 +396,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     # Optional/bonus factors
                     fib_score = 0.3 if fib_ok else 0.0
                     ma_score = 0.3 if ma_ok else 0.0
-                    volume_score, volume_details = self._analyze_volume_quality(primary, idx=-1, direction=trend)
-                    volume_score = min(max(volume_score, 0.0), 0.2)  # Clamp to [0, 0.2]
+                    # Reuse volume analysis from acceptance logic (volume_score, volume_details already calculated)
+                    confluence_volume_score = min(max(volume_score, 0.0), 0.2)  # Clamp to [0, 0.2] for confluence scoring
                     level_strength_score = min(0.2, level['strength'] / 5.0)  # Scaled bonus
                     # Total score
-                    confluence_total = htf_trend_score + htf_sr_score + pattern_score + fib_score + ma_score + volume_score + level_strength_score
+                    confluence_total = htf_trend_score + htf_sr_score + pattern_score + fib_score + ma_score + confluence_volume_score + level_strength_score
                     # Minimum score to trigger trade
                     min_score = 2.2
                     # Allow slightly weaker S/R or filter if total score >= 2.5
@@ -395,7 +412,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         if confluence_total < min_score:
                             logger.debug(f"[ConfluenceScoring] Signal for {sym} at {level['level']:.5f} rejected: total score {confluence_total:.2f} < {min_score}")
                             continue
-                    logger.info(f"[ConfluenceScoring] {sym} {pattern} at {level_type} {level['level']:.5f}: htf_trend={htf_trend_score}, htf_sr={htf_sr_score}, pattern={pattern_score}, fib={fib_score}, ma={ma_score}, volume={volume_score}, sr_strength={level_strength_score}, total={confluence_total}")
+                    logger.info(f"[ConfluenceScoring] {sym} {pattern} at {level_type} {level['level']:.5f}: htf_trend={htf_trend_score}, htf_sr={htf_sr_score}, pattern={pattern_score}, fib={fib_score}, ma={ma_score}, volume={confluence_volume_score}, sr_strength={level_strength_score}, total={confluence_total}")
                     
                     # 6. Assemble signal
                     # Use the pattern's close as entry, not the latest bar
@@ -472,7 +489,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     )
                     
                     # Build concise analysis string
-                    volume_desc = "strong volume" if volume_score > 1 else ("adequate volume" if volume_score > 0 else "weak volume")
+                    volume_desc = "strong volume" if volume_score > 0.7 else ("adequate volume" if volume_score > 0.3 else "weak volume")
                     rationale = f"Detected a {pattern} at {level_type}, suggesting a potential {direction} reversal. Volume is {volume_desc}, supporting the signal."
                     concise_analysis = f"📝 Analysis:\n{direction.capitalize()} reversal ({pattern}) at {level_type} {level['level']:.5f} with {volume_desc}.\nRationale: {rationale}"
                     reasoning = [concise_analysis]
@@ -524,7 +541,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     norm_pattern_score = min(max(pattern_score, 0.0), 1.0)
                     # Confluence: sum of htf_trend_score, htf_sr_score, fib_score, ma_score, level_strength_score (max 4.5)
                     norm_confluence_score = min(max((htf_trend_score + htf_sr_score + fib_score + ma_score + level_strength_score) / 4.5, 0.0), 1.0)
-                    norm_volume_score = min(max(volume_score / 0.2, 0.0), 1.0)  # 0.2 is max volume score
+                    norm_volume_score = min(max(confluence_volume_score / 0.2, 0.0), 1.0)  # 0.2 is max volume score
                     norm_recency_score = 0.0  # Placeholder, set to 0 unless recency logic is added
                     # Weighted sum for signal quality/confidence
                     signal_quality = (
@@ -543,7 +560,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         "dynamic_exits": exits,
                         "timeframe": self.primary_timeframe,
                         "confidence": signal_quality,  # Normalized 0-1
-                        "source": self.name,
+                        "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                         "pattern": pattern,
                         "confluence": {"fib": fib_ok, "ma": ma_ok},
                         "pattern_details": pattern_details,
@@ -1218,16 +1235,45 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                 }
         return {}
 
-    def _is_acceptance(self, df: pd.DataFrame, level: float, direction: str, bars: int = 2, tol: float = 0.001) -> bool:
-        """Check if price has accepted above (bullish) or below (bearish) a level for N bars."""
+    def _is_acceptance(self, df: pd.DataFrame, level: float, direction: str, bars: int = 1, tol: float = 0.001) -> bool:
+        """
+        Check if price has accepted above (bullish) or below (bearish) a level for N bars.
+        Relaxed to 1 bar default (per book's single-candle examples) with strong volume confirmation.
+        """
         if df is None or len(df) < bars:
             return False
-        closes = df['close'].iloc[-bars:]
+            
+        # Get the acceptance candle(s)
+        recent_candles = df.iloc[-bars:]
+        
+        # Check price acceptance
+        closes = recent_candles['close']
+        price_accepted = False
+        
         if direction == 'bullish':
-            # Using inclusive comparison to address borderline cases
-            return all(close >= level + level * tol for close in closes)
+            # Price must close above level with tolerance
+            price_accepted = all(close >= level + level * tol for close in closes)
         else:
-            return all(close <= level - level * tol for close in closes)
+            # Price must close below level with tolerance  
+            price_accepted = all(close <= level - level * tol for close in closes)
+        
+        if not price_accepted:
+            return False
+            
+        # Add volume confirmation for acceptance - require strong volume on acceptance candle
+        acceptance_candle_idx = len(df) - 1  # Latest candle
+        volume_score, volume_details = self._analyze_volume_quality(df, acceptance_candle_idx, direction)
+        
+        # Require at least moderate volume (score >= 0.3) for single-bar acceptance - reduced from 0.5
+        # This ensures the acceptance has conviction while being more lenient
+        volume_confirmed = volume_score >= 0.3
+        
+        if volume_confirmed:
+            logger.debug(f"[Acceptance] {direction} acceptance confirmed at level {level:.5f} with volume score {volume_score:.2f}")
+        else:
+            logger.debug(f"[Acceptance] {direction} acceptance rejected at level {level:.5f} due to weak volume (score: {volume_score:.2f})")
+            
+        return volume_confirmed
 
     def _analyze_volume_quality(self, df: pd.DataFrame, idx: int, direction: str) -> tuple:
         """Analyze volume quality for a given candle index and direction. Returns (score, details)."""
@@ -1254,7 +1300,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         logger.debug(f"[VolumeAnalysis] idx={idx}, direction={direction}, tick_volume={tick_volume}, threshold={threshold}, volume_ratio={volume_ratio:.2f}, total_range={total_range}, body={body}")
         if total_range == 0 or total_range < 0.00001:
             return 0.0, details
-        if volume_ratio < 0.2:
+        if volume_ratio < 0.15:  # Reduced threshold from 0.2 to 0.15 for more lenient volume filtering
             return 0.0, details
         score = 0.0
         if direction == 'buy':

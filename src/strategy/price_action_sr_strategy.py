@@ -29,6 +29,8 @@ class PriceActionSRStrategy(SignalGenerator):
     def __init__(
         self,
         primary_timeframe: str = "M15",
+        secondary_timeframe: Optional[str] = "H1",
+        trend_lookback: int = 300,
         pivot_window: int = 10,
         wick_threshold: float = 0.5,
         volume_multiplier: float = 1.3,
@@ -41,6 +43,8 @@ class PriceActionSRStrategy(SignalGenerator):
 
         Args:
             primary_timeframe (str): Timeframe for analysis (default M15)
+            secondary_timeframe (str): Higher timeframe for trend filter (default H1)
+            trend_lookback (int): Number of bars to use for trend detection (default 300)
             pivot_window (int): Window for pivot high/low detection
             wick_threshold (float): Wick % threshold for rejection
             volume_multiplier (float): Volume spike threshold
@@ -54,6 +58,8 @@ class PriceActionSRStrategy(SignalGenerator):
         self.description = "Rules-based price action S/R strategy"
         self.version = "1.0.0"
         self.primary_timeframe = primary_timeframe
+        self.secondary_timeframe = secondary_timeframe
+        self.trend_lookback = trend_lookback
         self.pivot_window = pivot_window
         self.wick_threshold = wick_threshold
         self.volume_multiplier = volume_multiplier
@@ -85,6 +91,8 @@ class PriceActionSRStrategy(SignalGenerator):
         
         # Log important parameters
         logger.info(f"Primary timeframe: {self.primary_timeframe}")
+        logger.info(f"Secondary timeframe: {self.secondary_timeframe}")
+        logger.info(f"Trend lookback: {self.trend_lookback}")
         logger.info(f"Pivot window: {self.pivot_window}")
         logger.info(f"Wick threshold: {self.wick_threshold}")
         logger.info(f"Volume multiplier: {self.volume_multiplier}")
@@ -351,27 +359,58 @@ class PriceActionSRStrategy(SignalGenerator):
 
     def _volume_spike(self, df: pd.DataFrame, idx: int) -> bool:
         """
-        Adaptive volume spike: True if current volume is above 85th percentile of last 40 bars (or 2x mean if not enough data).
-        Uses rolling quantile and mean columns for speed.
+        Enhanced adaptive volume spike: Multiple thresholds for more flexible volume validation.
+        Primary: 85th percentile, Secondary: 70th percentile, Fallback: 1.5× mean (reduced from 2×).
         """
         if 'vol_85q' not in df.columns or 'vol_rolling_mean' not in df.columns:
             df['vol_85q'] = df['tick_volume'].rolling(40, min_periods=10).quantile(0.85)
+            df['vol_70q'] = df['tick_volume'].rolling(40, min_periods=10).quantile(0.70)  # Added: Secondary threshold
             df['vol_rolling_mean'] = df['tick_volume'].rolling(40, min_periods=10).mean()
         if idx < 20:
             return False
         current_vol = df['tick_volume'].iloc[idx]
-        threshold = df['vol_85q'].iloc[idx]
+        threshold_85 = df['vol_85q'].iloc[idx]
+        threshold_70 = df.get('vol_70q', pd.Series([np.nan])).iloc[idx] if 'vol_70q' in df.columns else np.nan
         avg_vol = df['vol_rolling_mean'].iloc[idx]
-        if not np.isnan(threshold):
-            self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold}")
-            return current_vol >= threshold
+        
+        # Multi-tier volume validation
+        if not np.isnan(threshold_85) and current_vol >= threshold_85:
+            self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold_85} - STRONG SPIKE")
+            return True
+        elif not np.isnan(threshold_70) and current_vol >= threshold_70:
+            self.logger.debug(f"Volume spike check: current={current_vol}, 70th percentile={threshold_70} - MODERATE SPIKE")
+            return True
+        elif not np.isnan(avg_vol) and current_vol >= 1.5 * avg_vol:  # Reduced from 2× to 1.5×
+            self.logger.debug(f"Volume spike fallback: current={current_vol}, 1.5x mean={1.5*avg_vol} - BASIC SPIKE")
+            return True
         else:
-            self.logger.debug(f"Volume spike fallback: current={current_vol}, 2x mean={2*avg_vol}")
-            return current_vol >= 2 * avg_vol
-
-    def is_valid_volume_spike(self, candle, volume_spike: bool) -> bool:
-        if not volume_spike:
+            self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold_85}, 70th percentile={threshold_70}, 1.5x mean={1.5*avg_vol if not np.isnan(avg_vol) else 'N/A'} - NO SPIKE")
             return False
+
+    def is_valid_volume_spike(self, candle, volume_spike: bool, df: pd.DataFrame) -> bool:
+        # If volume spike already failed, try more lenient validation
+        if not volume_spike:
+            # Enhanced fallback: check if volume is at least above average with good pattern
+            if df is not None and 'tick_volume' in df.columns:
+                current_vol = candle.get('tick_volume', 0)
+                avg_vol = df['tick_volume'].rolling(20, min_periods=5).mean().iloc[-1]
+                
+                if not np.isnan(avg_vol) and current_vol > avg_vol:
+                    # Above average volume - check for excellent pattern
+                    body = abs(candle['close'] - candle['open'])
+                    total_range = candle['high'] - candle['low']
+                    
+                    if total_range > 0:
+                        body_ratio = body / total_range
+                        # Very strict pattern requirement for low volume
+                        if body_ratio > 0.7:  # Strong body dominance
+                            self.logger.debug(f"[VolumeWick] Low volume accepted due to excellent pattern: body_ratio={body_ratio:.2f}")
+                            return True
+            
+            self.logger.debug("[VolumeWick] Volume spike failed and no pattern override available")
+            return False
+            
+        # Original logic for when volume spike is detected
         body = abs(candle['close'] - candle['open'])
         total_range = candle['high'] - candle['low']
         if total_range == 0:
@@ -381,7 +420,7 @@ class PriceActionSRStrategy(SignalGenerator):
         lower_wick = min(candle['open'], candle['close']) - candle['low']
         upper_wick_ratio = upper_wick / total_range
         lower_wick_ratio = lower_wick / total_range
-        # Relaxed thresholds
+        # Relaxed thresholds (kept as is since they're already reasonable)
         is_bullish_volume = upper_wick_ratio < 0.6
         is_bearish_volume = lower_wick_ratio < 0.6
         combined_valid = body > 0 and ((upper_wick + lower_wick) / body < 2.0)
@@ -643,33 +682,42 @@ class PriceActionSRStrategy(SignalGenerator):
 
     @property
     def required_timeframes(self):
-        return [self.primary_timeframe]
+        tfs = [self.primary_timeframe]
+        if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
+            tfs.append(self.secondary_timeframe)
+        return tfs
 
     @property
     def lookback_periods(self):
-        # Use the minimum bars needed for your logic, e.g. pivot_window + 21
-        return {self.primary_timeframe: max(self.pivot_window + 21, 100)}
+        periods = {self.primary_timeframe: max(self.pivot_window + 21, self.trend_lookback, 100)}
+        if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
+            periods[self.secondary_timeframe] = self.trend_lookback
+        return periods
 
     def is_uptrend(self, df: pd.DataFrame) -> bool:
-        if len(df) < 6:
+        if df is None or len(df) < self.trend_lookback:
             return False
-        higher_high = df['high'].iloc[-1] > df['high'].iloc[-5]
-        higher_low = df['low'].iloc[-1] > df['low'].iloc[-5]
-        recent_strong_move = df['close'].iloc[-1] > df['close'].iloc[-3]
+        highs = df['high'].iloc[-self.trend_lookback:]
+        lows = df['low'].iloc[-self.trend_lookback:]
+        closes = df['close'].iloc[-self.trend_lookback:]
+        higher_high = highs.iloc[-1] > highs.iloc[0]
+        higher_low = lows.iloc[-1] > lows.iloc[0]
+        recent_strong_move = closes.iloc[-1] > closes.iloc[-3] if len(closes) > 3 else False
         self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}, recent_strong_move={recent_strong_move}")
-        self.logger.debug(f"[TrendCheck] Last 5 bars: highs={df['high'].iloc[-5:].tolist()}, lows={df['low'].iloc[-5:].tolist()}")
-        # Relaxed: pass if any of the three is true
+        self.logger.debug(f"[TrendCheck] Last {self.trend_lookback} bars: highs={highs.tolist()[:5]}...{highs.tolist()[-5:]}, lows={lows.tolist()[:5]}...{lows.tolist()[-5:]}")
         return higher_high or higher_low or recent_strong_move
 
     def is_downtrend(self, df: pd.DataFrame) -> bool:
-        if len(df) < 6:
+        if df is None or len(df) < self.trend_lookback:
             return False
-        lower_high = df['high'].iloc[-1] < df['high'].iloc[-5]
-        lower_low = df['low'].iloc[-1] < df['low'].iloc[-5]
-        recent_strong_move = df['close'].iloc[-1] < df['close'].iloc[-3]
+        highs = df['high'].iloc[-self.trend_lookback:]
+        lows = df['low'].iloc[-self.trend_lookback:]
+        closes = df['close'].iloc[-self.trend_lookback:]
+        lower_high = highs.iloc[-1] < highs.iloc[0]
+        lower_low = lows.iloc[-1] < lows.iloc[0]
+        recent_strong_move = closes.iloc[-1] < closes.iloc[-3] if len(closes) > 3 else False
         self.logger.debug(f"[TrendCheck] Downtrend analysis: lower_high={lower_high}, lower_low={lower_low}, recent_strong_move={recent_strong_move}")
-        self.logger.debug(f"[TrendCheck] Last 5 bars: highs={df['high'].iloc[-5:].tolist()}, lows={df['low'].iloc[-5:].tolist()}")
-        # Relaxed: pass if any of the three is true
+        self.logger.debug(f"[TrendCheck] Last {self.trend_lookback} bars: highs={highs.tolist()[:5]}...{highs.tolist()[-5:]}, lows={lows.tolist()[:5]}...{lows.tolist()[-5:]}")
         return lower_high or lower_low or recent_strong_move
 
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
@@ -686,16 +734,31 @@ class PriceActionSRStrategy(SignalGenerator):
             logger.info(f"Analyzing {sym} with {self.name}")
             df = market_data[sym]
             if isinstance(df, dict):
-                df = df.get(self.primary_timeframe)
-            if df is None or len(df) < self.pivot_window + 21:
-                logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df) if df is not None else 0}")
+                df_primary = df.get(self.primary_timeframe)
+                df_secondary = df.get(self.secondary_timeframe) if self.secondary_timeframe else None
+            else:
+                df_primary = df
+                df_secondary = None
+            if df_primary is None or len(df_primary) < self.pivot_window + 21:
+                logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df_primary) if df_primary is not None else 0}")
                 continue
+            # Higher timeframe trend filter
+            ht_trend_ok = True
+            if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
+                if df_secondary is None or len(df_secondary) < self.trend_lookback:
+                    logger.warning(f"Insufficient data for {sym} secondary timeframe {self.secondary_timeframe}: Need {self.trend_lookback} bars, got {len(df_secondary) if df_secondary is not None else 0}")
+                    ht_trend_ok = False
+                else:
+                    uptrend_ht = self.is_uptrend(df_secondary)
+                    downtrend_ht = self.is_downtrend(df_secondary)
+            else:
+                uptrend_ht = downtrend_ht = True
 
             bar_key = (sym, self.primary_timeframe)
             last_timestamp = None
 
             try:
-                last_timestamp = pd.to_datetime(df.index[-1])
+                last_timestamp = pd.to_datetime(df_primary.index[-1])
                 last_timestamp_str = str(last_timestamp)
             except:
                 logger.warning(f"Could not extract timestamp from dataframe for {sym}")
@@ -708,30 +771,20 @@ class PriceActionSRStrategy(SignalGenerator):
             self.processed_bars[bar_key] = last_timestamp_str
             logger.debug(f"Processing new bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
 
-            df = df.copy()
-            if 'tick_volume' not in df.columns:
-                df['tick_volume'] = df.get('volume', 1)
+            df_primary = df_primary.copy()
+            if 'tick_volume' not in df_primary.columns:
+                df_primary['tick_volume'] = df_primary.get('volume', 1)
 
-            zones = self.get_sr_zones(df)
+            zones = self.get_sr_zones(df_primary)
             symbol_signals = []
 
             for direction, zone_list in [('buy', zones['support']), ('sell', zones['resistance'])]:
                 zone_type = 'support' if direction == 'buy' else 'resistance'
+                # Higher timeframe filter: only allow buy if uptrend_ht, sell if downtrend_ht
+                if not ht_trend_ok or (direction == 'buy' and not uptrend_ht) or (direction == 'sell' and not downtrend_ht):
+                    self.logger.debug(f"[HTF Trend Filter] Skipping {direction} signal for {sym}: HTF trend does not confirm.")
+                    continue
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
-
-                # PDF-aligned trend validation
-                if direction == 'buy':
-                    uptrend = self.is_uptrend(df)
-                    self.logger.debug(f"[Trend] {sym} uptrend={uptrend}")
-                    if not uptrend:
-                        self.logger.debug(f"[Skip] {sym} buy: not in uptrend.")
-                        continue
-                else:
-                    downtrend = self.is_downtrend(df)
-                    self.logger.debug(f"[Trend] {sym} downtrend={downtrend}")
-                    if not downtrend:
-                        self.logger.debug(f"[Skip] {sym} sell: not in downtrend.")
-                        continue
 
                 for zone in zone_list:
                     zone_key = (sym, zone_type, round(zone, 5))
@@ -743,18 +796,18 @@ class PriceActionSRStrategy(SignalGenerator):
                             hours_remaining = cooldown_remaining / 3600
                             logger.debug(f"Skipping {zone_type} zone {zone:.5f} - on cooldown for {hours_remaining:.1f} more hours")
                             continue
-                    zone_touches = int(self._is_in_zone(df['close'], zone).sum())
-                    idx = len(df) - 1
+                    zone_touches = int(self._is_in_zone(df_primary['close'], zone).sum())
+                    idx = len(df_primary) - 1
                     process_idx = idx - 1
                     if process_idx < self.pivot_window + 20:
                         logger.debug(f"Not enough bars to check for patterns at index {process_idx}")
                         continue
-                    candle = df.iloc[process_idx]
+                    candle = df_primary.iloc[process_idx]
                     in_zone = self._bar_touches_zone(candle, zone, direction)
-                    pattern = self._pattern_match(df, process_idx, direction)
+                    pattern = self._pattern_match(df_primary, process_idx, direction)
                     wick = self._wick_rejection(candle, direction)
-                    vol_spike = self._volume_spike(df, process_idx)
-                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike)
+                    vol_spike = self._volume_spike(df_primary, process_idx)
+                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike, df_primary)
                     # Granular logging for all filters
                     logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern} wick={wick} vol_spike={vol_spike} vol_wick_ok={vol_wick_ok}")
                     if not in_zone:
@@ -767,10 +820,10 @@ class PriceActionSRStrategy(SignalGenerator):
                         logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: volume-wick confirmation failed.")
                         continue
                     # Calculate volume score (how much above threshold)
-                    avg_vol = df['tick_volume'].iloc[process_idx-20:process_idx].mean()
-                    current_vol = df['tick_volume'].iloc[process_idx]
+                    avg_vol = df_primary['tick_volume'].iloc[process_idx-20:process_idx].mean()
+                    current_vol = df_primary['tick_volume'].iloc[process_idx]
                     volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 1.0) if avg_vol > 0 else 0.0
-                    entry = df['open'].iloc[idx] if idx < len(df) else candle['close']
+                    entry = df_primary['open'].iloc[idx] if idx < len(df_primary) else candle['close']
                     stop = self.calculate_stop_loss(zone, direction)
                     opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
                     tp = None
@@ -816,8 +869,8 @@ class PriceActionSRStrategy(SignalGenerator):
                         'volume_score': volume_score,
                         'bar_index': int(process_idx),
                         'risk_reward': float(risk_reward),
-                        'signal_timestamp': str(df.index[process_idx]),
-                        'source': self.name,
+                        'signal_timestamp': str(df_primary.index[process_idx]),
+                        'strategy_name': self.name,
                         'score_01': score_01,
                         'score_breakdown': score_breakdown
                     }
@@ -831,7 +884,7 @@ class PriceActionSRStrategy(SignalGenerator):
                 symbol_signals = self._prioritize_signals(symbol_signals)
                 logger.info(f"Prioritized {len(all_signals)} signals down to {len(symbol_signals)} for {sym}")
             signals.extend(symbol_signals)
-            self._log_debug_info(sym, df, zones, symbol_signals)
+            self._log_debug_info(sym, df_primary, zones, symbol_signals)
         cleanup_time = current_time - (self.signal_cooldown * 2)
         old_keys = [k for k, v in self.processed_zones.items() if v < cleanup_time]
         for k in old_keys:

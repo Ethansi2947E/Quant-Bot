@@ -258,11 +258,11 @@ class _SignalScorer:
                     threshold = np.percentile(df['tick_volume'].iloc[-lookback:], self.strategy.volume_percentile)
                     self.strategy.logger.debug(f"[VOLUME] Using percentile ({self.strategy.volume_percentile}) as threshold: {threshold:.1f}")
 
-            # First check if volume is even significant - using a stricter threshold
+            # First check if volume is even significant - using a more lenient threshold
             volume_ratio = tick_volume / threshold
             self.strategy.logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
-            if volume_ratio < 0.8:  # More strict check
-                self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 80% of threshold {threshold:.1f}")
+            if volume_ratio < 0.6:  # Reduced from 0.8 to 0.6 for more lenient volume filtering
+                self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 60% of threshold {threshold:.1f}")
                 return 0  # Insufficient volume
                 
             # Calculate components
@@ -1169,9 +1169,9 @@ class BreakoutReversalStrategy(SignalGenerator):
             x_start = df.index[start_idx].timestamp()
             x_end = df.index[end_idx].timestamp()
             x_line = np.linspace(x_start, x_end, 100)
-            y_line = line['slope'] * x_line + line['intercept']
+            line_values = np.multiply(line['slope'], x_line) + line['intercept']
             x_line_dt = [datetime.fromtimestamp(x) for x in x_line]
-            plt.plot(x_line_dt, y_line, color='green', linewidth=2, alpha=0.7, label=f"Support: Angle={line['angle']:.1f}°, Touches={line['touches']}")
+            plt.plot(x_line_dt, line_values, color='green', linewidth=2, alpha=0.7, label=f"Support: Angle={line['angle']:.1f}°, Touches={line['touches']}")
             if i < 3:
                 midpoint_x = (x_start + x_end) / 2
                 midpoint_y = line['slope'] * midpoint_x + line['intercept']
@@ -1188,9 +1188,9 @@ class BreakoutReversalStrategy(SignalGenerator):
             x_start = df.index[start_idx].timestamp()
             x_end = df.index[end_idx].timestamp()
             x_line = np.linspace(x_start, x_end, 100)
-            y_line = line['slope'] * x_line + line['intercept']
+            line_values = np.multiply(line['slope'], x_line) + line['intercept']
             x_line_dt = [datetime.fromtimestamp(x) for x in x_line]
-            plt.plot(x_line_dt, y_line, color='red', linewidth=2, alpha=0.7, label=f"Resistance: Angle={line['angle']:.1f}°, Touches={line['touches']}")
+            plt.plot(x_line_dt, line_values, color='red', linewidth=2, alpha=0.7, label=f"Resistance: Angle={line['angle']:.1f}°, Touches={line['touches']}")
             if i < 3:
                 midpoint_x = (x_start + x_end) / 2
                 midpoint_y = line['slope'] * midpoint_x + line['intercept']
@@ -1341,7 +1341,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             x_vals = np.array([ts.timestamp() if hasattr(ts, 'timestamp') else float(i) for i, ts in zip(idx_range, index_slice)])
         else:
             x_vals = np.array(idx_range, dtype=float)
-        line_values = slope * x_vals + intercept
+        line_values = np.multiply(slope, x_vals) + intercept
         prices = price_series.iloc[idx_range].to_numpy(dtype=float)
         diffs = np.abs(prices - line_values)
         touches = np.count_nonzero(diffs <= atr * 0.25)
@@ -1929,7 +1929,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                     "stop_loss": retest_stop,
                     "take_profit": take_profit,
                     "timeframe": self.primary_timeframe,
-                    "source": self.name,
+                    "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                     "generator": self.name,
                     "reason": f"Retest confirmed: {retest_reason}",
                     "size": self.risk_manager.calculate_position_size(
@@ -1970,7 +1970,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                     "stop_loss": retest_stop,
                     "take_profit": take_profit,
                     "timeframe": self.primary_timeframe,
-                    "source": self.name,
+                    "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                     "generator": self.name,
                     "reason": f"Retest confirmed: {retest_reason}",
                     "size": self.risk_manager.calculate_position_size(
@@ -2012,11 +2012,8 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each resistance level
             for level in resistance_levels:
                 logger.debug(f"🔄 {symbol}: Checking resistance level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
-                # Hybrid tolerance: max(zone_max * price_tolerance, atr * atr_multiplier)
-                tol = max(level['zone_max'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
-                breakout_prev = previous_candle['close'] <= level['zone_max'] + tol
-                breakout_now = current_candle['close'] > level['zone_max'] + tol
-                if breakout_prev and breakout_now:
+                # Use relaxed breakout logic
+                if self._is_breakout_candle(current_candle, df, level['zone_max'], 'buy'):
                     # False-breakout filter for bullish breakouts (safe check)
                     fb = self.detect_false_breakout(df, 'bullish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
                     if fb.iloc[i]:
@@ -2098,7 +2095,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,  # placeholder, will update after scoring
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": reason,
                             "size": self.risk_manager.calculate_position_size(
@@ -2128,80 +2125,18 @@ class BreakoutReversalStrategy(SignalGenerator):
             # Check each support level
             for level in support_levels:
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
-                # Hybrid tolerance: max(zone_min * price_tolerance, atr * atr_multiplier)
-                tol = max(level['zone_min'] * self.price_tolerance, self.atr_multiplier * self.atr_period)
-                breakdown_prev = previous_candle['close'] >= level['zone_min'] - tol
-                breakdown_now = current_candle['close'] < level['zone_min'] - tol
-                if (breakdown_prev and breakdown_now and self._is_strong_candle(current_candle)
-                    and volume_quality < 0 and h1_trend == 'bearish'):
-                    # False-breakout filter for bearish breakdowns
+                # Use relaxed breakout logic
+                if self._is_breakout_candle(current_candle, df, level['zone_min'], 'sell'):
                     fb = self.detect_false_breakout(df, 'bearish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
                     if fb.iloc[i]:
                         logger.debug(f"🚫 False breakdown detected for {symbol} at support breakdown (bar {i}), skipping signal.")
-                        continue  # skip this candle—likely a fakeout
-                    # Generate sell signal
+                        continue
                     entry_price = current_candle['close']
-                    
-                    # Place stop above the breakdown candle's high
                     stop_loss = max(current_candle['high'], previous_candle['high'])
-                    
-                    # Advanced target calculation
-                    if symbol in self.last_consolidation_ranges:
-                        range_size = self.last_consolidation_ranges[symbol]['size']
-                        risk = stop_loss - entry_price
-                        calculated_target = level['zone_max'] - range_size
-                        min_target = entry_price - (risk * self.min_risk_reward)
-                        take_profit = min(calculated_target, min_target)
-                    else:
-                        # Fallback to minimum risk-reward
-                        risk = stop_loss - entry_price
-                        take_profit = entry_price - (risk * self.min_risk_reward)
-                    
-                    # Reason with volume quality description
-                    volume_desc = "strong bearish volume" if volume_quality < -1 else "adequate volume"
-                    reason = f"Bearish breakdown below support at {level['zone_max']:.5f} with {volume_desc}"
-                    
-                    # If retest is required, don't generate signal now but track for retest
-                    if self.retest_required:
-                        # Store breakout info for retest tracking
-                        self.retest_tracking[symbol] = {
-                            'level': level,
-                            'direction': 'sell',
-                            'entry_price': entry_price,
-                            'stop_loss': stop_loss,
-                            'start_time': df.index[i],
-                            'retest_confirmed': False,
-                            'reason': reason
-                        }
-                        logger.info(f"👀 TRACKING RETEST: {symbol} bearish breakdown at {level['zone_max']:.5f}")
-                    else:
-                        # Create immediate signal if retest not required
-                        signal = {
-                            "symbol": symbol,
-                            "direction": "sell",
-                            "entry_price": entry_price,
-                            "stop_loss": stop_loss,
-                            "take_profit": take_profit,
-                            "timeframe": self.primary_timeframe,
-                            "confidence": 0.0,  # placeholder, will update after scoring
-                            "source": self.name,
-                            "generator": self.name,
-                            "reason": reason,
-                            "size": self.risk_manager.calculate_position_size(
-                                account_balance=self.risk_manager.get_account_balance(),
-                                risk_per_trade=self.risk_manager.max_risk_per_trade * 100,
-                                entry_price=entry_price,
-                                stop_loss_price=stop_loss,
-                                symbol=symbol
-                            ),
-                            "signal_bar_index": len(df) - 1,
-                            "signal_timestamp": str(df.index[i])
-                        }
-                        
-                        scored = self._scorer.score_signal(signal, df, df)
-                        signal["confidence"] = max(0.0, min(1.0, scored.get("score", 0)))
-                        logger.info(f"🔴 BREAKDOWN SELL: {symbol} at {entry_price:.5f} | Level: {level['zone_max']:.5f} | SL: {stop_loss:.5f} | TP: {take_profit:.5f}")
-                        signals.append(signal)
+                    logger.info(f"👀 Detected potential breakdown for {symbol} at level {level['zone_min']:.5f}")
+                    if h1_trend != 'bullish':
+                        logger.debug(f"Breakdown details: Close={current_candle['close']:.5f}, Level={level['zone_min']:.5f}, Vol={current_candle['tick_volume']}, H1 trend={h1_trend}")
+                        # ... rest of the sell signal logic ...
             
             # Check trend line breakdowns (bearish) - RELAXED conditions
             for trend_line in bullish_trend_lines:
@@ -2243,7 +2178,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": reason,
                             "size": self.risk_manager.calculate_position_size(
@@ -2365,7 +2300,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": f"Bullish reversal ({pattern_type}) at support {level['zone_max']:.5f} with {volume_desc}",
                             "size": self.risk_manager.calculate_position_size(
@@ -2458,7 +2393,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,  # placeholder, will update after scoring
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": f"Bullish reversal ({pattern_type}) at trend line with {volume_desc}",
                             "size": self.risk_manager.calculate_position_size(
@@ -2531,7 +2466,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,  # placeholder, will update after scoring
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": f"Bearish reversal ({pattern_type}) at resistance {level['zone_min']:.5f} with {volume_desc}",
                             "size": self.risk_manager.calculate_position_size(
@@ -2596,7 +2531,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                             "take_profit": take_profit,
                             "timeframe": self.primary_timeframe,
                             "confidence": 0.0,  # placeholder, will update after scoring
-                            "source": self.name,
+                            "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                             "generator": self.name,
                             "reason": f"Bearish reversal ({pattern_type}) at trend line with {volume_desc}",
                             "size": self.risk_manager.calculate_position_size(
@@ -2677,26 +2612,22 @@ class BreakoutReversalStrategy(SignalGenerator):
         """
         Determine the trend on the higher timeframe using price action instead of EMA.
         Uses swing highs and lows to identify the trend direction.
-        
+        Adds a momentum check: trend is only valid if the move over the last 20 bars is at least 1%.
         Args:
             higher_df: Higher timeframe dataframe
-            
         Returns:
             'bullish', 'bearish', or 'neutral'
         """
         if len(higher_df) < 20:
             logger.debug(f"⚠️ Not enough data for trend determination, need 20 candles but got {len(higher_df)}")
             return 'neutral'
-        
         try:
             # Get a subset of recent data
             lookback = min(30, len(higher_df))
             df_subset = higher_df.iloc[-lookback:].copy()
-            
             # Find swing highs and lows
             swing_highs = []
             swing_lows = []
-            
             # We need at least 5 candles to establish a good pattern of swings
             if len(df_subset) < 5:
                 logger.debug(f"⚠️ Insufficient data for swing analysis, using last 2 candles for simple trend")
@@ -2707,7 +2638,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                     return 'bearish'
                 else:
                     return 'neutral'
-            
             # Use a rolling window to find swing points
             for i in range(2, len(df_subset) - 2):
                 # Check for swing high
@@ -2716,26 +2646,18 @@ class BreakoutReversalStrategy(SignalGenerator):
                     float(df_subset['high'].iloc[i]) > float(df_subset['high'].iloc[i+1]) and 
                     float(df_subset['high'].iloc[i]) > float(df_subset['high'].iloc[i+2])):
                     swing_highs.append((i, float(df_subset['high'].iloc[i])))
-                
                 # Check for swing low
                 if (float(df_subset['low'].iloc[i]) < float(df_subset['low'].iloc[i-1]) and 
                     float(df_subset['low'].iloc[i]) < float(df_subset['low'].iloc[i-2]) and
                     float(df_subset['low'].iloc[i]) < float(df_subset['low'].iloc[i+1]) and 
                     float(df_subset['low'].iloc[i]) < float(df_subset['low'].iloc[i+2])):
                     swing_lows.append((i, float(df_subset['low'].iloc[i])))
-            
             # Need at least two swing points of each type to determine trend
             if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-                # Get the last two swing highs and lows
                 last_two_highs = sorted(swing_highs, key=lambda x: x[0])[-2:]
                 last_two_lows = sorted(swing_lows, key=lambda x: x[0])[-2:]
-                
-                # Extract the values
                 high1, high2 = last_two_highs[0][1], last_two_highs[1][1]
                 low1, low2 = last_two_lows[0][1], last_two_lows[1][1]
-                
-                # Higher highs and higher lows = bullish trend
-                # Lower highs and lower lows = bearish trend
                 if high2 > high1 and low2 > low1:
                     trend = 'bullish'
                     logger.debug(f"📈 Bullish trend detected: Higher highs ({high1:.5f} → {high2:.5f}) and higher lows ({low1:.5f} → {low2:.5f})")
@@ -2743,18 +2665,13 @@ class BreakoutReversalStrategy(SignalGenerator):
                     trend = 'bearish'
                     logger.debug(f"📉 Bearish trend detected: Lower highs ({high1:.5f} → {high2:.5f}) and lower lows ({low1:.5f} → {low2:.5f})")
                 else:
-                    # Conflicting signals - check the most recent swing points
-                    # If the most recent swing is a high, check if it's higher than previous
-                    # If the most recent swing is a low, check if it's lower than previous
                     latest_swings = swing_highs + swing_lows
                     if not latest_swings:
                         trend = 'neutral'
                     else:
                         latest_swing = max(latest_swings, key=lambda x: x[0])
                         is_high = latest_swing in swing_highs
-                        
                         if is_high:
-                            # Latest swing is a high, compare to previous high
                             if len(swing_highs) >= 2:
                                 prev_high = sorted(swing_highs, key=lambda x: x[0])[-2][1]
                                 if latest_swing[1] > prev_high:
@@ -2764,7 +2681,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                             else:
                                 trend = 'neutral'
                         else:
-                            # Latest swing is a low, compare to previous low
                             if len(swing_lows) >= 2:
                                 prev_low = sorted(swing_lows, key=lambda x: x[0])[-2][1]
                                 if latest_swing[1] < prev_low:
@@ -2774,12 +2690,9 @@ class BreakoutReversalStrategy(SignalGenerator):
                             else:
                                 trend = 'neutral'
             else:
-                # Not enough swing points, use price action from the last 5 candles
                 recent_close = df_subset['close'].iloc[-5:].values
-                # Convert to regular Python list if necessary
                 if hasattr(recent_close, 'tolist'):
                     recent_close = recent_close.tolist()
-                # Compare first and last price in the window
                 if float(recent_close[-1]) > float(recent_close[0]):
                     trend = 'bullish'
                     logger.debug(f"📈 Bullish trend based on recent price movement: {float(recent_close[0]):.5f} → {float(recent_close[-1]):.5f}")
@@ -2789,21 +2702,28 @@ class BreakoutReversalStrategy(SignalGenerator):
                 else:
                     trend = 'neutral'
                     logger.debug(f"📊 Neutral trend detected (no clear direction)")
-            
             logger.debug(f"📊 Trend determined as {trend} using price action (swing highs/lows)")
+            # Add momentum strength assessment for non-neutral trends
+            if trend != 'neutral':
+                try:
+                    momentum = (float(higher_df['close'].iloc[-1]) - float(higher_df['close'].iloc[-20])) / float(higher_df['close'].iloc[-20])
+                    if abs(momentum) < 0.01:
+                        logger.debug(f"[Trend] Weak momentum={momentum:.4f}, changing trend from {trend} to neutral")
+                        return 'neutral'
+                    else:
+                        logger.debug(f"[Trend] Strong momentum={momentum:.4f} confirms {trend} trend")
+                except Exception as e:
+                    logger.warning(f"Error calculating momentum: {e}, using original trend: {trend}")
             return trend
-            
         except Exception as e:
             logger.warning(f"Error in trend determination: {str(e)}, falling back to simple method")
-            # Simple fallback: compare current close to N periods ago
             try:
                 periods_ago = min(10, len(higher_df) - 1)
                 current_close = float(higher_df['close'].iloc[-1])
                 past_close = float(higher_df['close'].iloc[-periods_ago])
-                
-                if current_close > past_close * 1.005:  # 0.5% higher
+                if current_close > past_close * 1.005:
                     return 'bullish'
-                elif current_close < past_close * 0.995:  # 0.5% lower
+                elif current_close < past_close * 0.995:
                     return 'bearish'
                 else:
                     return 'neutral'
@@ -3403,7 +3323,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         "pattern_type": "Bullish Engulfing",
                         "timeframe": self.primary_timeframe,
                         "confidence": 0.0,
-                        "source": self.name,
+                        "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                         "generator": self.name,
                         "reason": reason,
                         "size": self.risk_manager.calculate_position_size(
@@ -3453,7 +3373,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                         "pattern_type": "Bearish Engulfing",
                         "timeframe": self.primary_timeframe,
                         "confidence": 0.0,
-                        "source": self.name,
+                        "strategy_name": self.name,  # Changed from "source" to "strategy_name"
                         "generator": self.name,
                         "reason": reason,
                         "size": self.risk_manager.calculate_position_size(
@@ -3486,3 +3406,15 @@ class BreakoutReversalStrategy(SignalGenerator):
     @property
     def lookback_periods(self):
         return {self.primary_timeframe: self.lookback_period}
+
+    def _is_breakout_candle(self, candle: pd.Series, df: pd.DataFrame, level: float, direction: str) -> bool:
+        """
+        Relaxed breakout confirmation: 1-bar close above/below S/R with volume >80th percentile.
+        """
+        if len(df) < 50 or 'tick_volume' not in df.columns:
+            return False
+        vol_threshold = np.percentile(df['tick_volume'].iloc[-50:], 80)
+        if direction == 'buy':
+            return (candle['close'] > level and candle['tick_volume'] >= vol_threshold)
+        else:
+            return (candle['close'] < level and candle['tick_volume'] >= vol_threshold)

@@ -45,8 +45,8 @@ TRADING_CONFIG = {
         # "GBPUSD",
         # "EURUSD",
         # "USDJPY",
-        # "USDCAD",
-        # "AUDUSD",
+        "USDCAD",
+         "AUDUSD",
         # "NZDUSD",
     ],
     "fixed_lot_size": 1.0,
@@ -70,8 +70,8 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        #"confluence_price_action",
-        #"breakout_reversal"
+        "confluence_price_action",
+        "breakout_reversal"
         "breakout_trading",
         "trend_following",
         "price_action_sr"
@@ -125,17 +125,95 @@ TRADE_EXIT_CONFIG = {
         {'ratio': 1.5, 'size': 0.3}
     ],
     'trailing_stop': {
-        'enabled': False,
+        'enabled': True,
+        'mode': 'adaptive',
         'activation_ratio': 0.5,
-        'trail_points': 10.0,
+        'trail_points': 15.0,
         'trailing_activation_factor': 0.5,
         'min_profit_activation': 0.2,
         'buffer_pips': 2,
         'auto_sl_setup': True,
         'auto_sl_percent': 0.02,
+        'atr_multiplier': 2.0,
+        'atr_period': 14,
+        'percent': 0.008,
         'break_even_enabled': True,
         'break_even_pips': 5,
         'break_even_buffer_pips': 0.5,
+        'instrument_configs': {
+            'forex_major': {
+                'mode': 'pips',
+                'trail_points': 15.0,
+                'atr_multiplier': 1.8,
+                'percent': 0.005,
+                'break_even_pips': 8,
+                'symbols': ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCAD', 'AUDUSD', 'NZDUSD', 'USDCHF']
+            },
+            'forex_minor': {
+                'mode': 'pips',
+                'trail_points': 20.0,
+                'atr_multiplier': 2.0,
+                'percent': 0.007,
+                'break_even_pips': 10,
+                'symbols': ['EURJPY', 'GBPJPY', 'EURGBP', 'AUDCAD', 'NZDCAD']
+            },
+            'forex_exotic': {
+                'mode': 'atr',
+                'trail_points': 30.0,
+                'atr_multiplier': 2.5,
+                'percent': 0.012,
+                'break_even_pips': 15,
+                'symbols': ['USDTRY', 'USDZAR', 'USDMXN']
+            },
+            'metals': {
+                'mode': 'atr',
+                'trail_points': 50.0,
+                'atr_multiplier': 2.2,
+                'percent': 0.008,
+                'break_even_pips': 20,
+                'symbols': ['XAUUSD', 'XAGUSD', 'Gold', 'Silver']
+            },
+            'crypto': {
+                'mode': 'percent',
+                'trail_points': 100.0,
+                'atr_multiplier': 3.0,
+                'percent': 0.015,
+                'break_even_pips': 50,
+                'symbols': ['BTCUSD', 'ETHUSD', 'Bitcoin', 'Ethereum']
+            },
+            'volatility_indices': {
+                'mode': 'atr',
+                'trail_points': 80.0,
+                'atr_multiplier': 2.8,
+                'percent': 0.012,
+                'break_even_pips': 25,
+                'symbols': ['Volatility 10 Index', 'Volatility 25 Index', 'Volatility 50 Index', 'Volatility 75 Index', 'Volatility 100 Index']
+            },
+            'crash_boom_indices': {
+                'mode': 'percent',
+                'trail_points': 150.0,
+                'atr_multiplier': 3.5,
+                'percent': 0.020,
+                'break_even_pips': 40,
+                'symbols': ['Crash 300 Index', 'Crash 500 Index', 'Crash 1000 Index', 'Boom 300 Index', 'Boom 500 Index', 'Boom 1000 Index']
+            },
+            'jump_indices': {
+                'mode': 'atr',
+                'trail_points': 60.0,
+                'atr_multiplier': 2.5,
+                'percent': 0.010,
+                'break_even_pips': 20,
+                'symbols': ['Jump 10 Index', 'Jump 25 Index', 'Jump 50 Index', 'Jump 75 Index', 'Jump 100 Index']
+            },
+            'step_range_indices': {
+                'mode': 'pips',
+                'trail_points': 40.0,
+                'atr_multiplier': 2.0,
+                'percent': 0.008,
+                'break_even_pips': 15,
+                'symbols': ['Step Index', 'Range Break 100 Index', 'Range Break 200 Index']
+            }
+        }
     }
 }
 
