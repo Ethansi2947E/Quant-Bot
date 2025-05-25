@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import asyncio
 import pandas as pd
 import numpy as np
+import re # For regex matching
 
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
@@ -803,67 +804,93 @@ class PositionManager:
 
     def _get_instrument_config(self, symbol: str) -> Dict[str, Any]:
         """
-        Automatically detect instrument type and return appropriate trailing stop configuration.
+        Get the instrument-specific or default trailing stop configuration based on rules.
         
         Args:
             symbol: Trading symbol (e.g., 'EURUSD', 'Volatility 10 Index')
             
         Returns:
-            Dictionary containing instrument-specific trailing stop parameters
+            Dictionary containing the resolved instrument configuration parameters.
         """
         from config.config import TRADE_EXIT_CONFIG
+        import re # For regex matching
+
+        trailing_stop_config = TRADE_EXIT_CONFIG.get('trailing_stop', {})
+        rules = trailing_stop_config.get('instrument_category_rules', [])
+        category_settings = trailing_stop_config.get('instrument_category_settings', {})
         
-        # Get instrument-specific configurations
-        instrument_configs = TRADE_EXIT_CONFIG.get('trailing_stop', {}).get('instrument_configs', {})
+        default_config = category_settings.get('default', {}).copy()
+        if not default_config:
+            logger.error(f"Critical: 'default' category settings not found in TRADE_EXIT_CONFIG for trailing stops. Symbol: {symbol}")
+            # Return a minimal safe default to prevent crashes, though this indicates a config problem.
+            return {
+                'mode': 'pips', 'trail_points': 20.0, 'atr_multiplier': 2.0, 'atr_period': 14,
+                'percent': 0.01, 'break_even_enabled': False, 'break_even_pips': 1000,
+                'break_even_buffer_pips': 10, 'activation_ratio': 1.0, 'min_profit_activation': 1.0,
+                'auto_sl_setup': False, 'auto_sl_percent': 0.05
+            }
+
+        symbol_info = None
+        symbol_path = ""
+        if self.mt5_handler:
+            symbol_info = self.mt5_handler.get_symbol_info(symbol)
+            if symbol_info and hasattr(symbol_info, 'path') and isinstance(symbol_info.path, str):
+                symbol_path = symbol_info.path
+                logger.debug(f"Symbol: {symbol}, Path: {symbol_path}")
+            elif symbol_info:
+                logger.debug(f"Symbol: {symbol}, Path attribute not found or not a string in SymbolInfo.")
+            else:
+                logger.debug(f"Symbol: {symbol}, SymbolInfo not found.")
+        else:
+            logger.warning("MT5Handler not available in PositionManager, cannot get symbol path for rule matching.")
+
+        matched_category_name = None
+
+        for rule in rules:
+            category_name_from_rule = rule.get('category')
+            if not category_name_from_rule:
+                logger.warning(f"Skipping rule due to missing 'category': {rule}")
+                continue
+
+            if 'symbol_is' in rule and rule['symbol_is'] == symbol:
+                matched_category_name = category_name_from_rule
+                logger.debug(f"Rule matched for {symbol}: symbol_is '{rule['symbol_is']}' -> category '{matched_category_name}'")
+                break
+            elif 'path_contains' in rule and symbol_path and rule['path_contains'] in symbol_path:
+                matched_category_name = category_name_from_rule
+                logger.debug(f"Rule matched for {symbol} (path: {symbol_path}): path_contains '{rule['path_contains']}' -> category '{matched_category_name}'")
+                break
+            elif 'path_starts_with' in rule and symbol_path and symbol_path.startswith(rule['path_starts_with']):
+                matched_category_name = category_name_from_rule
+                logger.debug(f"Rule matched for {symbol} (path: {symbol_path}): path_starts_with '{rule['path_starts_with']}' -> category '{matched_category_name}'")
+                break
+            elif 'symbol_contains' in rule and rule['symbol_contains'].upper() in symbol.upper():
+                matched_category_name = category_name_from_rule
+                logger.debug(f"Rule matched for {symbol}: symbol_contains '{rule['symbol_contains']}' -> category '{matched_category_name}'")
+                break
+            elif 'symbol_matches_regex' in rule:
+                try:
+                    if re.match(rule['symbol_matches_regex'], symbol):
+                        matched_category_name = category_name_from_rule
+                        logger.debug(f"Rule matched for {symbol}: symbol_matches_regex '{rule['symbol_matches_regex']}' -> category '{matched_category_name}'")
+                        break
+                except re.error as e:
+                    logger.warning(f"Regex error in rule {rule}: {e}")
         
-        # Check each instrument category
-        for category, config in instrument_configs.items():
-            if symbol in config.get('symbols', []):
-                logger.info(f"Detected {symbol} as {category} - using specialized config")
-                return config
+        final_config = default_config.copy() # Start with default
+
+        if matched_category_name:
+            specific_category_settings = category_settings.get(matched_category_name)
+            if specific_category_settings and isinstance(specific_category_settings, dict):
+                logger.info(f"Applying settings from category '{matched_category_name}' for symbol {symbol}.")
+                final_config.update(specific_category_settings) # Override defaults with specific settings
+            else:
+                logger.warning(f"Category '{matched_category_name}' found by rule for {symbol}, but settings are missing or invalid in 'instrument_category_settings'. Using default.")
+        else:
+            logger.info(f"No specific rule matched for symbol {symbol}. Using default trailing stop settings.")
         
-        # If no exact match, try pattern matching for better detection
-        symbol_upper = symbol.upper()
-        
-        # Forex major pairs pattern matching
-        forex_majors = ['EUR', 'GBP', 'USD', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF']
-        if len(symbol) == 6 and symbol_upper[:3] in forex_majors and symbol_upper[3:] in forex_majors:
-            logger.info(f"Pattern-detected {symbol} as forex_major")
-            return instrument_configs.get('forex_major', {})
-        
-        # Volatility indices pattern matching
-        if 'volatility' in symbol_upper and 'index' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as volatility_indices")
-            return instrument_configs.get('volatility_indices', {})
-        
-        # Crash/Boom indices pattern matching
-        if ('crash' in symbol_upper or 'boom' in symbol_upper) and 'index' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as crash_boom_indices")
-            return instrument_configs.get('crash_boom_indices', {})
-        
-        # Jump indices pattern matching
-        if 'jump' in symbol_upper and 'index' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as jump_indices")
-            return instrument_configs.get('jump_indices', {})
-        
-        # Step/Range indices pattern matching
-        if ('step' in symbol_upper or 'range' in symbol_upper) and 'index' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as step_range_indices")
-            return instrument_configs.get('step_range_indices', {})
-        
-        # Metals pattern matching
-        if symbol_upper.startswith('XAU') or symbol_upper.startswith('XAG') or 'gold' in symbol_upper or 'silver' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as metals")
-            return instrument_configs.get('metals', {})
-        
-        # Crypto pattern matching
-        if 'btc' in symbol_upper or 'eth' in symbol_upper or 'bitcoin' in symbol_upper or 'ethereum' in symbol_upper:
-            logger.info(f"Pattern-detected {symbol} as crypto")
-            return instrument_configs.get('crypto', {})
-        
-        # Default to forex_major if no pattern matches (safest default)
-        logger.warning(f"Could not detect instrument type for {symbol}, using forex_major defaults")
-        return instrument_configs.get('forex_major', {})
+        logger.debug(f"Final resolved config for {symbol}: {final_config}")
+        return final_config
 
     def test_adaptive_detection(self) -> None:
         """

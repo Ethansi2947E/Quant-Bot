@@ -153,22 +153,64 @@ def _ensure_datetime_index(df: Optional[pd.DataFrame], timeframe: str) -> Option
     """
     Centralize synthetic-index or 'time'→DatetimeIndex logic.
     """
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    from loguru import logger # Ensure logger is available
+
+    if df is None:
+        logger.warning(f"[_ensure_datetime_index_module/{timeframe}] Input DataFrame is None. Returning None.")
+        return None
+    if not isinstance(df, pd.DataFrame):
+        logger.warning(f"[_ensure_datetime_index_module/{timeframe}] Input is not a DataFrame (type: {type(df)}). Returning as is.")
         return df
+    if df.empty:
+        logger.warning(f"[_ensure_datetime_index_module/{timeframe}] Input DataFrame is empty. Returning empty DataFrame.")
+        return df
+
+    original_rows = len(df)
+    logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Initial df rows: {original_rows}, index type: {type(df.index)}")
+
     if not isinstance(df.index, pd.DatetimeIndex):
+        logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Index is not DatetimeIndex. Attempting conversion.")
         if 'time' in df.columns:
+            logger.debug(f"[_ensure_datetime_index_module/{timeframe}] 'time' column found. Attempting to set as DatetimeIndex.")
             try:
-                df['time'] = pd.to_datetime(df['time'])
-                df.set_index('time', inplace=True)
-            except Exception:
-                pass
-        if not isinstance(df.index, pd.DatetimeIndex):
+                # Ensure 'time' column is actually datetime-like before conversion
+                df['time_copy_for_conversion'] = pd.to_datetime(df['time'])
+                df.set_index('time_copy_for_conversion', inplace=True)
+                if 'time' in df.columns and df.index.name == 'time_copy_for_conversion': # if original 'time' column still exists and index is set
+                    df.drop(columns=['time'], inplace=True, errors='ignore') # drop original if it was not the index name
+                logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Successfully set 'time' column as DatetimeIndex. New index type: {type(df.index)}")
+            except Exception as e:
+                logger.warning(f"[_ensure_datetime_index_module/{timeframe}] Failed to convert 'time' column to DatetimeIndex: {e}. Proceeding to synthesize index.")
+                # Fall through to synthesize if 'time' column conversion failed
+        
+        if not isinstance(df.index, pd.DatetimeIndex): # Check again if previous step failed or was skipped
+            logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Synthesizing DatetimeIndex as fallback.")
             now = datetime.now()
-            minutes = int(timeframe[1:]) if timeframe.startswith('M') and timeframe[1:].isdigit() else 1
-            df.index = pd.DatetimeIndex([
-                now - timedelta(minutes=minutes * i)
-                for i in range(len(df)-1, -1, -1)
-            ])
+            minutes_str = ''.join(filter(str.isdigit, timeframe))
+            minutes = int(minutes_str) if minutes_str.isdigit() else 1
+            
+            if len(df) == 0: # Should have been caught by df.empty earlier, but defensive check
+                logger.warning(f"[_ensure_datetime_index_module/{timeframe}] DataFrame has 0 length before synthesizing index. Returning empty.")
+                return pd.DataFrame()
+
+            try:
+                df.index = pd.DatetimeIndex([
+                    now - timedelta(minutes=minutes * i)
+                    for i in range(len(df)-1, -1, -1)
+                ])
+                logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Successfully synthesized DatetimeIndex. New index type: {type(df.index)}")
+            except Exception as e:
+                logger.error(f"[_ensure_datetime_index_module/{timeframe}] CRITICAL: Failed to synthesize DatetimeIndex: {e}. Returning original (potentially problematic) df.")
+                return df # Return original df as last resort if synthesis fails
+    
+    # Add any other checks that might discard the DataFrame here, with logging
+    # For example, a minimum length check:
+    min_rows_required = 10 # Example value, adjust as needed or get from config
+    if len(df) < min_rows_required:
+        logger.warning(f"[_ensure_datetime_index_module/{timeframe}] DataFrame has {len(df)} rows, which is less than the required {min_rows_required}. Returning empty DataFrame.")
+        return pd.DataFrame()
+
+    logger.debug(f"[_ensure_datetime_index_module/{timeframe}] Final df rows: {len(df)}. Original rows: {original_rows}.")
     return df
 
 class _TrendLineAnalyzer:
@@ -822,9 +864,13 @@ class BreakoutReversalStrategy(SignalGenerator):
         return _ensure_datetime_index(df, timeframe)
     
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
+        start_time = time.time()
+        current_time = time.time() # Define current_time here
+        signals = []
+        all_signals = [] # To store signals from all symbols before selection
+
         logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}")
         logger.debug(f"[BreakoutReversalStrategy] Analyzing symbol(s): {list(market_data.keys()) if market_data else symbol} | primary_timeframe={self.primary_timeframe}, higher_timeframe={self.higher_timeframe}")
-        start_time = time.time()
         logger.info(f"🚀 SIGNAL GENERATION START: {self.name} strategy")
         
         if not market_data:
@@ -843,8 +889,6 @@ class BreakoutReversalStrategy(SignalGenerator):
         elif force_trendlines:
             logger.info("🔄 Forcing trendline updates without plots")
             
-        signals = []
-        all_signals = []  # To collect all potential signals for scoring
         logger.info(f"🔍 Generating signals with {self.name} strategy for {len(market_data)} symbols")
         
         # Process symbols one by one, potentially returning signals immediately
@@ -999,8 +1043,12 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.info("📭 No signals generated - returning empty list")
         
         # --- Cleanup old processed_zones entries ---
-        cleanup_time = current_time - (self.signal_cooldown * 2)
-        old_zone_keys = [k for k, v in self.processed_zones.items() if v < cleanup_time]
+        # Ensure current_time is defined; it should be set at the start or from latest data if processed.
+        # Using the current_time defined at the beginning of the function for now.
+        cleanup_delay_seconds = self.signal_cooldown * 2 # Assuming signal_cooldown is in seconds
+        cleanup_threshold_time = current_time - cleanup_delay_seconds
+
+        old_zone_keys = [k for k, v in self.processed_zones.items() if v < cleanup_threshold_time]
         for k in old_zone_keys:
             del self.processed_zones[k]
         if old_zone_keys:
@@ -3401,7 +3449,9 @@ class BreakoutReversalStrategy(SignalGenerator):
 
     @property
     def required_timeframes(self):
-        return [self.primary_timeframe]
+        if self.primary_timeframe == self.higher_timeframe or not self.higher_timeframe:
+            return [self.primary_timeframe]
+        return list(set([self.primary_timeframe, self.higher_timeframe]))
 
     @property
     def lookback_periods(self):

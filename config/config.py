@@ -46,11 +46,11 @@ TRADING_CONFIG = {
         # "EURUSD",
         # "USDJPY",
         "USDCAD",
-         "AUDUSD",
+        "AUDUSD",
         # "NZDUSD",
     ],
     "fixed_lot_size": 1.0,
-    "use_fixed_lot_size": True,
+    "use_fixed_lot_size": False,
     "max_lot_size": 1.0,
     "max_daily_risk": 0.06,
     "spread_factor": 1.5,
@@ -71,7 +71,7 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,
     "signal_generators": [
         "confluence_price_action",
-        "breakout_reversal"
+        "breakout_reversal",
         "breakout_trading",
         "trend_following",
         "price_action_sr"
@@ -93,28 +93,19 @@ LOG_CONFIG = {
 }
 
 # ================= Risk Management Configuration =================
-def get_risk_config():
+def get_risk_manager_config():
     return {
-        'max_daily_trades': 15,
-        'max_concurrent_trades': 1000,
-        'min_trades_spacing': 1,
-        'max_daily_loss': 0.015,
-        'max_weekly_loss': 0.04,
-        'max_monthly_loss': 0.08,
-        'max_drawdown_pause': 0.05,
-        'max_weekly_trades': 40,
-        'min_win_rate_continue': 0.30,
         'max_risk_per_trade': 0.008,
-        'consecutive_loss_limit': 4,
-        'volatility_scaling': True,
-        'partial_tp_enabled': True,
-        'recovery_mode': {
-            'enabled': True,
-            'drawdown_trigger': 0.05,
-            'position_size_reduction': 0.5,
-            'min_wins_to_exit': 2
-        }
+        'max_daily_loss': 0.015,
+        'min_risk_reward': 0.5,
+        'max_concurrent_trades': 1000,
+        'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
+        'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
+        'max_lot_size': TRADING_CONFIG['max_lot_size'],
     }
+
+# Create a default RISK_MANAGER_CONFIG for imports
+RISK_MANAGER_CONFIG = get_risk_manager_config()
 
 # ================= Trade Exit Configuration =================
 TRADE_EXIT_CONFIG = {
@@ -125,29 +116,58 @@ TRADE_EXIT_CONFIG = {
         {'ratio': 1.5, 'size': 0.3}
     ],
     'trailing_stop': {
-        'enabled': True,
-        'mode': 'adaptive',
-        'activation_ratio': 0.5,
-        'trail_points': 15.0,
-        'trailing_activation_factor': 0.5,
-        'min_profit_activation': 0.2,
-        'buffer_pips': 2,
-        'auto_sl_setup': True,
-        'auto_sl_percent': 0.02,
-        'atr_multiplier': 2.0,
-        'atr_period': 14,
-        'percent': 0.008,
-        'break_even_enabled': True,
-        'break_even_pips': 5,
-        'break_even_buffer_pips': 0.5,
-        'instrument_configs': {
+        'enabled': True, # General enable/disable for trailing stops
+        # --- Instrument Category Rules (processed in order, first match wins) ---
+        'instrument_category_rules': [
+            # Specific Symbols (highest priority)
+            {'symbol_is': 'XAUUSD', 'category': 'metals_gold'},
+            {'symbol_is': 'BTCUSD', 'category': 'crypto_btc'},
+
+            # MT5 Path Based (examples, adjust to your broker's paths)
+            {'path_contains': 'Forex\\\\Major', 'category': 'forex_major'},
+            {'path_contains': 'Forex\\\\Minor', 'category': 'forex_minor'},
+            {'path_contains': 'Forex\\\\Exotic', 'category': 'forex_exotic'},
+            {'path_contains': 'Indices\\\\Volatility', 'category': 'volatility_indices'},
+            {'path_contains': 'Indices\\\\CrashBoom', 'category': 'crash_boom_indices'}, # Assuming a path like "Indices\CrashBoom\Crash 500 Index"
+            {'path_contains': 'Indices\\\\Jump', 'category': 'jump_indices'},
+            {'path_contains': 'Indices\\\\StepRange', 'category': 'step_range_indices'}, # Assuming "Indices\StepRange\Step Index"
+            {'path_contains': 'Metals', 'category': 'metals_other'}, # For other metals if XAUUSD is special
+            {'path_contains': 'Crypto', 'category': 'crypto_other'}, # For other cryptos if BTCUSD is special
+
+            # Fallback Regex/Symbol Name Contains (lower priority)
+            {'symbol_contains': 'EUR', 'category': 'forex_eur_pairs'}, # Example for EUR specific
+            {'symbol_contains': 'VOLATILITY', 'category': 'volatility_indices_fallback'}, # If path fails
+            {'symbol_contains': 'CRASH', 'category': 'crash_boom_indices_fallback'},
+            {'symbol_contains': 'BOOM', 'category': 'crash_boom_indices_fallback'},
+            {'symbol_contains': 'JUMP', 'category': 'jump_indices_fallback'},
+            {'symbol_contains': 'STEP', 'category': 'step_range_indices_fallback'},
+            {'symbol_contains': 'RANGE BREAK', 'category': 'step_range_indices_fallback'},
+        ],
+
+        # --- Instrument Category Settings ---
+        # These are the parameter sets. The 'default' is crucial.
+        'instrument_category_settings': {
+            'default': { # General fallback settings
+                'mode': 'atr', # More robust default
+                'trail_points': 20.0, # Pips, only if mode is 'pips'
+                'atr_multiplier': 2.0,
+                'atr_period': 14,
+                'percent': 0.01, # Percentage, only if mode is 'percent'
+                'break_even_enabled': True,
+                'break_even_pips': 10,
+                'break_even_buffer_pips': 1,
+                'activation_ratio': 0.5, # When to start trailing (e.g., 0.5 = 50% of initial risk gained)
+                'min_profit_activation': 0.2, # Alternative: min profit in R before activation
+                'auto_sl_setup': True, # If position opened with no SL, set one automatically
+                'auto_sl_percent': 0.02, # e.g. 2% of entry price
+            },
             'forex_major': {
                 'mode': 'pips',
                 'trail_points': 15.0,
-                'atr_multiplier': 1.8,
-                'percent': 0.005,
+                'atr_multiplier': 1.8, # Keep for potential mode switch
+                'percent': 0.005,    # Keep for potential mode switch
                 'break_even_pips': 8,
-                'symbols': ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCAD', 'AUDUSD', 'NZDUSD', 'USDCHF']
+                'activation_ratio': 0.6,
             },
             'forex_minor': {
                 'mode': 'pips',
@@ -155,7 +175,6 @@ TRADE_EXIT_CONFIG = {
                 'atr_multiplier': 2.0,
                 'percent': 0.007,
                 'break_even_pips': 10,
-                'symbols': ['EURJPY', 'GBPJPY', 'EURGBP', 'AUDCAD', 'NZDCAD']
             },
             'forex_exotic': {
                 'mode': 'atr',
@@ -163,39 +182,69 @@ TRADE_EXIT_CONFIG = {
                 'atr_multiplier': 2.5,
                 'percent': 0.012,
                 'break_even_pips': 15,
-                'symbols': ['USDTRY', 'USDZAR', 'USDMXN']
             },
-            'metals': {
+             'forex_eur_pairs': { # Example of a more specific regex/contains based category
+                'mode': 'pips',
+                'trail_points': 12.0, # Tighter for EUR pairs example
+                'atr_multiplier': 1.5,
+                'break_even_pips': 7,
+            },
+            'metals_gold': { # Specific for XAUUSD
                 'mode': 'atr',
-                'trail_points': 50.0,
-                'atr_multiplier': 2.2,
+                'trail_points': 50.0, # Value in price points for XAUUSD
+                'atr_multiplier': 2.0, # ATR multiplier
                 'percent': 0.008,
-                'break_even_pips': 20,
-                'symbols': ['XAUUSD', 'XAGUSD', 'Gold', 'Silver']
+                'break_even_pips': 20, # Value in price points
+                'activation_ratio': 0.4,
             },
-            'crypto': {
+            'metals_other': {
+                'mode': 'atr',
+                'trail_points': 60.0,
+                'atr_multiplier': 2.2,
+                'percent': 0.01,
+                'break_even_pips': 25,
+            },
+            'crypto_btc': { # Specific for BTCUSD
                 'mode': 'percent',
-                'trail_points': 100.0,
+                'trail_points': 100.0, # Basis points if mode was different, here it's just a placeholder
+                'atr_multiplier': 2.5, # ATR for crypto can be large
+                'percent': 0.015, # 1.5% trailing
+                'break_even_pips': 50, # Price points
+                'activation_ratio': 0.3,
+            },
+            'crypto_other': {
+                'mode': 'percent',
+                'trail_points': 150.0,
                 'atr_multiplier': 3.0,
-                'percent': 0.015,
-                'break_even_pips': 50,
-                'symbols': ['BTCUSD', 'ETHUSD', 'Bitcoin', 'Ethereum']
+                'percent': 0.02, # 2% trailing
+                'break_even_pips': 75,
             },
             'volatility_indices': {
                 'mode': 'atr',
-                'trail_points': 80.0,
+                'trail_points': 80.0, # Price points
                 'atr_multiplier': 2.8,
                 'percent': 0.012,
-                'break_even_pips': 25,
-                'symbols': ['Volatility 10 Index', 'Volatility 25 Index', 'Volatility 50 Index', 'Volatility 75 Index', 'Volatility 100 Index']
+                'break_even_pips': 25, # Price points
+            },
+            'volatility_indices_fallback': { # If path fails, use symbol_contains
+                'mode': 'atr',
+                'trail_points': 85.0,
+                'atr_multiplier': 3.0,
+                'break_even_pips': 30,
             },
             'crash_boom_indices': {
-                'mode': 'percent',
+                'mode': 'percent', # Often these move fast, percent might be better
                 'trail_points': 150.0,
                 'atr_multiplier': 3.5,
-                'percent': 0.020,
-                'break_even_pips': 40,
-                'symbols': ['Crash 300 Index', 'Crash 500 Index', 'Crash 1000 Index', 'Boom 300 Index', 'Boom 500 Index', 'Boom 1000 Index']
+                'percent': 0.020, # 2%
+                'break_even_pips': 40, # Price points
+            },
+            'crash_boom_indices_fallback': {
+                'mode': 'percent',
+                'trail_points': 160.0,
+                'atr_multiplier': 3.7,
+                'percent': 0.022,
+                'break_even_pips': 45,
             },
             'jump_indices': {
                 'mode': 'atr',
@@ -203,78 +252,27 @@ TRADE_EXIT_CONFIG = {
                 'atr_multiplier': 2.5,
                 'percent': 0.010,
                 'break_even_pips': 20,
-                'symbols': ['Jump 10 Index', 'Jump 25 Index', 'Jump 50 Index', 'Jump 75 Index', 'Jump 100 Index']
+            },
+            'jump_indices_fallback': {
+                'mode': 'atr',
+                'trail_points': 65.0,
+                'atr_multiplier': 2.6,
+                'break_even_pips': 22,
             },
             'step_range_indices': {
-                'mode': 'pips',
+                'mode': 'pips', # Or ATR depending on typical movement
                 'trail_points': 40.0,
                 'atr_multiplier': 2.0,
                 'percent': 0.008,
                 'break_even_pips': 15,
-                'symbols': ['Step Index', 'Range Break 100 Index', 'Range Break 200 Index']
+            },
+            'step_range_indices_fallback': {
+                'mode': 'pips',
+                'trail_points': 45.0,
+                'atr_multiplier': 2.2,
+                'break_even_pips': 18,
             }
+            # Add other categories as needed
         }
     }
 }
-
-# ================= Risk Manager Configuration =================
-def get_risk_manager_config():
-    return {
-        'max_risk_per_trade': 0.008,
-        'max_daily_loss': 0.015,
-        'max_daily_risk': 0.03,
-        'max_weekly_loss': 10,
-        'max_monthly_loss': 10,
-        'max_drawdown_pause': 0.05,
-        'min_risk_reward': 1.0,
-        'max_concurrent_trades': 1000,
-        'max_daily_trades': 8,
-        'max_weekly_trades': 8,
-        'min_trades_spacing': 1,
-        'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
-        'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
-        'max_lot_size': TRADING_CONFIG['max_lot_size'],
-        'consecutive_loss_limit': 2,
-        'drawdown_position_scale': {
-            0.02: 0.75,
-            0.03: 0.50,
-            0.04: 0.25,
-            0.05: 0.0
-        },
-        'partial_tp_levels': [
-            {'size': 0.4, 'ratio': 0.5},
-            {'size': 0.3, 'ratio': 1.0},
-            {'size': 0.3, 'ratio': 1.5}
-        ],
-        'volatility_position_scale': {
-            'extreme': 0.25,
-            'high': 0.50,
-            'normal': 1.0,
-            'low': 0.75
-        },
-        'recovery_mode': {
-            'enabled': True,
-            'threshold': 0.05,
-            'position_scale': 0.5,
-            'win_streak_required': 3,
-            'max_trades_per_day': 2,
-            'min_win_rate': 0.40
-        },
-        'correlation_limits': {
-            'max_correlation': 0.7,
-            'lookback_period': 20,
-            'min_trades_for_calc': 50,
-            'high_correlation_scale': 0.5
-        },
-        'session_risk_multipliers': {
-            'london_open': 1.0,
-            'london_ny_overlap': 1.0,
-            'ny_open': 1.0,
-            'asian': 0.5,
-            'pre_news': 0.0,
-            'post_news': 0.5
-        }
-    }
-
-# Create a default RISK_MANAGER_CONFIG for imports
-RISK_MANAGER_CONFIG = get_risk_manager_config()

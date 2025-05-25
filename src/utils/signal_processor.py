@@ -250,25 +250,28 @@ class SignalProcessor:
             
             # Process validation result
             if validation:
-                # Make sure we only assign a boolean to the valid key
-                if "valid" in validation and isinstance(validation["valid"], bool):
-                    result["valid"] = validation["valid"]
+                # Check for 'is_valid' from the risk manager's response
+                if "is_valid" in validation and isinstance(validation["is_valid"], bool):
+                    result["valid"] = validation["is_valid"] # Store it as 'valid' in the local result dict for compatibility
                 else:
-                    # If validation result doesn't have a valid boolean, assume it's not valid
                     result["valid"] = False
                 
-                # Copy other fields from validation
+                # Copy other fields from validation, ensure 'position_size' is included
+                # and 'reason' is also copied. We already handled 'is_valid' (by copying to 'valid').
                 for key, value in validation.items():
-                    if key != "valid":  # We already handled the valid key
-                        result[key] = value
+                    if key != "is_valid": # Don't re-copy 'is_valid'
+                        result[key] = value # This will copy 'position_size' and 'reason'
                 
-                # If validation has adjusted position size, use it
-                if result.get("valid", False) and "adjusted_position_size" in validation:
-                    logger.debug(f"[{symbol}] Position size adjusted by risk manager: {validation['adjusted_position_size']}")
+                # If validation has position_size, log it (already handled by above loop)
+                # Ensure the 'adjusted_position_size' key is populated if 'position_size' exists, for downstream compatibility
+                if "position_size" in result:
+                    result["adjusted_position_size"] = result["position_size"]
+                    # logger.debug(f"[{symbol}] Position size from risk manager: {result['position_size']}") # Already logged if needed
                 
                 # Log if signal doesn't comply with risk rules
-                if not result.get("valid", False):
-                    logger.warning(f"[{symbol}] Signal doesn't comply with risk rules: {validation.get('reason', 'Unknown')}")
+                if not result.get("valid", False): # Check our local 'valid' flag
+                    reason_message = result.get('reason', 'Unknown') # Assign to variable
+                    logger.warning(f"[{symbol}] Signal doesn't comply with risk rules: {reason_message}") # Use variable in f-string
             
         except Exception as e:
             logger.warning(f"[{symbol}] Error validating trade: {str(e)}")
@@ -572,9 +575,40 @@ class SignalProcessor:
         symbol = signal.get('symbol', 'Unknown')
         direction = signal.get('direction', 'Unknown')
         logger.warning(f"⚠️ TRADE EXECUTION: Symbol={symbol}, Direction={direction}, is_addition={is_addition}")
+
+        # --- Perform trade validation (calls RiskManager.validate_trade) ---
+        account_info_for_validation = self.mt5_handler.get_account_info() if self.mt5_handler else None
+        validation_result = self.validate_trade(signal, account_info=account_info_for_validation)
+
+        # --- Add intensive debug log here ---
+        logger.debug(f"[execute_trade_from_signal] Raw validation_result: {validation_result}")
+        is_valid_value = validation_result.get('valid')
+        logger.debug(f"[execute_trade_from_signal] validation_result.get('valid'): {is_valid_value}")
+        logger.debug(f"[execute_trade_from_signal] type of validation_result.get('valid'): {type(is_valid_value)}")
+        if not is_valid_value:
+            logger.debug(f"[execute_trade_from_signal] Traceback if 'valid' is False or None: {traceback.format_exc()}")
+        # --- End intensive debug log ---
+
+        if not is_valid_value:
+            logger.warning(f"Signal for {symbol} {direction} failed validation: {validation_result.get('reason')}")
+            return {
+                'status': 'error',
+                'message': f"Signal validation failed: {validation_result.get('reason')}",
+                'code': 'VALIDATION_FAILED'
+            }
+        
+        position_size = validation_result.get('position_size')
+        if position_size is None or position_size <= 0:
+            logger.error(f"Invalid position size ({position_size}) after validation for {symbol} {direction}.")
+            return {
+                'status': 'error',
+                'message': f"Invalid position size ({position_size}) after validation",
+                'code': 'INVALID_SIZE_POST_VALIDATION'
+            }
+        logger.info(f"Using position size {position_size} for {symbol} {direction} from validation result.")
+        # --- End of critical position size handling ---
         
         # Get existing positions for this symbol
-        # Double-check for existing positions to verify our logic
         all_positions = self.mt5_handler.get_open_positions() if self.mt5_handler else []
         symbol_positions = [p for p in all_positions if p.get("symbol") == symbol]
         same_direction_positions = [p for p in symbol_positions if 
@@ -724,61 +758,30 @@ class SignalProcessor:
                     stop_loss = signal.get('stop_loss', stop_loss)
                     take_profit = signal.get('take_profit', take_profit)
             
-            # Get position size (from signal or calculate)
-            position_size = signal.get('position_size', 0)
+            # OLD POSITION SIZING LOGIC IS REMOVED BELOW. position_size is now taken from validation_result
+            # # Get position size (from signal or calculate) 
+            # position_size = signal.get(\'position_size\', 0)
+            # 
+            # # If no position size in signal, calculate based on risk parameters
+            # if position_size <= 0:
+            #     if use_fixed_lot_size:
+            #         # ... (removed code for fixed lot size calculation) ...
+            #     else:
+            #         # ... (removed code for risk-based calculation) ...
+            #         logger.info(f"Calculated risk-based position size: {position_size} lots")
             
-            # If no position size in signal, calculate based on risk parameters
-            if position_size <= 0:
-                if use_fixed_lot_size:
-                    # Get minimum lot size for this symbol
-                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    
-                    # Use fixed lot size, but ensure it's not below the symbol's minimum
-                    if fixed_lot_size < min_lot_size:
-                        position_size = min_lot_size
-                        logger.info(f"Fixed lot size {fixed_lot_size} is below minimum {min_lot_size} for {symbol}, using minimum")
-                    else:
-                        position_size = fixed_lot_size
-                    
-                    logger.info(f"Using fixed position size: {position_size} lots")
-                else:
-                    # Risk-based calculation using account info
-                    account_balance = account_info.get('balance', 10000) if account_info else 10000  # Default if not available
-                    
-                    # Use RiskManager to calculate position size if available
-                    if self.risk_manager:
-                        position_size = self.risk_manager.calculate_position_size(
-                            account_balance=account_balance,
-                            risk_per_trade=1.0,  # 1% risk per trade
-                            entry_price=entry_price,
-                            stop_loss_price=stop_loss,
-                            symbol=symbol
-                        )
-                    else:
-                        # Basic calculation if no risk manager (fallback)
-                        risk_amount = account_balance * 0.01  # 1% risk
-                        stop_distance = abs(entry_price - stop_loss)
-                        if stop_distance > 0:
-                            position_size = risk_amount / stop_distance
-                            
-                            # Get minimum lot size for this symbol
-                            min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                            position_size = max(position_size, min_lot_size)
-                        else:
-                            # Get minimum lot size for this symbol
-                            position_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                            
-                    logger.info(f"Calculated risk-based position size: {position_size} lots")
+            # Ensure position size meets symbol's minimum requirements (still useful as a final check)
+            if self.mt5_handler: 
+                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                if position_size < min_lot_size:
+                    logger.warning(f"Validated position size {position_size} is below symbol minimum {min_lot_size} for {symbol}. Adjusting to min_lot_size.")
+                    position_size = min_lot_size
             
-            # Ensure position size meets symbol's minimum requirements
-            min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-            if position_size < min_lot_size:
-                logger.warning(f"Position size {position_size} is below symbol minimum {min_lot_size} for {symbol}, adjusting")
-                position_size = min_lot_size
-            
-            # Normalize volume according to symbol's volume_step
-            position_size = self.mt5_handler.normalize_volume(symbol, position_size)
-            logger.info(f"Final normalized position size for {symbol}: {position_size} lots")
+                # Normalize volume according to symbol's volume_step (still useful as a final check)
+                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                logger.info(f"Final normalized position size for {symbol}: {position_size} lots (after validation and final checks).")
+            else:
+                logger.warning("MT5 Handler not available for final min_lot and normalization checks.")
             
             # Execute the trade
             trade_params = {

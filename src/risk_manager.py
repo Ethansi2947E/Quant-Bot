@@ -1,14 +1,7 @@
-import time
-from datetime import datetime, timedelta, UTC
-import math
-from typing import Dict, List, Optional, Union, Tuple, Any, TYPE_CHECKING
-from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, RISK_MANAGER_CONFIG
+from datetime import datetime, UTC
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from loguru import logger
-import pandas as pd
 import MetaTrader5 as mt5
-import numpy as np
-import traceback
-import asyncio
 
 # Use TYPE_CHECKING for import that's only used for type hints
 if TYPE_CHECKING:
@@ -53,127 +46,30 @@ class RiskManager:
         # Store timeframe
         
         # Get configuration from Risk Manager Config
-        from config.config import get_risk_config
-        self.config = get_risk_config()
+        from config.config import RISK_MANAGER_CONFIG, TRADING_CONFIG
+        self.config = RISK_MANAGER_CONFIG
         
         # Set risk parameters from config
         self.max_risk_per_trade = self.config.get('max_risk_per_trade', 0.01)
-        self.max_daily_risk = self.config.get('max_daily_risk', 0.03)
-        self.max_drawdown_pause = self.config.get('max_drawdown_pause', 0.05)
-        self.max_daily_trades = self.config.get('max_daily_trades', 8)
-        self.min_trades_spacing = self.config.get('min_trades_spacing', 1)
         self.max_concurrent_trades = self.config.get('max_concurrent_trades', 2)
         # Add minimum risk:reward ratio (configurable)
         self.min_risk_reward = self.config.get('min_risk_reward', 1.0)
         
         # Core risk parameters - use timeframe-specific values if available
         self.max_daily_loss = self.config.get('max_daily_loss', 0.02)
-        self.max_weekly_loss = self.config.get('max_weekly_loss', 0.05)
-        self.max_monthly_loss = self.config.get('max_monthly_loss', 0.10)
         self.max_drawdown = 0.05  # Default to 5% max drawdown
         
         # Position management - use timeframe-specific values if available
-        self.max_weekly_trades = self.config.get('max_weekly_trades', 16)
+        # self.max_weekly_trades = self.config.get('max_weekly_trades', 16) # Removed
         self.use_fixed_lot_size = TRADING_CONFIG['use_fixed_lot_size']  # Use global trading config
         self.fixed_lot_size = TRADING_CONFIG['fixed_lot_size']
         self.max_lot_size = TRADING_CONFIG['max_lot_size']
         
-        # Drawdown controls
-        self.consecutive_loss_limit = self.config.get('consecutive_loss_limit', 3)
-        self.drawdown_position_scale = self.config.get('drawdown_position_scale', {
-            0.02: 0.75,   # 75% size at 2% drawdown
-            0.03: 0.50,   # 50% size at 3% drawdown
-            0.04: 0.25,   # 25% size at 4% drawdown
-            0.05: 0.0     # Stop trading at 5% drawdown
-        })
-        
-        # Partial profit targets
-        self.partial_tp_levels = self.config.get('partial_tp_levels', [
-            {'size': 0.4, 'ratio': 0.5},  # 40% at 0.5R
-            {'size': 0.3, 'ratio': 1.0},  # 30% at 1R
-            {'size': 0.3, 'ratio': 1.5}   # 30% at 1.5R
-        ])
-        
-        # Volatility-based position sizing
-        self.volatility_position_scale = self.config.get('volatility_position_scale', {
-            'extreme': 0.25,  # 25% size in extreme volatility
-            'high': 0.50,     # 50% size in high volatility
-            'normal': 1.0,    # Normal size
-            'low': 0.75       # 75% size in low volatility
-        })
-        
-        # Recovery mode
-        self.recovery_mode = self.config.get('recovery_mode', {
-            'enabled': True,
-            'threshold': 0.05,        # 5% drawdown activates recovery
-            'position_scale': 0.5,    # 50% position size
-            'win_streak_required': 3,  # Need 3 winners to exit
-            'max_trades_per_day': 2,   # Limited trades in recovery
-            'min_win_rate': 0.40      # Min win rate to exit recovery
-        })
-        
-        # Correlation controls
-        self.correlation_limits = {
-            'max_correlation': self.config.get('correlation_threshold', 0.8),
-            'lookback_period': self.config.get('correlation_limits', {}).get('lookback_period', 20),
-            'min_trades_for_calc': self.config.get('correlation_limits', {}).get('min_trades_for_calc', 50),
-            'high_correlation_scale': self.config.get('correlation_limits', {}).get('high_correlation_scale', 0.5)
-        }
-        
-        # Session-based risk adjustments
-        self.session_risk_multipliers = self.config.get('session_risk_multipliers', {
-            'london_open': 1.0,
-            'london_ny_overlap': 1.0,
-            'ny_open': 1.0,
-            'asian': 0.5,
-            'pre_news': 0.0,
-            'post_news': 0.5
-        })
+       
         
         # Log the timeframe-specific parameters
         logger.debug(f"Timeframe-specific risk parameters: max_risk_per_trade={self.max_risk_per_trade}, "
-                    f"max_daily_trades={self.max_daily_trades}, max_concurrent_trades={self.max_concurrent_trades}")
-        
-        # Add missing attributes identified by type checker
-        self.market_condition_adjustments = {
-            'trending': 1.2,
-            'ranging': 1.0,
-            'choppy': 0.5,
-            'breakout': 1.1,
-            'reversal': 0.8,
-            'high_volatility': 0.75,
-            'low_volatility': 0.9,
-            'normal': 1.0
-        }
-        
-        self.confidence_position_scale = {
-            0.9: 1.0,  # Full size for high confidence (90%+)
-            0.7: 0.8,  # 80% size for good confidence (70-89%)
-            0.5: 0.5,  # 50% size for moderate confidence (50-69%)
-            0.3: 0.3   # 30% size for low confidence (<50%)
-        }
-        
-        self.dynamic_tp_levels = {
-            'trending': [
-                {'ratio': 1.0, 'size': 0.3},
-                {'ratio': 2.0, 'size': 0.3},
-                {'ratio': 3.0, 'size': 0.4}
-            ],
-            'ranging': [
-                {'ratio': 0.5, 'size': 0.4},
-                {'ratio': 1.0, 'size': 0.3},
-                {'ratio': 1.5, 'size': 0.3}
-            ],
-            'breakout': [
-                {'ratio': 1.5, 'size': 0.3},
-                {'ratio': 2.5, 'size': 0.3},
-                {'ratio': 3.5, 'size': 0.4}
-            ],
-            'reversal': [
-                {'ratio': 0.75, 'size': 0.5},
-                {'ratio': 1.5, 'size': 0.5}
-            ]
-        }
+                    f"max_concurrent_trades={self.max_concurrent_trades}")
         
         # Track daily performance
         self.daily_stats = {
@@ -285,59 +181,198 @@ class RiskManager:
                      open_trades: List[Dict], 
                      correlation_matrix: Optional[Dict] = None) -> Dict:
         """
-        Validate a trade against risk management rules.
-        
-        Args:
-            trade: Trade details including entry, stop, and direction
-            account_balance: Current account balance
-            open_trades: List of currently open trades
-            correlation_matrix: Optional correlation matrix for instruments
-            
-        Returns:
-            Dict with validation result and reason
-        """
-        # Check max number of open trades
-        if len(open_trades) >= self.max_concurrent_trades:
-            return {
-                'valid': False,
-                'reason': f"Max number of open trades ({self.max_concurrent_trades}) reached"
-            }
-        
-        # Check daily risk
-        if self.daily_stats['total_risk'] >= self.max_daily_risk * account_balance:
-            return {
-                'valid': False,
-                'reason': f"Max daily risk reached ({self.max_daily_risk*100}% of account)"
-            }
-        
-        # Check correlation risk
-        if correlation_matrix is not None and trade.get('symbol') in correlation_matrix:
-            correlated_count = 0
-            for open_trade in open_trades:
-                if open_trade.get('symbol') in correlation_matrix:
-                    correlation = correlation_matrix.get(
-                        trade.get('symbol'), {}).get(open_trade.get('symbol'), 0)
-                    if correlation >= self.correlation_limits['max_correlation']:
-                        correlated_count += 1
-                    
-            if correlated_count >= self.max_concurrent_trades:
-                return {
-                    'valid': False,
-                    'reason': f"Max correlated trades ({self.max_concurrent_trades}) reached"
-                }
-            
-        # Get trade parameters
-        symbol = trade.get('symbol', '')
-        entry = trade.get('entry_price', 0) or trade.get('entry', 0)
-        stop = trade.get('stop_loss', 0)
-        tp = trade.get('take_profit', 0)
-        requested_size = trade.get('position_size', 0)
-        direction = trade.get('direction')
-        
-        # --- Enforce proper SL/TP placement and minimum risk:reward ratio ---
-        direction_lower = str(direction or "").lower()
+        Validate a trade against risk parameters and current market conditions.
+        Enhances validation with portfolio-level risk assessment.
 
-        # Compute signed risk & reward based on direction
+        Args:
+            trade: Trade details (symbol, type, entry_price, stop_loss_price, take_profit_price).
+            account_balance: Current account balance.
+            open_trades: List of currently open trades.
+            correlation_matrix: Optional correlation matrix for advanced checks.
+
+        Returns:
+            Dict: Validation result (is_valid, reason, position_size).
+        """
+        logger.debug(f"Initiating trade validation for trade: {trade}")
+        
+        symbol = trade.get('symbol')
+        if not symbol:
+            logger.warning("Trade validation failed: Symbol not provided in trade details.")
+            return {'is_valid': False, 'reason': "Symbol not provided", 'position_size': 0.0}
+
+        # Basic trade parameter validation
+        if 'entry_price' not in trade:
+            logger.error("Trade validation failed: entry_price is missing.")
+            return {'is_valid': False, 'reason': "entry_price is missing", 'position_size': 0.0}
+        
+        # Check for direction (either 'type' or 'direction')
+        has_direction = 'type' in trade or 'direction' in trade
+        if not has_direction:
+            logger.error("Trade validation failed: Direction key ('type' or 'direction') is missing.")
+            return {'is_valid': False, 'reason': "Direction key ('type' or 'direction') is missing", 'position_size': 0.0}
+
+        has_stop_loss = 'stop_loss_price' in trade or 'stop_loss' in trade
+        if not has_stop_loss:
+            logger.error("Trade validation failed: Stop loss (stop_loss_price or stop_loss) is missing.")
+            return {'is_valid': False, 'reason': "Stop loss key (stop_loss_price or stop_loss) is missing", 'position_size': 0.0}
+
+        has_take_profit = 'take_profit_price' in trade or 'take_profit' in trade
+        if not has_take_profit:
+            logger.error("Trade validation failed: Take profit (take_profit_price or take_profit) is missing.")
+            return {'is_valid': False, 'reason': "Take profit key (take_profit_price or take_profit) is missing", 'position_size': 0.0}
+
+        entry_val = trade.get('entry_price') 
+        stop_val = trade.get('stop_loss_price', trade.get('stop_loss'))
+        tp_val = trade.get('take_profit_price', trade.get('take_profit'))
+        
+        if entry_val is None: # Should have been caught by 'entry_price' in trade check, but for safety
+            logger.error("Trade validation failed: entry_price value is None.")
+            return {'is_valid': False, 'reason': "entry_price value is None", 'position_size': 0.0}
+        if stop_val is None:
+            logger.error("Trade validation failed: Stop loss value is None after checking both keys.")
+            return {'is_valid': False, 'reason': "Stop loss value is None", 'position_size': 0.0}
+        if tp_val is None:
+            logger.error("Trade validation failed: Take profit value is None after checking both keys.")
+            return {'is_valid': False, 'reason': "Take profit value is None", 'position_size': 0.0}
+        
+        # At this point, entry_val, stop_val, tp_val are confirmed not None.
+        try:
+            entry = float(entry_val)
+            stop = float(stop_val)
+            tp = float(tp_val)
+        except (ValueError, TypeError) as e:
+            logger.error(f"Trade validation failed: entry/stop/tp could not be converted to float. Error: {e}. Values: E={entry_val}, S={stop_val}, TP={tp_val}")
+            return {'is_valid': False, 'reason': f"Invalid E/S/TP format: {e}", 'position_size': 0.0}
+
+        # Get direction, preferring 'type' then 'direction'
+        direction = trade.get('type', trade.get('direction'))
+        if direction is None: # Should be caught by has_direction check, but for safety
+            logger.error("Trade validation failed: Direction value is None after checking both keys.")
+            return {'is_valid': False, 'reason': "Direction value is None", 'position_size': 0.0}
+        
+        requested_size = trade.get('position_size', 0) # From strategy or signal
+
+        # --- Initial Position Size Determination (before portfolio check) ---
+        position_size: float = 0.0
+        min_lot_from_symbol: float = 0.01 # Default minimum
+        contract_size_from_symbol: float = 1.0 # Default contract size
+
+        if self.mt5_handler:
+            symbol_info_initial = self.mt5_handler.get_symbol_info(symbol)
+            if symbol_info_initial: # Check if it's not None
+                try:
+                    min_lot_from_symbol = getattr(symbol_info_initial, 'volume_min', 0.01)
+                    contract_size_from_symbol = getattr(symbol_info_initial, 'trade_contract_size', 1.0)
+                except AttributeError as e:
+                    logger.warning(f"Attribute error accessing symbol info for {symbol}: {e}. Using defaults.")
+            else:
+                logger.warning(f"Could not retrieve symbol info for {symbol} during initial size determination. Using defaults.")
+        else:
+            logger.warning("MT5 handler not available for initial size determination. Using defaults.")
+
+        if self.use_fixed_lot_size:
+            position_size = self.fixed_lot_size
+            if self.mt5_handler and symbol_info_initial: # Check if symbol_info_initial was fetched
+                if self.fixed_lot_size < min_lot_from_symbol:
+                    position_size = min_lot_from_symbol
+                    logger.info(f"Fixed lot size {self.fixed_lot_size} is below min {min_lot_from_symbol} for {symbol}, using min.")
+                else:
+                    position_size = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
+            position_size = min(position_size, self.max_lot_size) # Apply max lot cap
+            logger.info(f"Using fixed lot size for {symbol}: {position_size}")
+        elif requested_size > 0:
+            position_size = requested_size
+            if self.mt5_handler and symbol_info_initial:
+                position_size = max(requested_size, min_lot_from_symbol)
+                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+            position_size = min(position_size, self.max_lot_size) # Apply max lot cap
+            logger.info(f"Using requested position_size (adjusted): {position_size}")
+        else:
+            try:
+                position_size = self.calculate_position_size(
+                    account_balance=account_balance,
+                    risk_per_trade=self.max_risk_per_trade, # Already a decimal
+                    entry_price=entry,
+                    stop_loss_price=stop,
+                    symbol=symbol
+                )
+                if self.mt5_handler and symbol_info_initial:
+                     # Ensure calculated size respects symbol's min and step
+                    position_size = max(position_size, min_lot_from_symbol)
+                    position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                position_size = min(position_size, self.max_lot_size) # Apply max lot cap
+                logger.info(f"Calculated position size based on risk: {position_size}")
+            except Exception as e:
+                logger.error(f"Error calculating position size: {str(e)}. Using min lot for {symbol}.")
+                position_size = min_lot_from_symbol
+        
+        if position_size <= 0:
+            logger.warning(f"Initial position size for {symbol} is {position_size}. Trade invalid.")
+            return {'is_valid': False, 'reason': f"Initial position size is not positive: {position_size}", 'position_size': 0.0}
+
+        # --- Portfolio Level Risk Assessment ---
+        logger.info(f"Performing portfolio level risk assessment for symbol: {symbol}")
+        portfolio_risk_analysis = self.calculate_portfolio_risk_limits(tickers_to_analyze=[symbol])
+        
+        if "error" in portfolio_risk_analysis:
+            logger.warning(f"Portfolio risk calculation failed: {portfolio_risk_analysis.get('error')}")
+            return {'is_valid': False, 'reason': f"Portfolio risk calculation error: {portfolio_risk_analysis.get('error')}", 'position_size': 0.0}
+
+        ticker_portfolio_analysis = portfolio_risk_analysis.get(symbol)
+
+        if not ticker_portfolio_analysis:
+            logger.warning(f"No portfolio analysis data found for symbol {symbol}.")
+            return {'is_valid': False, 'reason': f"No portfolio analysis for {symbol}", 'position_size': 0.0}
+        
+        remaining_cash_limit_from_portfolio = ticker_portfolio_analysis.get('remaining_position_limit', 0.0)
+        current_price_from_portfolio_calc = ticker_portfolio_analysis.get('current_price', 0.0)
+
+        if current_price_from_portfolio_calc == 0.0:
+            logger.warning(f"Trade validation failed for {symbol}: Current price from portfolio calculation is zero.")
+            return {'is_valid': False, 'reason': "Current price from portfolio calculation is zero", 'position_size': 0.0}
+            
+        logger.info(f"Portfolio analysis for {symbol}: Remaining Cash Limit: {remaining_cash_limit_from_portfolio:.2f}, Current Price: {current_price_from_portfolio_calc:.5f}")
+        
+        # --- Apply Portfolio Limit to Position Size ---
+        if self.use_fixed_lot_size:
+            # For fixed lot size, position_size is already determined. We just check if its value exceeds the limit.
+            # Value of the fixed lot trade = position_size (lots) * contract_size * price_per_unit
+            value_of_fixed_trade = position_size * contract_size_from_symbol * current_price_from_portfolio_calc
+            if value_of_fixed_trade > remaining_cash_limit_from_portfolio:
+                logger.warning(f"Trade validation failed for {symbol}: Fixed lot size ({position_size}) value ({value_of_fixed_trade:.2f}) exceeds remaining portfolio cash limit ({remaining_cash_limit_from_portfolio:.2f}).")
+                return {'is_valid': False, 'reason': "Fixed lot size value exceeds portfolio cash limit", 'position_size': 0.0}
+        else:
+            # For dynamic lot size, position_size is already calculated. Adjust if it exceeds portfolio limit.
+            value_per_lot = contract_size_from_symbol * current_price_from_portfolio_calc
+            if value_per_lot <= 0: # Avoid division by zero or invalid calculations
+                 logger.warning(f"Trade validation failed for {symbol}: Value per lot ({value_per_lot:.2f}) is not positive, cannot assess against portfolio limit.")
+                 return {'is_valid': False, 'reason': "Value per lot is not positive for portfolio limit check", 'position_size': 0.0}
+
+            max_lots_from_portfolio_limit = remaining_cash_limit_from_portfolio / value_per_lot
+            
+            if position_size > max_lots_from_portfolio_limit:
+                logger.warning(f"Calculated position size ({position_size} lots) for {symbol} exceeds max lots based on portfolio limit ({max_lots_from_portfolio_limit:.4f}). Adjusting.")
+                position_size = max_lots_from_portfolio_limit
+                # Ensure it doesn't go below minimum lot size or become zero, and normalize
+                if self.mt5_handler and symbol_info_initial: # symbol_info_initial should be available
+                    position_size = max(min_lot_from_symbol, position_size)
+                    position_size = self.mt5_handler.normalize_volume(symbol, position_size)
+                else: # Basic rounding if no handler/info
+                    position_size = round(max(0.01, position_size), 2) # Ensure at least 0.01 and round
+                
+                if position_size < min_lot_from_symbol: # Final check against actual min_lot
+                    logger.warning(f"Trade validation failed for {symbol}: Adjusted position size ({position_size}) is below minimum lot size ({min_lot_from_symbol}) after portfolio limit.")
+                    return {'is_valid': False, 'reason': f"Adjusted size ({position_size}) below min_lot ({min_lot_from_symbol}) due to portfolio limit", 'position_size': 0.0}
+                logger.info(f"Position size for {symbol} adjusted to {position_size} lots due to portfolio cash limit.")
+        # --- End Portfolio Level Logic ---
+
+        
+        if direction is None: # Should have been caught earlier but double check
+            logger.error("Direction is None before R:R calculation, this indicates a logic flaw.")
+            return {'is_valid': False, 'reason': "Internal error: Direction became None", 'position_size': 0.0}
+            
+        direction_lower = str(direction).lower() # Correctly use the 'direction' variable
+
         if direction_lower == "buy":
             risk_val = entry - stop           # should be > 0
             reward_val = tp - entry           # should be > 0
@@ -347,206 +382,153 @@ class RiskManager:
         else:
             # Unknown direction – treat as invalid
             return {
-                'valid': False,
+                'is_valid': False,
                 'reason': f"Unknown trade direction '{direction}'"
             }
 
         # Validate SL/TP placement
         if risk_val <= 0 or reward_val <= 0:
+            logger.warning(f"Trade validation failed for {symbol}: Stop-loss or take-profit is incorrectly placed. Risk: {risk_val}, Reward: {reward_val}")
             return {
-                'valid': False,
+                'is_valid': False,
                 'reason': 'Stop-loss and/or take-profit are on the wrong side of the entry price for the trade direction'
             }
         # Additional: TP must be above entry for buy, below for sell
         if direction_lower == "buy" and tp <= entry:
             return {
-                'valid': False,
+                'is_valid': False,
                 'reason': 'Take profit must be above entry price for buy orders'
             }
         elif direction_lower == "sell" and tp >= entry:
             return {
-                'valid': False,
+                'is_valid': False,
                 'reason': 'Take profit must be below entry price for sell orders'
             }
 
         # Enforce minimum R:R
         if (reward_val / risk_val) < self.min_risk_reward:
+            logger.warning(f"Trade validation failed for {symbol}: Risk:Reward ratio ({reward_val / risk_val:.2f}) is below minimum ({self.min_risk_reward:.2f}).")
             return {
-                'valid': False,
+                'is_valid': False,
                 'reason': f"Risk:Reward ratio too low ({reward_val / risk_val:.2f}), must be at least {self.min_risk_reward:.2f}"
             }
-        
-        # Determine position size based on config
-        if self.use_fixed_lot_size:
-            # Use fixed lot size from config, but always align with symbol's constraints
+       
+        if stop != 0 and entry != 0: # Ensure SL and entry are valid for risk calculation
+            # Calculate risk amount based on the potentially adjusted position_size
+            risk_amount = 0.0
             if self.mt5_handler:
-                # Get minimum lot size for this symbol
-                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
+                symbol_info_for_risk_calc = self.mt5_handler.get_symbol_info(symbol)
+                point_value = 0.00001 # Default point value
                 
-                # If the symbol has a higher minimum lot size than our fixed lot size, 
-                # use the symbol's minimum lot size directly without trying to normalize
-                if self.fixed_lot_size < min_lot_size:
-                    position_size = min_lot_size
-                    logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum lot size {min_lot_size} for {symbol}, using minimum")
+                if symbol_info_for_risk_calc: # Check if it's not None
+                    try:
+                        point_value = getattr(symbol_info_for_risk_calc, 'point', 0.00001)
+                    except AttributeError as e:
+                        logger.warning(f"Attribute error accessing point from symbol_info_for_risk_calc for {symbol}: {e}. Type: {type(symbol_info_for_risk_calc)}. Using default.")
                 else:
-                    # Only normalize if our fixed lot size is at least the minimum
-                    normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
-                    position_size = normalized_lot
-                    logger.info(f"Normalized fixed lot size from {self.fixed_lot_size} to {position_size} for {symbol}")
-                
-                # Apply max lot size cap
-                position_size = min(position_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size for {symbol}: {position_size}")
-            else:
-                position_size = min(self.fixed_lot_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size from config (no mt5_handler): {position_size}")
-        elif requested_size > 0:
-            # Use requested size but ensure it meets symbol's constraints
-            if self.mt5_handler:
-                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                position_size = max(requested_size, min_lot_size)
-                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
-            else:
-                position_size = requested_size
-                
-            # Apply max lot size cap
-            position_size = min(position_size, self.max_lot_size)
-            logger.info(f"Using requested position size (adjusted): {position_size}")
-        else:
-            # Calculate position size based on risk
-            try:
-                position_size = self.calculate_position_size(
-                    account_balance=account_balance,
-                    risk_per_trade=self.max_risk_per_trade * 100,  # Convert to percentage
-                    entry_price=entry,
-                    stop_loss_price=stop,
-                    symbol=symbol
-                )
-                logger.info(f"Calculated position size based on risk: {position_size}")
-            except Exception as e:
-                logger.error(f"Error calculating position size: {str(e)}")
-                # Use symbol-specific minimum lot size as fallback
-                if self.mt5_handler:
-                    position_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    logger.info(f"Using symbol-specific minimum lot size: {position_size}")
+                    logger.warning(f"Symbol info for risk calculation not found for {symbol}. Using default point value.")
+
+                if point_value == 0: # Avoid division by zero if point is somehow 0
+                    logger.warning(f"Point value for {symbol} is zero. Cannot accurately calculate pips at risk. Defaulting risk_amount to a high indicative value or skipping.")
+                    # Fallback or error, as pip calculation would be problematic
+                    # For now, let's make risk_amount high to likely fail the trade if this occurs
+                    risk_amount = account_balance # This will likely fail the risk_percentage check
                 else:
-                    position_size = 0.01  # Default minimum
-        
-        # Validate risk per trade if not using fixed lot size
-        if not self.use_fixed_lot_size and stop != 0 and entry != 0:
-            risk_amount = abs(entry - stop) * position_size
-            risk_percentage = risk_amount / account_balance
-            
-            if risk_percentage > self.max_risk_per_trade:
-                # Try to adjust position size to meet risk requirement
-                adjusted_position = self.max_risk_per_trade * account_balance / abs(entry - stop)
-                
-                # Ensure adjusted position is valid for the symbol
-                if self.mt5_handler:
-                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    adjusted_position = max(adjusted_position, min_lot_size)
-                    adjusted_position = self.mt5_handler.normalize_volume(symbol, adjusted_position)
-                else:
-                    adjusted_position = round(adjusted_position, 2)  # Round to standard lot precision
-                
-                # Only adjust if it's a meaningful adjustment
-                if adjusted_position < position_size:
-                    logger.warning(f"Position size reduced from {position_size} to {adjusted_position} due to risk limits")
-                    position_size = adjusted_position
-                else:
+                    pips_at_risk = abs(entry - stop) / point_value
+                   
+                    risk_amount = abs(entry - stop) * position_size * contract_size_from_symbol
+
+            else: # Fallback if no mt5_handler
+                logger.warning("MT5 handler not available for risk amount calculation. Using approximate risk.")
+                # Approximate risk based on price change and size, assuming standard contract
+                risk_amount = abs(entry - stop) * position_size * 1 # Assuming contract size of 1 if no info
+
+            if account_balance > 0: # Avoid division by zero if account_balance is somehow zero
+                risk_percentage = risk_amount / account_balance
+                logger.info(f"Risk per trade check for {symbol}: Size={position_size}, Entry={entry}, SL={stop}, Risk Amount={risk_amount:.2f}, Balance={account_balance:.2f}, Risk Percentage={risk_percentage:.4f}")
+
+                if risk_percentage > self.max_risk_per_trade:
+                    logger.warning(f"Trade validation failed for {symbol}: Risk per trade ({risk_percentage*100:.2f}%) exceeds max ({self.max_risk_per_trade*100}%). Position Size: {position_size}")
+                    # Optionally, you could try to readjust size here again, but it might conflict with portfolio limits.
+                    # For now, if portfolio limit was met, but this rule is now breached by that adjusted size, it's a fail.
                     return {
-                        'valid': False,
-                        'reason': f"Trade risk ({risk_percentage*100:.2f}%) exceeds max risk per trade ({self.max_risk_per_trade*100}%) and cannot be adjusted"
+                        'is_valid': False,
+                        'reason': f"Risk per trade ({risk_percentage*100:.2f}%) exceeds max ({self.max_risk_per_trade*100}%) after all adjustments",
+                        'position_size': 0.0
                     }
-        
-        # Success result with adjusted position size
+            else:
+                logger.warning(f"Account balance is zero or negative for {symbol}. Cannot calculate risk percentage.")
+                return {'is_valid': False, 'reason': "Account balance zero or negative for risk calculation", 'position_size': 0.0}
+
+        # Final check on max concurrent trades (can be done earlier too)
+        if len(open_trades) >= self.max_concurrent_trades:
+             logger.warning(f"Trade validation failed for {symbol}: Max concurrent trades ({self.max_concurrent_trades}) would be exceeded.")
+             return {
+                 'is_valid': False,
+                 'reason': f"Max concurrent trades ({self.max_concurrent_trades}) reached",
+                 'position_size': 0.0
+             }
+
+        logger.info(f"Trade validation successful for {symbol} with position size: {position_size}")
         return {
-            'valid': True,
+            'is_valid': True,
             'reason': "Trade meets all risk management criteria",
-            'adjusted_position_size': position_size
+            'position_size': position_size
         }
 
-
-    def initialize(self, config=None, timeframe=None):
+    def initialize(self, timeframe=None):
         """
-        Initialize or reinitialize the RiskManager with the given config.
+        Initialize or reinitialize the RiskManager.
+        Currently, this method logs the timeframe but applies the global RISK_MANAGER_CONFIG.
+        Timeframe-specific configurations are not loaded differently at this stage.
         
         Args:
-            config: Configuration object that contains risk parameters
-            timeframe: Optional timeframe to use for loading timeframe-specific parameters
+            timeframe: Optional timeframe to log, does not change loaded config parameters.
         """
         if timeframe:
             # Update the current timeframe if provided
-            self.timeframe = timeframe
-            logger.info(f"Updating RiskManager timeframe to {timeframe}")
+            # self.timeframe = timeframe # Consider if self.timeframe is used elsewhere
+            logger.info(f"RiskManager initialize called with timeframe: {timeframe}. Global risk config will be applied.")
             
-            # Load timeframe-specific parameters
+            # Load timeframe-specific parameters (currently uses global config)
             try:
-                from config.config import get_risk_config
-                timeframe_config = get_risk_config()
+                from config.config import RISK_MANAGER_CONFIG # Changed import
+                timeframe_config = RISK_MANAGER_CONFIG       # Use global config
                 
-                # Update core risk parameters with timeframe-specific values
+                # Update core risk parameters with (currently global) timeframe-specific values
                 self.max_risk_per_trade = timeframe_config.get('max_risk_per_trade', self.max_risk_per_trade)
                 self.max_daily_loss = timeframe_config.get('max_daily_loss', self.max_daily_loss)
                 
                 # Update position management with timeframe-specific values
                 self.max_concurrent_trades = timeframe_config.get('max_concurrent_trades', self.max_concurrent_trades)
-                self.max_daily_trades = timeframe_config.get('max_daily_trades', self.max_daily_trades)
-                self.min_trades_spacing = timeframe_config.get('min_trades_spacing', self.min_trades_spacing)
-                
-                # Update correlation threshold
-                if 'correlation_threshold' in timeframe_config:
-                    self.correlation_limits['max_correlation'] = timeframe_config['correlation_threshold']
-        
                 
                 logger.info(f"RiskManager updated with {timeframe} timeframe parameters")
             except Exception as e:
                 logger.error(f"Error loading timeframe-specific parameters: {e}")
         
-        if not config:
-            logger.info("No custom config provided for RiskManager, using current settings")
-            return
-            
-        # Update the configuration if provided
-        try:
-            # Get risk config from the main config
-            risk_config = config.get('RISK_CONFIG', {})
-            if not risk_config:
-                logger.info("No risk configuration found in provided config, using current settings")
-                return
-                
-            # Update internal config
-            for key, value in risk_config.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
-                    logger.debug(f"Updated RiskManager config: {key} = {value}")
-                    
-            logger.info("RiskManager initialized with custom configuration")
-            
-        except Exception as e:
-            logger.error(f"Error initializing RiskManager: {str(e)}")
-            logger.info("Using current RiskManager configuration")
+        logger.info("No custom config provided for RiskManager, using current settings")
+        return
+       
+        logger.info("RiskManager re-initialized (using global RISK_MANAGER_CONFIG).")
 
         
     def calculate_position_size(
         self,
         account_balance: float,
-        risk_per_trade: float,
+        risk_per_trade: float, # Raw percentage, e.g., 1.0 for 1%
         entry_price: float,
         stop_loss_price: float,
-        symbol: str,
-        market_condition: str = 'normal'
+        symbol: str
     ) -> float:
         """
         Calculate position size based on account balance, risk percentage, and stop loss distance.
         
         Args:
             account_balance: Current account balance
-            risk_per_trade: Risk percentage (0-100)
+            risk_per_trade: Risk percentage (e.g., 1.0 for 1%)
             entry_price: Entry price of the trade
             stop_loss_price: Stop loss price
             symbol: Trading symbol
-            market_condition: Current market condition (normal, volatile, etc.)
             
         Returns:
             float: Position size in lots
@@ -563,7 +545,7 @@ class RiskManager:
                     min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
                     
                     # If the fixed lot size is less than the symbol minimum,
-                    # use the symbol minimum directly
+                    # use the symbol's minimum lot size directly
                     if position_size < min_lot_size:
                         position_size = min_lot_size
                         logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum lot size {min_lot_size} for {symbol}, using minimum")
@@ -577,7 +559,7 @@ class RiskManager:
                 
             # If not using fixed lot size, calculate based on risk
             # Validate inputs first
-            if not self._validate_position_inputs(account_balance, risk_per_trade/100, entry_price, stop_loss_price):
+            if not self._validate_position_inputs(account_balance, risk_per_trade / 100.0, entry_price, stop_loss_price):
                 logger.warning("Invalid position sizing inputs, using default size")
                 # Use symbol-specific minimum as fallback
                 if self.mt5_handler:
@@ -586,14 +568,8 @@ class RiskManager:
                     return min_lot_size
                 return 0.01  # Default minimum
                 
-            # Adjust risk percentage based on market condition
-            adjusted_risk = risk_per_trade
-            if market_condition in self.market_condition_adjustments:
-                adjusted_risk *= self.market_condition_adjustments[market_condition]
-                logger.debug(f"Adjusted risk by factor {self.market_condition_adjustments[market_condition]} for {market_condition} market")
-                
             # Calculate risk amount
-            risk_amount = account_balance * (adjusted_risk / 100)
+            risk_amount = account_balance * (risk_per_trade / 100.0) # Convert risk_per_trade percentage to decimal
             
             # Calculate stop distance
             stop_distance = abs(entry_price - stop_loss_price)
@@ -665,94 +641,53 @@ class RiskManager:
         return account_info.get('balance', 0.0)
         
     def validate_and_size_trade(self, trade_dict: dict, strategy_id: Optional[str] = None) -> dict:
-        """Validate and size a trade proposal according to all risk rules.
-
-        Args:
-            trade_dict (dict): Proposed trade (symbol, entry, stop_loss, take_profit, direction, etc.)
-            strategy_id (str, optional): Strategy identifier for per-strategy risk overrides
-        Returns:
-            dict: {valid: bool, reason: str, adjusted_trade: dict}
-        """
-        # Ensure strategy_id is always a string and never None
-        if strategy_id is None:
-            strategy_id = ''
-        else:
-            strategy_id = str(strategy_id)
-        # Copy trade_dict to avoid mutating input
-        trade = dict(trade_dict)
-        symbol = str(trade.get('symbol') or '')
-        entry = trade.get('entry_price', trade.get('entry'))
-        stop = trade.get('stop_loss')
-        tp = trade.get('take_profit')
-        direction = trade.get('direction')
-        requested_size = trade.get('size', 0) or trade.get('position_size', 0)
-        account_balance = self.get_account_balance() or 10000.0
-        open_trades = getattr(self, 'open_trades', [])
         
-        # Calculate lot size
-        if self.use_fixed_lot_size:
-            # Use fixed lot size from config, but always align with symbol's constraints
-            if self.mt5_handler:
-                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                
-                # If fixed lot size is below symbol minimum, use minimum directly
-                if self.fixed_lot_size < min_lot_size:
-                    lot_size = min_lot_size
-                    logger.info(f"Fixed lot size {self.fixed_lot_size} is below minimum {min_lot_size} for {symbol}, using minimum")
-                else:
-                    # Normalize the fixed lot size according to symbol constraints
-                    normalized_lot = self.mt5_handler.normalize_volume(symbol, self.fixed_lot_size)
-                    lot_size = normalized_lot
-                    logger.info(f"Normalized fixed lot size from {self.fixed_lot_size} to {lot_size} for {symbol}")
-                
-                # Apply max lot size cap
-                lot_size = min(lot_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size for {symbol}: {lot_size}")
-            else:
-                lot_size = min(self.fixed_lot_size, self.max_lot_size)
-                logger.info(f"Using fixed lot size from config (no mt5_handler): {lot_size}")
-        elif requested_size > 0:
-            # Use requested size but ensure it meets symbol constraints
-            if self.mt5_handler:
-                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                lot_size = max(requested_size, min_lot_size)
-                lot_size = self.mt5_handler.normalize_volume(symbol, lot_size)
-            else:
-                lot_size = requested_size
-                
-            # Apply max lot size cap
-            lot_size = min(lot_size, self.max_lot_size)
-            logger.info(f"Using requested position size (adjusted): {lot_size}")
-        else:
-            # Ensure required args are not None and correct type
-            entry_val = float(entry) if entry is not None else 0.0
-            stop_val = float(stop) if stop is not None else 0.0
-            symbol_val = str(symbol) if symbol is not None else ''
-            lot_size = self.calculate_position_size(
-                account_balance=account_balance,
-                risk_per_trade=self.max_risk_per_trade * 100,
-                entry_price=entry_val,
-                stop_loss_price=stop_val,
-                symbol=symbol_val
-            )
-        trade['size'] = lot_size
-        # Validate trade using existing logic
-        validation = self.validate_trade(trade, account_balance, open_trades)
-        if not validation.get('valid'):
+        trade_input = dict(trade_dict) # Operate on a copy
+        
+        account_balance = self.get_account_balance()
+        if account_balance <= 0:
+            logger.warning(f"Account balance is {account_balance}. Cannot validate or size trade.")
             return {
-                'valid': False,
-                'reason': validation.get('reason', 'Trade failed risk checks'),
-                'adjusted_trade': None
+                'is_valid': False, 
+                'reason': f"Invalid account balance: {account_balance}",
+                'final_trade_params': None
             }
-        # If position size was adjusted, update
-        if 'adjusted_position_size' in validation:
-            trade['size'] = validation['adjusted_position_size']
-        # Optionally, adjust SL/TP if needed (future extension)
-        # Return valid trade
+
+        open_trades = getattr(self, 'open_trades', [])
+        if not open_trades and self.mt5_handler:
+            logger.debug("RiskManager.open_trades is empty, fetching from MT5Handler for validate_and_size_trade.")
+            fetched_positions = self.mt5_handler.get_open_positions()
+            open_trades = fetched_positions if fetched_positions is not None else []
+        
+        logger.debug(f"Calling comprehensive validate_trade with trade_input: {trade_input}, balance: {account_balance}")
+        validation_result = self.validate_trade(trade_input, account_balance, open_trades)
+
+        if not validation_result.get('is_valid'):
+            logger.warning(f"Trade validation failed by validate_trade: {validation_result.get('reason')}")
+            return {
+                'is_valid': False,
+                'reason': validation_result.get('reason', 'Trade failed comprehensive risk checks'),
+                'final_trade_params': None
+            }
+
+        final_position_size = validation_result.get('position_size')
+        if final_position_size is None or final_position_size <= 0:
+            logger.error(f"Validation succeeded but returned invalid position_size: {final_position_size}. Trade considered invalid.")
+            return {
+                'is_valid': False,
+                'reason': f"Validation succeeded but returned invalid final position size: {final_position_size}",
+                'final_trade_params': None
+            }
+
+        final_trade_params = dict(trade_input)
+        final_trade_params['position_size'] = final_position_size
+        final_trade_params['size'] = final_position_size 
+
+        logger.info(f"Trade validated and sized successfully. Final parameters: {final_trade_params}")
         return {
-            'valid': True,
-            'reason': 'Trade validated and sized',
-            'adjusted_trade': trade
+            'is_valid': True,
+            'reason': validation_result.get('reason', 'Trade validated and sized'),
+            'final_trade_params': final_trade_params
         }
 
     def on_trade_opened(self, trade: dict) -> None:
@@ -864,4 +799,175 @@ class RiskManager:
         """Update drawdown stats if needed (placeholder for future expansion)."""
         # This can be expanded to track max drawdown, etc.
         return None
+
+    def calculate_portfolio_risk_limits(self, tickers_to_analyze: List[str]) -> Dict[str, Any]:
+        
+        logger.info(f"Calculating portfolio risk limits. Initial tickers to analyze: {tickers_to_analyze}")
+        risk_analysis: Dict[str, Any] = {}
+        current_prices: Dict[str, float] = {}
+
+        if not self.mt5_handler:
+            logger.error("MT5Handler not available in RiskManager. Cannot proceed with portfolio risk calculation.")
+            for ticker in tickers_to_analyze:
+                risk_analysis[ticker] = {
+                    "current_price": 0.0,
+                    "remaining_position_limit": 0.0,
+                    "reasoning": {"error": "MT5Handler not available"},
+                }
+            return risk_analysis
+
+        # Step 1: Get Account Info (Cash)
+        account_info = self.mt5_handler.get_account_info()
+        cash = float(account_info.get("balance", 0.0))
+        logger.debug(f"Fetched cash (account balance): {cash}")
+
+        # Step 2: Get Open Positions from MT5
+        mt5_positions = self.mt5_handler.get_open_positions() # Returns list of dicts
+        logger.debug(f"Fetched {len(mt5_positions)} open positions from MT5.")
+
+        # Step 3: Determine all unique tickers involved (to analyze + existing positions)
+        all_relevant_tickers = set(tickers_to_analyze)
+        for pos in mt5_positions:
+            if pos.get("symbol"): 
+                all_relevant_tickers.add(pos["symbol"])
+        logger.debug(f"All relevant tickers for price fetching: {list(all_relevant_tickers)}")
+
+        # Step 4: Fetch current prices for ALL relevant tickers
+        for ticker in all_relevant_tickers:
+            price = 0.0
+            try:
+                tick_data = self.mt5_handler.get_last_tick(ticker)
+                if tick_data and isinstance(tick_data, dict):
+                    fetched_price = tick_data.get('ask') # Default to ask for new potential trades
+                    
+                    # Find positions matching the current ticker
+                    matching_positions = []
+                    for p in mt5_positions: # mt5_positions is List[Dict[str, Any]]
+                        pos_symbol = p.get("symbol") # pos_symbol could be None or Not Str
+                        # Ensure pos_symbol is a string and matches the ticker before appending
+                        if isinstance(pos_symbol, str) and pos_symbol == ticker:
+                            matching_positions.append(p)
+
+                    if matching_positions: # Check if the list is not empty
+                        # If there are open positions for this ticker, use their current price for valuation
+                        # Taking the first one if multiple (though usually one aggregate position in MT5)
+                        # .get on matching_positions[0] (a Dict) is fine.
+                        fetched_price = matching_positions[0].get('current_price', fetched_price)
+                    
+                    if fetched_price is not None and float(fetched_price) > 0:
+                        price = float(fetched_price)
+                        current_prices[ticker] = price
+                        logger.debug(f"Fetched/confirmed current price for {ticker}: {price}")
+                    else:
+                        logger.warning(f"Could not get a valid price for {ticker}. Defaulting to 0.0. Tick: {tick_data}")
+                        current_prices[ticker] = 0.0
+                else:
+                    logger.warning(f"No tick data found for {ticker}. Defaulting price to 0.0.")
+                    current_prices[ticker] = 0.0
+            except Exception as e:
+                logger.error(f"Exception fetching price for {ticker}: {e}")
+                current_prices[ticker] = 0.0
+        
+        # Initialize risk_analysis structure for all tickers_to_analyze
+        for ticker in tickers_to_analyze:
+            risk_analysis[ticker] = {
+                "current_price": current_prices.get(ticker, 0.0),
+                "remaining_position_limit": 0.0, # To be calculated later
+                "reasoning": {} # To be populated later
+            }
+            if current_prices.get(ticker, 0.0) == 0.0:
+                 risk_analysis[ticker]["reasoning"]["error"] = "Failed to fetch valid price for limit calculation"
+
+        # Step 5: Transform MT5 positions and calculate their market value
+        # Structure: {'TICKER': {'long_volume': float, 'short_volume': float, 'long_value': float, 'short_value': float, 'net_value': float}}
+        transformed_positions: Dict[str, Dict[str, float]] = {}
+        total_long_value = 0.0
+        total_short_value = 0.0
+
+        for pos in mt5_positions:
+            symbol_from_pos = pos.get("symbol") 
+            
+            if not isinstance(symbol_from_pos, str): 
+                logger.warning(f"Skipping position transformation for position with ticket {pos.get('ticket', 'N/A')} because its symbol is not a valid string or is missing: '{symbol_from_pos}'")
+                continue
+
+            # At this point, symbol_from_pos is confirmed to be a str.
+            volume = float(pos.get("volume", 0.0))
+            pos_type = pos.get("type") 
+            # Explicitly use the validated string variable for the key.
+            price_at_valuation = current_prices.get(symbol_from_pos, 0.0) 
+            
+            if price_at_valuation == 0.0:
+                logger.warning(f"Skipping position transformation for position with ticket {pos.get('ticket', 'N/A')} (Symbol: {symbol_from_pos}) due to zero/missing price_at_valuation.")
+                continue
+
+            # Ensure all subsequent uses of the position's symbol use symbol_from_pos
+            if symbol_from_pos not in transformed_positions:
+                transformed_positions[symbol_from_pos] = {'long_volume': 0.0, 'short_volume': 0.0, 'long_value': 0.0, 'short_value': 0.0, 'net_value': 0.0}
+            
+            market_value = volume * price_at_valuation
+
+            if pos_type == 0: # BUY (Long)
+                transformed_positions[symbol_from_pos]['long_volume'] += volume
+                transformed_positions[symbol_from_pos]['long_value'] += market_value
+                total_long_value += market_value
+            elif pos_type == 1: # SELL (Short)
+                transformed_positions[symbol_from_pos]['short_volume'] += volume
+                transformed_positions[symbol_from_pos]['short_value'] += market_value # Market value of shares owed
+                total_short_value += market_value
+        
+        for symbol_data_key in list(transformed_positions.keys()): # Iterate over keys to allow modification
+            # Ensure symbol_data_key is used if it was the one validated
+            symbol_data = transformed_positions[symbol_data_key]
+            symbol_data['net_value'] = symbol_data['long_value'] - symbol_data['short_value']
+
+        logger.debug(f"Transformed positions: {transformed_positions}")
+        logger.debug(f"Total long value: {total_long_value}, Total short value: {total_short_value}")
+
+        # Step 6: Calculate Total Portfolio Value
+        # total_portfolio_value = cash + sum of (long_qty * price) - sum of (short_qty * price)
+        total_portfolio_value = cash + total_long_value - total_short_value
+        logger.info(f"Calculated Total Portfolio Value: {total_portfolio_value:.2f} (Cash: {cash:.2f} + Longs: {total_long_value:.2f} - Shorts: {total_short_value:.2f})")
+
+        # Step 7: Calculate risk limits for each ticker in tickers_to_analyze
+        for ticker in tickers_to_analyze:
+            current_price_for_ticker = current_prices.get(ticker, 0.0)
+            analysis_entry = risk_analysis[ticker] # Get the pre-initialized entry
+
+            analysis_entry["reasoning"]["portfolio_cash"] = float(cash)
+            analysis_entry["reasoning"]["total_portfolio_value"] = float(total_portfolio_value)
+            
+            if current_price_for_ticker == 0.0:
+                logger.warning(f"Cannot calculate limits for {ticker}; current price is 0 or unavailable.")
+                analysis_entry["remaining_position_limit"] = 0.0
+                if "error" not in analysis_entry["reasoning"]:
+                    analysis_entry["reasoning"]["error"] = "Missing price for limit calculation"
+                continue
+
+            # Current market value of this specific ticker's position (if any)
+            ticker_position_data = transformed_positions.get(ticker, {'long_value': 0.0, 'short_value': 0.0})
+            # Absolute exposure for this ticker
+            current_market_value_of_ticker_position = abs(ticker_position_data['long_value'] - ticker_position_data['short_value'])
+            analysis_entry["reasoning"]["current_market_value_of_ticker_position"] = float(current_market_value_of_ticker_position)
+
+            # Position limit (e.g., 20% of total portfolio value per ticker)
+            # This percentage should ideally be configurable.
+            max_single_ticker_exposure_percentage = 0.20 # As per original agent snippet
+            cash_limit_per_ticker = total_portfolio_value * max_single_ticker_exposure_percentage
+            analysis_entry["reasoning"]["cash_limit_per_ticker_raw_ (20%)"] = float(cash_limit_per_ticker)
+
+            # Remaining cash limit for *new* trades on this ticker
+            remaining_cash_for_new_trades_on_ticker = cash_limit_per_ticker - current_market_value_of_ticker_position
+            analysis_entry["reasoning"]["remaining_cash_for_new_trades_on_ticker_(limit-current_exposure)"] = float(remaining_cash_for_new_trades_on_ticker)
+            
+            # Ensure this remaining limit does not exceed available cash in the account
+            # Also, ensure it's not negative (meaning already over-exposed or limit is negative due to low portfolio value)
+            final_remaining_cash_allocation = max(0.0, min(remaining_cash_for_new_trades_on_ticker, cash))
+            analysis_entry["remaining_position_limit"] = float(final_remaining_cash_allocation)
+            analysis_entry["reasoning"]["final_remaining_cash_allocation_(capped_by_available_cash_and_non_negative)"] = float(final_remaining_cash_allocation)
+
+            logger.info(f"Risk limits for {ticker}: Price={current_price_for_ticker:.5f}, TotalPortfolioVal={total_portfolio_value:.2f}, LimitPerTicker={cash_limit_per_ticker:.2f}, CurrentExposure={current_market_value_of_ticker_position:.2f}, RemainingCashAllocation={final_remaining_cash_allocation:.2f}")
+
+        logger.info(f"Completed portfolio risk limit calculation. Full Analysis: {risk_analysis}")
+        return risk_analysis
         
