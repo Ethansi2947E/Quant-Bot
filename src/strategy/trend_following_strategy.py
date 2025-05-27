@@ -21,6 +21,7 @@ from typing import Dict, List, Any, Optional
 
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
+import src.utils.candlestick_patterns as cp
 
 class TrendFollowingStrategy(SignalGenerator):
     """Trend Following Strategy: Pure price action (no indicators, no EMAs/ADX/ATR)."""
@@ -589,15 +590,15 @@ class TrendFollowingStrategy(SignalGenerator):
             else:
                 trend_ht = None
             # Precompute vectorized patterns
-            hammer = self.detect_hammer(df_primary)
-            shooting_star = self.detect_shooting_star(df_primary)
-            bullish_engulfing = self.detect_bullish_engulfing(df_primary)
-            bearish_engulfing = self.detect_bearish_engulfing(df_primary)
-            inside_bar = self.detect_inside_bar(df_primary)
-            morning_star = self.detect_morning_star(df_primary)
-            evening_star = self.detect_evening_star(df_primary)
-            false_breakout_buy = self.detect_false_breakout(df_primary, 'buy')
-            false_breakout_sell = self.detect_false_breakout(df_primary, 'sell')
+            hammer = cp.detect_hammer(df_primary)
+            shooting_star = cp.detect_shooting_star(df_primary)
+            bullish_engulfing = cp.detect_bullish_engulfing(df_primary)
+            bearish_engulfing = cp.detect_bearish_engulfing(df_primary)
+            inside_bar = cp.detect_inside_bar(df_primary)
+            morning_star = cp.detect_morning_star_complex(df_primary)
+            evening_star = cp.detect_evening_star_complex(df_primary)
+            false_breakout_buy = cp.detect_strong_reversal_candle(df_primary, direction='bullish')
+            false_breakout_sell = cp.detect_strong_reversal_candle(df_primary, direction='bearish')
 
             idx = len(df_primary) - 1
             trend = self._get_trend_direction(df_primary, window=5)
@@ -693,127 +694,7 @@ class TrendFollowingStrategy(SignalGenerator):
         return signals
 
     # --- VECTORIZE CANDLESTICK PATTERNS (industry standard) ---
-    @staticmethod
-    def detect_hammer(df: pd.DataFrame) -> pd.Series:
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (lower_wick > 2 * body) &
-            (upper_wick < body)
-        )
-
-    @staticmethod
-    def detect_shooting_star(df: pd.DataFrame) -> pd.Series:
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (upper_wick > 2 * body) &
-            (lower_wick < body)
-        )
-
-    @staticmethod
-    def detect_bullish_engulfing(df: pd.DataFrame) -> pd.Series:
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bearish = prev_close < prev_open
-        is_curr_bullish = df['close'] > df['open']
-        engulfs = (df['open'] < prev_close) & (df['close'] > prev_open)
-        return is_prev_bearish & is_curr_bullish & engulfs
-
-    @staticmethod
-    def detect_bearish_engulfing(df: pd.DataFrame) -> pd.Series:
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bullish = prev_close > prev_open
-        is_curr_bearish = df['close'] < df['open']
-        engulfs = (df['open'] > prev_close) & (df['close'] < prev_open)
-        return is_prev_bullish & is_curr_bearish & engulfs
-
-    @staticmethod
-    def detect_inside_bar(df: pd.DataFrame) -> pd.Series:
-        prev_high = df['high'].shift(1)
-        prev_low = df['low'].shift(1)
-        return (df['high'] < prev_high) & (df['low'] > prev_low)
-
-    @staticmethod
-    def detect_morning_star(df: pd.DataFrame) -> pd.Series:
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        is_first_bearish = c1['close'] < c1['open']
-        is_last_bullish = c3['close'] > c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_down = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1) + 0.3 * c1_body
-        first_61_8_level = c1['open'] - 0.618 * c1_body
-        good_recovery = c3['close'] > first_61_8_level
-        return (
-            is_first_bearish & is_last_bullish & is_middle_small & (is_gap_down | has_minimal_overlap) & good_recovery
-        )
-
-    @staticmethod
-    def detect_evening_star(df: pd.DataFrame) -> pd.Series:
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        is_first_bullish = c1['close'] > c1['open']
-        is_last_bearish = c3['close'] < c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_up = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1) - 0.3 * c1_body
-        first_61_8_level = c1['open'] + 0.618 * c1_body
-        good_decline = c3['close'] < first_61_8_level
-        return (
-            is_first_bullish & is_last_bearish & is_middle_small & (is_gap_up | has_minimal_overlap) & good_decline
-        )
-
-    @staticmethod
-    def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002, volume_threshold: Optional[float] = None) -> pd.Series:
-        if len(df) < 2:
-            return pd.Series(dtype=bool, index=df.index)
-        prev_close = df['close'].shift(1)
-        tol_val = df['close'] * price_tolerance
-        total_range = df['high'] - df['low']
-        if direction == 'buy':
-            wick = df['close'] - df['low']
-            wick_ok = wick > 0.5 * total_range
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
-            else:
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok
-                )
-        else:
-            wick = df['high'] - df['close']
-            wick_ok = wick > 0.5 * total_range
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
-            else:
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok
-                )
-        return result 
+    # All local static pattern detection methods (detect_hammer, detect_shooting_star, 
+    # detect_bullish_engulfing, detect_bearish_engulfing, detect_inside_bar,
+    # detect_morning_star, detect_evening_star, detect_false_breakout)
+    # are now removed as they are replaced by calls to src.utils.candlestick_patterns 

@@ -29,6 +29,7 @@ import time
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr
 from src.risk_manager import RiskManager
+import src.utils.candlestick_patterns as cp # Added import
 
 # Strategy parameter profiles for different timeframes
 TIMEFRAME_PROFILES = {
@@ -773,10 +774,6 @@ class BreakoutReversalStrategy(SignalGenerator):
         self.risk_manager = RiskManager.get_instance()
         self.use_range_extension_tp = use_range_extension_tp
         self.swing_window = kwargs.get('swing_window', self.candles_to_check)
-        # --- New: simplified entry mode flag (defaults to True) ---
-        # When enabled, the strategy will first look for minimal-confluence setups
-        # (engulfing + high-volume rejection at support/resistance) and only after
-        # entering will it apply the full scoring system for sizing / confidence.
         self.use_simple_entry = kwargs.get("use_simple_entry", True)
         # --- Deduplication tracking ---
         self.processed_bars = {}  # (symbol, timeframe): last_processed_bar_timestamp (str)
@@ -1438,15 +1435,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         return trend_line['slope'] * idx + trend_line['intercept']
     
     def _identify_consolidation_ranges(self, symbol: str, df: pd.DataFrame) -> None:
-        """
-        Identify recent consolidation ranges for target calculation using volatility metrics.
-        Also clusters price values in the consolidation window to find volume pockets (using KMeans or 1D clustering),
-        and computes a volume-by-price histogram (volume profile) for the range.
-        These are used to boost signal scoring if a trade entry/level is near a high-volume node.
-        Stores:
-            self.last_consolidation_ranges[symbol]['clusters']: List of dicts with min, max, mean, total_volume, count
-            self.last_consolidation_ranges[symbol]['volume_profile']: List of dicts with bin_min, bin_max, center, total_volume
-        """
+
         # Always set current_time from the last index
         current_time = df.index[-1]
         # Ensure current_time is a datetime object
@@ -1563,11 +1552,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                     else:
                         volatility_ratio = 1.0
                     
-                    # Define consolidation as period where:
-                    # 1. Recent range average is less than 50% of overall average range
-                    # 2. Standard deviation is low relative to price
-                    # 3. Total range is reasonable (not too wide)
-                    # Fix: Use explicit boolean checks instead of Series comparison
                     cond1 = bool(volatility_ratio < 0.5)
                     
                     # Make sure atr is not None before multiplying
@@ -1590,10 +1574,6 @@ class BreakoutReversalStrategy(SignalGenerator):
                     range_size = 0
                     is_consolidation = False
             
-            # Store the range information
-            # --- CLUSTER-BASED CONSOLIDATION ZONES & VOLUME PROFILE ---
-            # Cluster price values (closes) in the consolidation window to find price pockets
-            # and compute a simple volume-by-price histogram (volume profile)
             clusters = []
             volume_profile = []
             try:
@@ -2063,9 +2043,17 @@ class BreakoutReversalStrategy(SignalGenerator):
                 # Use relaxed breakout logic
                 if self._is_breakout_candle(current_candle, df, level['zone_max'], 'buy'):
                     # False-breakout filter for bullish breakouts (safe check)
-                    fb = self.detect_false_breakout(df, 'bullish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
-                    if fb.iloc[i]:
-                        logger.debug(f"🚫 False breakout detected for {symbol} at resistance breakout (bar {i}), skipping signal.")
+                    fb = cp.detect_key_reversal_bar_after_breakout(
+                        df.iloc[:i+1], # Pass data up to and including current candle
+                        level=level['zone_max'],
+                        break_direction='bullish',
+                        reversal_close_percent_of_range=0.3, # Default from breakout_reversal
+                        body_min_percent_of_range=0.3, # Default assumption
+                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
+                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
+                    )
+                    if not fb.empty and fb.iloc[-1]:
+                        logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at resistance breakout (bar {i}), skipping signal.")
                         continue  # skip this candle—likely a fakeout
                     # Generate buy signal
                     entry_price = current_candle['close']
@@ -2096,9 +2084,17 @@ class BreakoutReversalStrategy(SignalGenerator):
                     h1_trend != 'bearish'):  # Just avoid counter-trend signals
                     
                     # False-breakout filter for bullish trendline breakouts
-                    fb = self.detect_false_breakout(df, 'bullish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
-                    if fb.iloc[i]:
-                        logger.debug(f"🚫 False breakout detected for {symbol} at trendline breakout (bar {i}), skipping signal.")
+                    fb = cp.detect_key_reversal_bar_after_breakout(
+                        df.iloc[:i+1],
+                        level=curr_line_value, # The trend line value acts as the dynamic level
+                        break_direction='bullish',
+                        reversal_close_percent_of_range=0.3,
+                        body_min_percent_of_range=0.3,
+                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
+                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
+                    )
+                    if not fb.empty and fb.iloc[-1]:
+                        logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at trendline breakout (bar {i}), skipping signal.")
                         continue
                     # Generate buy signal
                     entry_price = current_candle['close']
@@ -2175,9 +2171,17 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
                 # Use relaxed breakout logic
                 if self._is_breakout_candle(current_candle, df, level['zone_min'], 'sell'):
-                    fb = self.detect_false_breakout(df, 'bearish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
-                    if fb.iloc[i]:
-                        logger.debug(f"🚫 False breakdown detected for {symbol} at support breakdown (bar {i}), skipping signal.")
+                    fb = cp.detect_key_reversal_bar_after_breakout(
+                        df.iloc[:i+1],
+                        level=level['zone_min'],
+                        break_direction='bearish',
+                        reversal_close_percent_of_range=0.3,
+                        body_min_percent_of_range=0.3,
+                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
+                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
+                    )
+                    if not fb.empty and fb.iloc[-1]:
+                        logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at support breakdown (bar {i}), skipping signal.")
                         continue
                     entry_price = current_candle['close']
                     stop_loss = max(current_candle['high'], previous_candle['high'])
@@ -2195,9 +2199,17 @@ class BreakoutReversalStrategy(SignalGenerator):
                     current_candle['close'] < curr_line_value * (1 - self.price_tolerance) and
                     h1_trend != 'bullish'):
                     # False-breakout filter for bearish trendline breakdowns
-                    fb = self.detect_false_breakout(df, 'bearish', price_tolerance=self.price_tolerance, volume_threshold=volume_threshold)
-                    if fb.iloc[i]:
-                        logger.debug(f"🚫 False breakdown detected for {symbol} at trendline breakdown (bar {i}), skipping signal.")
+                    fb = cp.detect_key_reversal_bar_after_breakout(
+                        df.iloc[:i+1],
+                        level=curr_line_value, # The trend line value acts as the dynamic level
+                        break_direction='bearish',
+                        reversal_close_percent_of_range=0.3,
+                        body_min_percent_of_range=0.3,
+                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
+                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
+                    )
+                    if not fb.empty and fb.iloc[-1]:
+                        logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at trendline breakdown (bar {i}), skipping signal.")
                         continue
                     # Generate sell signal
                     entry_price = current_candle['close']
@@ -2289,12 +2301,12 @@ class BreakoutReversalStrategy(SignalGenerator):
         bearish_trend_lines = [line for line in trend_lines if line['angle'] > -60]
 
         # Precompute vectorized pattern detections for efficiency
-        hammer_pattern = self.detect_hammer(df, self.price_tolerance)
-        shooting_star_pattern = self.detect_shooting_star(df, self.price_tolerance)
-        bullish_engulfing_pattern = self.detect_bullish_engulfing(df)
-        bearish_engulfing_pattern = self.detect_bearish_engulfing(df)
-        morning_star_pattern = self.detect_morning_star(df, self.price_tolerance)
-        evening_star_pattern = self.detect_evening_star(df, self.price_tolerance)
+        hammer_pattern = cp.detect_hammer(df) # Removed price_tolerance
+        shooting_star_pattern = cp.detect_shooting_star(df) # Removed price_tolerance
+        bullish_engulfing_pattern = cp.detect_bullish_engulfing(df)
+        bearish_engulfing_pattern = cp.detect_bearish_engulfing(df)
+        morning_star_pattern = cp.detect_morning_star(df, c1_c2_gap_down_percent=self.price_tolerance, c2_c3_gap_up_percent=self.price_tolerance) # Pass relevant params
+        evening_star_pattern = cp.detect_evening_star(df, c1_c2_gap_up_percent=self.price_tolerance, c2_c3_gap_down_percent=self.price_tolerance) # Pass relevant params
         # False breakout is more custom, so keep as is for now
 
         # Check for reversal at support (bullish patterns)
@@ -3036,164 +3048,44 @@ class BreakoutReversalStrategy(SignalGenerator):
         return clustered_lines
 
     def _calculate_range_extension(self, df, entry_price, direction):
-        """
-        Calculate a Market Profile-based range extension TP.
-        Uses the average range of the last 50 bars as the extension distance.
-        """
-        lookback = min(50, len(df))
-        if lookback == 0:
-            return entry_price  # fallback
-        ranges = df['high'].iloc[-lookback:] - df['low'].iloc[-lookback:]
-        avg_range = ranges.mean()
-        if direction == "buy":
-            return entry_price + avg_range
-        else:
-            return entry_price - avg_range
+        if not self.use_range_extension_tp:
+            return None
 
-    # --- VECTORIZE CANDLESTICK PATTERNS (industry standard) ---
-    @staticmethod
-    def detect_hammer(df: pd.DataFrame, price_tolerance: float = 0.002) -> pd.Series:
-        """Vectorized detection of Hammer pattern (bullish reversal) for all candles."""
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (lower_wick > 2 * body) &
-            (upper_wick < body)
-        )
+        if df is None or df.empty:
+            self.logger.warning(f"[{self.name}] DataFrame is empty, cannot calculate range extension TP.")
+            return None
 
-    @staticmethod
-    def detect_shooting_star(df: pd.DataFrame, price_tolerance: float = 0.002) -> pd.Series:
-        """Vectorized detection of Shooting Star pattern (bearish reversal) for all candles."""
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (upper_wick > 2 * body) &
-            (lower_wick < body)
-        )
+        lookback_period = getattr(self, 'range_extension_lookback', 20) # Add a configurable lookback
+        
+        # Ensure lookback does not exceed available data
+        actual_lookback = min(lookback_period, len(df))
 
-    @staticmethod
-    def detect_bullish_engulfing(df: pd.DataFrame) -> pd.Series:
-        """Vectorized detection of Bullish Engulfing pattern for all candles."""
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bearish = prev_close < prev_open
-        is_curr_bullish = df['close'] > df['open']
-        engulfs = (df['open'] < prev_close) & (df['close'] > prev_open)
-        return is_prev_bearish & is_curr_bullish & engulfs
+        if actual_lookback <= 0:
+            self.logger.warning(f"[{self.name}] Not enough data for range extension lookback (actual_lookback: {actual_lookback}).")
+            return None
+            
+        try:
+            # Calculate average range (high - low) over the lookback period
+            avg_range = (df['high'].iloc[-actual_lookback:] - df['low'].iloc[-actual_lookback:]).mean()
+            
+            if pd.isna(avg_range) or avg_range <= 0:
+                self.logger.warning(f"[{self.name}] Could not calculate a valid average range (avg_range: {avg_range}).")
+                return None
 
-    @staticmethod
-    def detect_bearish_engulfing(df: pd.DataFrame) -> pd.Series:
-        """Vectorized detection of Bearish Engulfing pattern for all candles."""
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bullish = prev_close > prev_open
-        is_curr_bearish = df['close'] < df['open']
-        engulfs = (df['open'] > prev_close) & (df['close'] < prev_open)
-        return is_prev_bullish & is_curr_bearish & engulfs
-
-    @staticmethod
-    def detect_inside_bar(df: pd.DataFrame) -> pd.Series:
-        """Vectorized detection of Inside Bar pattern for all candles."""
-        prev_high = df['high'].shift(1)
-        prev_low = df['low'].shift(1)
-        return (df['high'] < prev_high) & (df['low'] > prev_low)
-
-    @staticmethod
-    def detect_morning_star(df: pd.DataFrame, price_tolerance: float = 0.002) -> pd.Series:
-        """Vectorized detection of Morning Star (bullish 3-bar reversal) for all candles."""
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        c3_body = (c3['close'] - c3['open']).abs()
-        is_first_bearish = c1['close'] < c1['open']
-        is_last_bullish = c3['close'] > c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_down = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1) + 0.3 * c1_body
-        first_61_8_level = c1['open'] - 0.618 * c1_body
-        good_recovery = c3['close'] > first_61_8_level
-        return (
-            is_first_bearish & is_last_bullish & is_middle_small & (is_gap_down | has_minimal_overlap) & good_recovery
-        )
-
-    @staticmethod
-    def detect_evening_star(df: pd.DataFrame, price_tolerance: float = 0.002) -> pd.Series:
-        """Vectorized detection of Evening Star (bearish 3-bar reversal) for all candles."""
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        c3_body = (c3['close'] - c3['open']).abs()
-        is_first_bullish = c1['close'] > c1['open']
-        is_last_bearish = c3['close'] < c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_up = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1) - 0.3 * c1_body
-        first_61_8_level = c1['open'] + 0.618 * c1_body
-        good_decline = c3['close'] < first_61_8_level
-        return (
-            is_first_bullish & is_last_bearish & is_middle_small & (is_gap_up | has_minimal_overlap) & good_decline
-        )
-
-    @staticmethod
-    def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002, volume_threshold: float = None) -> pd.Series:
-        """
-        Vectorized detection of False Breakout pattern (custom, based on wick and volume).
-        Now requires wick > 50% of range AND volume > 90th percentile (if volume_threshold is provided).
-        """
-        if len(df) < 2:
-            # Explicitly return empty Series if not enough data
-            return pd.Series(dtype=bool, index=df.index)
-        prev_close = df['close'].shift(1)
-        tol_val = df['close'] * price_tolerance
-        total_range = df['high'] - df['low']
-        if direction == 'bullish':
-            wick = df['close'] - df['low']
-            body = (df['close'] - df['open']).abs()
-            wick_ok = wick > 0.5 * total_range
-            # Volume filter: require volume above 90th percentile if provided
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
+            if direction == "buy":
+                take_profit = entry_price + avg_range
+            elif direction == "sell":
+                take_profit = entry_price - avg_range
             else:
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok
-                )
-        else:
-            wick = df['high'] - df['close']
-            body = (df['close'] - df['open']).abs()
-            wick_ok = wick > 0.5 * total_range
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
-            else:
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok
-                )
-        # Optionally: log the number of detected false breakouts
-        # logger.debug(f"[FALSE BREAKOUT] {direction}: {result.sum()} bars flagged with wick+volume filter")
-        return result
+                self.logger.warning(f"[{self.name}] Invalid direction '{direction}' for range extension TP.")
+                return None
+            
+            self.logger.debug(f"[{self.name}] Calculated range extension TP: {take_profit:.5f} (entry: {entry_price:.5f}, avg_range: {avg_range:.5f}, direction: {direction})")
+            return take_profit
+            
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Error calculating range extension TP: {e}")
+            return None
 
     def _get_dynamic_tolerance(self, df: pd.DataFrame, idx: int, fallback_price: float = None) -> float:
         """

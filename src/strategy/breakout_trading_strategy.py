@@ -21,6 +21,7 @@ from loguru import logger
 from typing import Dict, List, Any, Optional
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
+from src.utils import candlestick_patterns as cp
 
 
 # Define custom implementations of the indicators we need
@@ -322,7 +323,7 @@ class BreakoutTradingStrategy(SignalGenerator):
                  logger.warning(f"[{self.name}/_detect_consolidation] Adjusted dynamic window ({dynamic_window}) is less than 5. No consolidation detected.")
                  return result
 
-
+        
         # Use simpler consolidation detection
         is_consolidating_simple = is_consolidating(df, window=dynamic_window, tolerance=0.02) # is_consolidating uses tolerance on min_close, so 0.02 means 2% range
         is_near_sr = is_near_support_resistance(df, pivot_window=self.pivot_window, tolerance=0.005) # is_near_support_resistance uses tolerance on level itself
@@ -516,16 +517,31 @@ class BreakoutTradingStrategy(SignalGenerator):
 
             # Candlestick patterns
             logger.debug(f"[{self.name}/{sym}] Detecting candlestick patterns...")
-            hammer = self.detect_hammer(df)
-            shooting_star = self.detect_shooting_star(df)
-            bullish_engulfing = self.detect_bullish_engulfing(df)
-            bearish_engulfing = self.detect_bearish_engulfing(df)
-            inside_bar = self.detect_inside_bar(df)
-            morning_star = self.detect_morning_star(df)
-            evening_star = self.detect_evening_star(df)
-            false_breakout_buy = self.detect_false_breakout(df, 'buy')
-            false_breakout_sell = self.detect_false_breakout(df, 'sell')
+            hammer = cp.detect_hammer(df.iloc[-1:])
+            shooting_star = cp.detect_shooting_star(df.iloc[-1:])
+            bullish_engulfing = cp.detect_bullish_engulfing(df.iloc[-2:])
+            bearish_engulfing = cp.detect_bearish_engulfing(df.iloc[-2:])
+            inside_bar = cp.detect_inside_bar(df.iloc[-2:])
+            morning_star = cp.detect_morning_star_complex(df)
+            evening_star = cp.detect_evening_star_complex(df)
+            strong_reversal_buy = cp.detect_strong_reversal_candle(df, direction='bullish')
+            strong_reversal_sell = cp.detect_strong_reversal_candle(df, direction='bearish')
             idx = len(df) - 1 # Current bar index for decision making
+            
+            # Ensure all series have a boolean False at idx if they are empty or don't cover the index
+            # This is to prevent errors if a pattern doesn't occur right at the end
+            # (Centralized functions already return Series for the whole df, .fillna(False))
+            current_hammer = hammer.iloc[idx] if idx < len(hammer) else False
+            current_shooting_star = shooting_star.iloc[idx] if idx < len(shooting_star) else False
+            current_bullish_engulfing = bullish_engulfing.iloc[idx] if idx < len(bullish_engulfing) else False
+            current_bearish_engulfing = bearish_engulfing.iloc[idx] if idx < len(bearish_engulfing) else False
+            current_inside_bar = inside_bar.iloc[idx] if idx < len(inside_bar) else False
+            current_morning_star = morning_star.iloc[idx] if idx < len(morning_star) else False
+            current_evening_star = evening_star.iloc[idx] if idx < len(evening_star) else False
+            current_strong_reversal_buy = strong_reversal_buy.iloc[idx] if idx < len(strong_reversal_buy) else False
+            current_strong_reversal_sell = strong_reversal_sell.iloc[idx] if idx < len(strong_reversal_sell) else False
+
+            logger.debug(f"[{self.name}/{sym}] Patterns at idx {idx}: Hammer={current_hammer}, SS={current_shooting_star}, BullEng={current_bullish_engulfing}, BearEng={current_bearish_engulfing}, Inside={current_inside_bar}, MS={current_morning_star}, ES={current_evening_star}, SRBuy={current_strong_reversal_buy}, SRSell={current_strong_reversal_sell}")
             
             # Determine entry bar and confirmation bar indices
             # Adaptive wait_for_confirmation_candle based on volatility
@@ -559,7 +575,7 @@ class BreakoutTradingStrategy(SignalGenerator):
             if self.processed_bars.get((sym, self.primary_timeframe)) == current_bar_ts:
                 logger.debug(f"[{self.name}/{sym}] Bar {current_bar_ts} already processed. Skipping.")
                 continue
-            
+
             logger.debug(f"[{self.name}/{sym}] Processing Breakout Conditions: Confirmation Candle Close={df.iloc[confirmation_bar_idx]['close']:.5f}, High={df.iloc[confirmation_bar_idx]['high']:.5f}, Low={df.iloc[confirmation_bar_idx]['low']:.5f}, ATR={df[f'ATR_{self.atr_period_consolidation}'].iloc[confirmation_bar_idx]:.5f}")
 
             logger.info(f"🔄 [{self.name}/{sym}] Detecting consolidation...")
@@ -596,16 +612,16 @@ class BreakoutTradingStrategy(SignalGenerator):
 
             # --- Liquidity Check: Volume Z-Score ---
             if 'tick_volume' in df.columns:
-                volume_rolling = df['tick_volume'].rolling(window=50, min_periods=10) # Ensure min_periods
+                volume_rolling = df['tick_volume'].rolling(window=50, min_periods=10)  # Ensure min_periods
                 volume_mean = volume_rolling.mean().iloc[confirmation_bar_idx]
                 volume_std = volume_rolling.std().iloc[confirmation_bar_idx]
-                
-                if pd.isna(volume_mean) or pd.isna(volume_std) or volume_std <= 1e-9: # Check for NaN or zero std
-                    volume_z_score = 0 # Cannot compute Z-score
+
+                if pd.isna(volume_mean) or pd.isna(volume_std) or volume_std <= 1e-9:  # Check for NaN or zero std
+                    volume_z_score = 0  # Cannot compute Z-score
                     logger.warning(f"[{self.name}/{sym}] Could not compute valid Z-score (Mean={volume_mean}, Std={volume_std}). Defaulting Z-score to 0.")
                 else:
                     volume_z_score = (candle['tick_volume'] - volume_mean) / volume_std
-                
+
                 min_z = 0.5
                 logger.info(f"[{self.name}/{sym}] Volume Z-score: {volume_z_score:.2f} (Volume={candle['tick_volume']}, Mean={volume_mean:.2f}, Std={volume_std:.2f})")
                 # if volume_z_score < min_z: # Re-enable this if needed after testing
@@ -615,17 +631,16 @@ class BreakoutTradingStrategy(SignalGenerator):
             else:
                 logger.warning(f"[{self.name}/{sym}] 'tick_volume' not available for Z-score calculation.")
 
-
             up_close = candle['close'] > candle['open']
             down_close = candle['close'] < candle['open']
-            
+
             # More robust volume check - comparing candle volume to its own rolling MA
             volume_ma_value = df[volume_ma_col].iloc[confirmation_bar_idx] if volume_ma_col in df.columns and not pd.isna(df[volume_ma_col].iloc[confirmation_bar_idx]) else 0
-            
+
             # Tiered volume confirmation based on market type (e.g., crypto vs forex)
             # Assuming sym is a string like "BTCUSD" or "EURUSD"
             is_crypto_or_fx_major = any(p in sym.upper() for p in ["BTC", "ETH", "XAU", "EURUSD", "GBPUSD", "USDJPY"])
-            
+
             # Stricter for less volatile, more lenient for crypto/fx
             base_volume_mult = 1.1 if is_crypto_or_fx_major else self.volume_confirmation_multiplier 
             
@@ -669,12 +684,12 @@ class BreakoutTradingStrategy(SignalGenerator):
             )
 
             pinbar_rejection = False
-            if breakout_high is not None and hammer.iloc[confirmation_bar_idx] and consolidation['breakout_low'] is not None and candle['low'] < consolidation['breakout_low']:
+            if breakout_high is not None and current_hammer and consolidation['breakout_low'] is not None and candle['low'] < consolidation['breakout_low']:
                 pinbar_rejection = True
                 self.logger.info(f"[Signal] {sym}: Pin bar/hammer detected at resistance breakout level outside consolidation. Filtering out false breakout.")
             if (
                 breakout_low is not None and
-                shooting_star.iloc[confirmation_bar_idx] and
+                current_shooting_star and
                 consolidation['breakout_high'] is not None and
                 candle['high'] > consolidation['breakout_high']
             ):
@@ -879,230 +894,98 @@ class BreakoutTradingStrategy(SignalGenerator):
                     self.logger.warning(f"[{self.name}/{sym}] Signal skipped due to zero/invalid stop distance. Entry={entry_price}, Stop={stop_loss}")
             
             # Mark bar as processed even if no signal was generated to avoid redundant checks on the same bar
-            if not signals or (signals and signals[-1]['symbol'] != sym): # If no signal for this symbol was added
-                 self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
-                 logger.debug(f"[{self.name}/{sym}] Marked bar {current_bar_ts} as processed (no signal generated or signal for different symbol).")
+            if not signals or (signals and signals[-1]['symbol'] != sym):  # If no signal for this symbol was added
+                self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
+                logger.debug(f"[{self.name}/{sym}] Marked bar {current_bar_ts} as processed (no signal generated or signal for different symbol).")
             elif signals and signals[-1]['symbol'] == sym:
-                 self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
-                 logger.debug(f"[{self.name}/{sym}] Marked bar {current_bar_ts} as processed (signal generated for this symbol).")
+                self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
+                logger.debug(f"[{self.name}/{sym}] Marked bar {current_bar_ts} as processed (signal generated for this symbol).")
 
 
         self.require_retest = True # Reset retest requirement if it was changed for a specific signal
         logger.info(f"🏁 [{self.name}] Signal generation finished. Total signals: {len(signals)}")
         return signals
 
-    # --- VECTORIZE CANDLESTICK PATTERNS (industry standard) ---
-    @staticmethod
-    def detect_hammer(df: pd.DataFrame) -> pd.Series:
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (lower_wick > 2 * body) &
-            (upper_wick < body)
-        )
-
-    @staticmethod
-    def detect_shooting_star(df: pd.DataFrame) -> pd.Series:
-        body = (df['close'] - df['open']).abs()
-        total = df['high'] - df['low']
-        upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
-        lower_wick = df[['open', 'close']].min(axis=1) - df['low']
-        return (
-            (total > 0) &
-            (body / total < 0.3) &
-            (upper_wick > 2 * body) &
-            (lower_wick < body)
-        )
-
-    @staticmethod
-    def detect_bullish_engulfing(df: pd.DataFrame) -> pd.Series:
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bearish = prev_close < prev_open
-        is_curr_bullish = df['close'] > df['open']
-        engulfs = (df['open'] < prev_close) & (df['close'] > prev_open)
-        return is_prev_bearish & is_curr_bullish & engulfs
-
-    @staticmethod
-    def detect_bearish_engulfing(df: pd.DataFrame) -> pd.Series:
-        prev_open = df['open'].shift(1)
-        prev_close = df['close'].shift(1)
-        is_prev_bullish = prev_close > prev_open
-        is_curr_bearish = df['close'] < df['open']
-        engulfs = (df['open'] > prev_close) & (df['close'] < prev_open)
-        return is_prev_bullish & is_curr_bearish & engulfs
-
-    @staticmethod
-    def detect_inside_bar(df: pd.DataFrame) -> pd.Series:
-        prev_high = df['high'].shift(1)
-        prev_low = df['low'].shift(1)
-        return (df['high'] < prev_high) & (df['low'] > prev_low)
-
-    @staticmethod
-    def detect_morning_star(df: pd.DataFrame) -> pd.Series:
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        is_first_bearish = c1['close'] < c1['open']
-        is_last_bullish = c3['close'] > c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_down = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].max(axis=1) <= c1[['open', 'close']].min(axis=1) + 0.3 * c1_body
-        first_61_8_level = c1['open'] - 0.618 * c1_body
-        good_recovery = c3['close'] > first_61_8_level
-        return (
-            is_first_bearish & is_last_bullish & is_middle_small & (is_gap_down | has_minimal_overlap) & good_recovery
-        )
-
-    @staticmethod
-    def detect_evening_star(df: pd.DataFrame) -> pd.Series:
-        c1 = df.shift(2)
-        c2 = df.shift(1)
-        c3 = df
-        c1_body = (c1['close'] - c1['open']).abs()
-        c2_body = (c2['close'] - c2['open']).abs()
-        is_first_bullish = c1['close'] > c1['open']
-        is_last_bearish = c3['close'] < c3['open']
-        is_middle_small = c2_body < 0.3 * c1_body.rolling(15, min_periods=1).mean()
-        is_gap_up = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1)
-        has_minimal_overlap = c2[['open', 'close']].min(axis=1) >= c1[['open', 'close']].max(axis=1) - 0.3 * c1_body
-        first_61_8_level = c1['open'] + 0.618 * c1_body
-        good_decline = c3['close'] < first_61_8_level
-        return (
-            is_first_bullish & is_last_bearish & is_middle_small & (is_gap_up | has_minimal_overlap) & good_decline
-        )
-
-    @staticmethod
-    def detect_false_breakout(df: pd.DataFrame, direction: str, price_tolerance: float = 0.002, volume_threshold: Optional[float] = None) -> pd.Series:
-        if len(df) < 2:
-            return pd.Series(dtype=bool, index=df.index)
-        prev_close = df['close'].shift(1)
-        tol_val = df['close'] * price_tolerance
-        total_range = df['high'] - df['low']
-        if direction == 'buy':
-            wick = df['close'] - df['low']
-            wick_ok = wick > 0.5 * total_range
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
-            else:
-                result = (
-                    (prev_close < df['close'] - tol_val) &
-                    wick_ok
-                )
-        else:
-            wick = df['high'] - df['close']
-            wick_ok = wick > 0.5 * total_range
-            if volume_threshold is not None and 'tick_volume' in df.columns:
-                vol_ok = df['tick_volume'] > volume_threshold
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok &
-                    vol_ok
-                )
-            else:
-                result = (
-                    (prev_close > df['close'] + tol_val) &
-                    wick_ok
-                )
-        return result 
-
     def _detect_retest(self, df: pd.DataFrame, symbol: str, breakout_level: float, direction: str) -> bool:
         """
-        Detects if price has retested a broken level after a breakout.
-        
-        Args:
-            df: DataFrame with price data
-            symbol: Symbol being traded
-            breakout_level: The level that was broken (resistance for upside breakout, support for downside)
-            direction: 'BUY' for upside breakout, 'SELL' for downside breakout
-            
-        Returns:
-            bool: True if a valid retest has been detected, False otherwise
+        Detects if a breakout level has been retested and rejected.
         """
-        # Need at least 5 bars after breakout to detect retest
-        if len(df) < 5:
-            logger.debug(f"[{self.name}/{symbol}] Not enough bars ({len(df)}) for retest detection. Need at least 5.")
+        self.logger.debug(f"[{symbol}] Checking retest for {direction} breakout at {breakout_level:.5f}")
+        if not self.require_retest:
+            self.logger.debug(f"[{symbol}] Retest not required by strategy config.")
+            return False # Or True, depending on if "no retest required" means "retest condition met"
+
+        if len(df) < 3: # Need at least 3 bars for breakout, retest, and confirmation
+            self.logger.debug(f"[{symbol}] Not enough data for retest detection (need 3, got {len(df)}).")
             return False
             
-        # Get the most recent bars (after breakout)
-        recent_bars_count = 5 # Define how many bars to check for retest
-        recent_bars = df.iloc[-recent_bars_count:]
-        logger.debug(f"[{self.name}/{symbol}] Detecting retest. Recent {recent_bars_count} bars: {recent_bars[['open', 'high', 'low', 'close']].to_dict('records')}")
+        # Define the breakout candle as the one that closed beyond the level decisively
+        # This is a simplification; actual breakout candle might be further back
+        # For this retest logic, we typically look at candles *after* a breakout signal has been established.
         
-        # Determine retest threshold based on ATR
-        atr_col = f"ATR_{self.atr_period_consolidation}"
-        atr = recent_bars[atr_col].iloc[-1] if atr_col in recent_bars.columns and not pd.isna(recent_bars[atr_col].iloc[-1]) else 0
+        # Let's assume the current candle (df.iloc[-1]) is the one we are checking for retest *confirmation*
+        # and the breakout happened on df.iloc[-2] or df.iloc[-3]
         
-        # Default threshold as percentage of breakout level
-        threshold = breakout_level * self.retest_threshold_pct / 100
+        retest_candle = df.iloc[-1] # The candle that potentially confirms rejection after retest
+        touch_candle = df.iloc[-2]  # The candle that potentially touched the level
+
+        is_rejection = False
+        retest_price_info = ""
+
+        if direction == "BUY": # Breakout was upwards, looking for retest of level as support
+            # Check if touch_candle came close to the breakout_level (now support)
+            # price_touched_level = (
+            #     touch_candle['low'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0) and
+            #     touch_candle['low'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0)
+            # )
+            
+            retest_price_info = f"Touch_Low: {touch_candle['low']:.5f}, Level: {breakout_level:.5f}, Threshold_Low: {breakout_level * (1 - self.retest_threshold_pct / 100.0):.5f}, Threshold_High: {breakout_level * (1 + self.retest_threshold_pct / 100.0):.5f}"
+            self.logger.debug(f"[{symbol}] BUY Retest - {retest_price_info}")
+
+            if (touch_candle['low'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0) and
+                touch_candle['low'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0)):
+                self.logger.debug(f"[{symbol}] BUY Retest - Price touched level. Checking for rejection on retest_candle.")
+                # Check for bullish rejection (e.g., Hammer, Bullish Engulfing, strong close up) on retest_candle
+                # Using a simplified rejection: closes in upper half and is bullish
+                is_bullish_rejection_candle = (retest_candle['close'] > retest_candle['open'] and
+                                             retest_candle['close'] > (retest_candle['high'] + retest_candle['low']) / 2)
+                
+                # Or use centralized patterns
+                is_hammer = cp.detect_hammer(df.iloc[-1:]) # Pass only the last row as a DataFrame
+                is_bullish_engulfing = cp.detect_bullish_engulfing(df.iloc[-2:]) # Pass last two rows
+
+                if is_bullish_rejection_candle or is_hammer.iloc[0] or is_bullish_engulfing.iloc[-1]:
+                    is_rejection = True
+                    self.logger.info(f"[{symbol}] Confirmed BUY retest and rejection at {breakout_level:.5f}. "
+                                     f"Rejection: {is_bullish_rejection_candle}, Hammer: {is_hammer.iloc[0] if not is_hammer.empty else 'N/A'}, Engulfing: {is_bullish_engulfing.iloc[-1] if not is_bullish_engulfing.empty else 'N/A'}")
+
+        elif direction == "SELL": # Breakout was downwards, looking for retest of level as resistance
+            # price_touched_level = (
+            #     touch_candle['high'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0) and
+            #     touch_candle['high'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0)
+            # )
+
+            retest_price_info = f"Touch_High: {touch_candle['high']:.5f}, Level: {breakout_level:.5f}, Threshold_Low: {breakout_level * (1 - self.retest_threshold_pct / 100.0):.5f}, Threshold_High: {breakout_level * (1 + self.retest_threshold_pct / 100.0):.5f}"
+            self.logger.debug(f"[{symbol}] SELL Retest - {retest_price_info}")
+            
+            if (touch_candle['high'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0) and
+                touch_candle['high'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0)):
+                self.logger.debug(f"[{symbol}] SELL Retest - Price touched level. Checking for rejection on retest_candle.")
+                is_bearish_rejection_candle = (retest_candle['close'] < retest_candle['open'] and
+                                             retest_candle['close'] < (retest_candle['high'] + retest_candle['low']) / 2)
+                
+                is_shooting_star = cp.detect_shooting_star(df.iloc[-1:])
+                is_bearish_engulfing = cp.detect_bearish_engulfing(df.iloc[-2:])
+
+                if is_bearish_rejection_candle or is_shooting_star.iloc[0] or is_bearish_engulfing.iloc[-1]:
+                    is_rejection = True
+                    self.logger.info(f"[{symbol}] Confirmed SELL retest and rejection at {breakout_level:.5f}. "
+                                     f"Rejection: {is_bearish_rejection_candle}, ShootingStar: {is_shooting_star.iloc[0] if not is_shooting_star.empty else 'N/A'}, Engulfing: {is_bearish_engulfing.iloc[-1] if not is_bearish_engulfing.empty else 'N/A'}")
         
-        # If ATR is available, use it to refine the threshold (min 0.25 ATR, max 1.0 ATR)
-        if atr > 0:
-            threshold = min(max(threshold, 0.25 * atr), 1.0 * atr) # Clamped ATR-based threshold
-            logger.debug(f"[{self.name}/{symbol}] Retest threshold refined by ATR ({atr:.5f}): {threshold:.5f}")
-        else:
-            logger.warning(f"[{self.name}/{symbol}] ATR is zero or invalid for retest threshold calculation. Using percentage-based: {threshold:.5f}")
-        
-        # For upside breakout (BUY): price must pull back down to near the breakout level
-        if direction == "BUY":
-            # Initial breakout size (from breakout bar)
-            initial_breakout_size = df['high'].iloc[-5] - breakout_level
+        if not is_rejection:
+            self.logger.debug(f"[{symbol}] Retest condition not met or no clear rejection. {retest_price_info}")
             
-            # Retest threshold - how close price must come back to the breakout level
-            # Default: 50% of initial breakout size, but adjusted by parameter
-            retest_zone_high = breakout_level + (initial_breakout_size * self.retest_threshold_pct)
-            
-            # Check if any of the recent bars pulled back to the retest zone
-            lowest_low_in_retest_window = recent_bars['low'].min()
-            retest_condition_met = lowest_low_in_retest_window <= retest_zone_high
-            logger.debug(f"[{self.name}/{symbol}/BUY_RETEST] BreakoutLevel={breakout_level:.5f}, InitialBreakoutSize={initial_breakout_size:.5f}, RetestZoneHigh={retest_zone_high:.5f}, LowestLowInWindow={lowest_low_in_retest_window:.5f}, RetestConditionMet={retest_condition_met}")
-            
-            # Also check if price has moved back up after retest (confirmation)
-            if retest_condition_met and len(recent_bars) >= 2:
-                last_close = recent_bars['close'].iloc[-1]
-                confirmation = last_close > lowest_low_in_retest_window  # Price moved back up after retest
-                logger.debug(f"[{self.name}/{symbol}/BUY_RETEST] LastClose={last_close:.5f}, ConfirmationOfRetestBounce={confirmation}")
-                return confirmation
-            
-            logger.debug(f"[{self.name}/{symbol}/BUY_RETEST] Retest condition not met or not enough bars for bounce confirmation.")
-            return False
-            
-        # For downside breakout (SELL): price must pull back up to near the breakout level
-        elif direction == "SELL":
-            # Initial breakout size (from breakout bar)
-            initial_breakout_size = breakout_level - df['low'].iloc[-5]
-            
-            # Retest threshold - how close price must come back to the breakout level
-            # Default: 50% of initial breakout size, but adjusted by parameter
-            retest_zone_low = breakout_level - (initial_breakout_size * self.retest_threshold_pct)
-            
-            # Check if any of the recent bars pulled back to the retest zone
-            highest_high_in_retest_window = recent_bars['high'].max()
-            retest_condition_met = highest_high_in_retest_window >= retest_zone_low
-            logger.debug(f"[{self.name}/{symbol}/SELL_RETEST] BreakoutLevel={breakout_level:.5f}, InitialBreakoutSize={initial_breakout_size:.5f}, RetestZoneLow={retest_zone_low:.5f}, HighestHighInWindow={highest_high_in_retest_window:.5f}, RetestConditionMet={retest_condition_met}")
-            
-            # Also check if price has moved back down after retest (confirmation)
-            if retest_condition_met and len(recent_bars) >= 2:
-                last_close = recent_bars['close'].iloc[-1]
-                confirmation = last_close < highest_high_in_retest_window  # Price moved back down after retest
-                logger.debug(f"[{self.name}/{symbol}/SELL_RETEST] LastClose={last_close:.5f}, ConfirmationOfRetestRejection={confirmation}")
-                return confirmation
-            
-            logger.debug(f"[{self.name}/{symbol}/SELL_RETEST] Retest condition not met or not enough bars for rejection confirmation.")
-            return False
-            
-        return False 
+        return is_rejection
 
     def _get_dynamic_atr_multiplier(self, df_subset: pd.DataFrame) -> float:
         """Return a dynamic ATR multiplier for breakout confirmation based on volatility of the provided DataFrame subset."""

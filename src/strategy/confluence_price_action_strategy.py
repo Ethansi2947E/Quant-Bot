@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr, calculate_adx
+import src.utils.candlestick_patterns as cp # Added import
 from config.config import TRADING_CONFIG,get_risk_manager_config
 from src.risk_manager import RiskManager
 
@@ -795,64 +796,99 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     # -- Candlestick pattern checks --
     def _is_pin_bar(self, df: pd.DataFrame, idx: int, level: float, direction: str) -> bool:
         """Loosened: More tolerant pin bar detection. Accept near-miss, log reason if rejected."""
-        candle = df.iloc[idx]
-        body = abs(candle['close'] - candle['open'])
-        upper_wick = candle['high'] - max(candle['close'], candle['open'])
-        lower_wick = min(candle['close'], candle['open']) - candle['low']
-        total_range = candle['high'] - candle['low']
-        # Loosened ratios
-        min_wick_ratio = 1.5  # was 2.0
-        max_body_ratio = 0.7  # was 0.5
-        if direction == 'bullish':
-            if lower_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
-                logger.debug(f"[Pattern] Pin Bar (bullish) detected at idx={idx}")
-                return True
-            elif lower_wick >= (min_wick_ratio - 0.3) * body:
-                logger.debug(f"[Pattern] Near-miss Pin Bar (bullish) at idx={idx}: lower_wick={lower_wick}, body={body}, total_range={total_range}")
-                return True  # Accept near-miss
-            else:
-                logger.debug(f"[Pattern] Pin Bar (bullish) rejected at idx={idx}: lower_wick={lower_wick}, body={body}, total_range={total_range}")
-                return False
-        else:
-            if upper_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
-                logger.debug(f"[Pattern] Pin Bar (bearish) detected at idx={idx}")
-                return True
-            elif upper_wick >= (min_wick_ratio - 0.3) * body:
-                logger.debug(f"[Pattern] Near-miss Pin Bar (bearish) at idx={idx}: upper_wick={upper_wick}, body={body}, total_range={total_range}")
-                return True  # Accept near-miss
-            else:
-                logger.debug(f"[Pattern] Pin Bar (bearish) rejected at idx={idx}: upper_wick={upper_wick}, body={body}, total_range={total_range}")
-                return False
+        candle_slice = df.iloc[idx:idx+1] # Use a slice for cp functions
+        # Basic Hammer/SS check
+        is_basic_hammer = direction == 'bullish' and cp.detect_hammer(candle_slice).iloc[0]
+        is_basic_ss = direction == 'bearish' and cp.detect_shooting_star(candle_slice).iloc[0]
+
+        if not (is_basic_hammer or is_basic_ss):
+            # If cp doesn't detect basic shape, try local more lenient logic for pin-bar like shapes
+            # This part retains the original detailed wick/body ratio logic if cp basic check fails
+            candle = df.iloc[idx]
+            body = abs(candle['close'] - candle['open'])
+            upper_wick = candle['high'] - max(candle['close'], candle['open'])
+            lower_wick = min(candle['close'], candle['open']) - candle['low']
+            total_range = candle['high'] - candle['low']
+            min_wick_ratio = 1.5
+            max_body_ratio = 0.7
+            if direction == 'bullish':
+                if lower_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
+                    logger.debug(f"[Pattern] Pin Bar (bullish) detected by local logic at idx={idx}")
+                    return True
+                elif lower_wick >= (min_wick_ratio - 0.3) * body: # near-miss
+                    logger.debug(f"[Pattern] Near-miss Pin Bar (bullish) by local logic at idx={idx}")
+                    return True
+            else: # bearish
+                if upper_wick >= min_wick_ratio * body and body / total_range < max_body_ratio:
+                    logger.debug(f"[Pattern] Pin Bar (bearish) detected by local logic at idx={idx}")
+                    return True
+                elif upper_wick >= (min_wick_ratio - 0.3) * body: # near-miss
+                    logger.debug(f"[Pattern] Near-miss Pin Bar (bearish) by local logic at idx={idx}")
+                    return True
+            logger.debug(f"[Pattern] Pin Bar ({direction}) rejected at idx={idx} by local logic")
+            return False
+        
+        # If basic shape is confirmed by cp, then proceed with this strategy's specific checks (level, etc.)
+        # The original _is_pin_bar didn't explicitly use 'level', so this part is more about its specific shape def.
+        # We can assume if cp.detect_hammer/ss passes, and the original more detailed local logic for pin_bar also passes,
+        # then it's a valid pin bar for this strategy's original intent.
+        # The 'level' check seems to be more implicitly handled by the calling context in generate_signals
+        logger.debug(f"[Pattern] Pin Bar ({direction}) confirmed by cp and/or local logic at idx={idx}")
+        return True
 
     def _is_engulfing(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
         """Loosened: More tolerant engulfing detection. Accept near-miss, log reason if rejected."""
         if idx < 1:
             return False
+        
+        candle_slice = candles.iloc[idx-1:idx+1] # Slice for 2-candle pattern
+        
+        basic_engulfing = False
+        if direction == 'bullish':
+            basic_engulfing = cp.detect_bullish_engulfing(candle_slice).iloc[1]
+        else: # bearish
+            basic_engulfing = cp.detect_bearish_engulfing(candle_slice).iloc[1]
+
+        if basic_engulfing:
+            logger.debug(f"[Pattern] Engulfing ({direction}) detected by cp at idx={idx}")
+            # Original local logic included near-miss, which cp doesn't. We can retain it here.
+            prev = candles.iloc[idx - 1]
+            curr = candles.iloc[idx]
+            if direction == 'bullish':
+                 if curr['close'] >= prev['open'] and curr['open'] <= prev['close']: # Standard
+                    return True
+                 elif curr['close'] >= prev['open'] * 0.98: # Near-miss
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bullish) accepted by local logic at idx={idx}")
+                    return True
+            else: # bearish
+                if curr['close'] <= prev['open'] and curr['open'] >= prev['close']: # Standard
+                    return True
+                elif curr['close'] <= prev['open'] * 1.02: # Near-miss
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bearish) accepted by local logic at idx={idx}")
+                    return True
+            return True # If cp basic_engulfing was true, and it's not a near-miss case handled above.
+        
+        # Fallback to original local logic if cp check fails, to maintain behavior for near-misses
         prev = candles.iloc[idx - 1]
         curr = candles.iloc[idx]
-        # Loosened: allow 90% engulf
         if direction == 'bullish':
             if curr['close'] > curr['open'] and prev['close'] < prev['open']:
                 if curr['close'] >= prev['open'] and curr['open'] <= prev['close']:
-                    logger.debug(f"[Pattern] Engulfing (bullish) detected at idx={idx}")
+                    logger.debug(f"[Pattern] Engulfing (bullish) detected by local fallback at idx={idx}")
                     return True
                 elif curr['close'] >= prev['open'] * 0.98:
-                    logger.debug(f"[Pattern] Near-miss Engulfing (bullish) at idx={idx}")
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bullish) by local fallback at idx={idx}")
                     return True
-                else:
-                    logger.debug(f"[Pattern] Engulfing (bullish) rejected at idx={idx}")
-                    return False
         else:
             if curr['close'] < curr['open'] and prev['close'] > prev['open']:
                 if curr['close'] <= prev['open'] and curr['open'] >= prev['close']:
-                    logger.debug(f"[Pattern] Engulfing (bearish) detected at idx={idx}")
+                    logger.debug(f"[Pattern] Engulfing (bearish) detected by local fallback at idx={idx}")
                     return True
-                elif curr['close'] <= prev['open'] * 1.02:
-                    logger.debug(f"[Pattern] Near-miss Engulfing (bearish) at idx={idx}")
+                elif curr['close'] <= prev['open'] * 1.02: # Near-miss for bearish
+                    logger.debug(f"[Pattern] Near-miss Engulfing (bearish) by local fallback at idx={idx}")
                     return True
-                else:
-                    logger.debug(f"[Pattern] Engulfing (bearish) rejected at idx={idx}")
-                    return False
+                
+        logger.debug(f"[Pattern] Engulfing ({direction}) rejected at idx={idx}")
         return False
 
     def _is_inside_bar(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
@@ -861,116 +897,205 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         """
         if idx <= 0 or idx >= len(candles):
             return False
+        
+        candle_slice = candles.iloc[idx-1:idx+1] # Slice for 2-candle pattern
+
+        if not cp.detect_inside_bar(candle_slice).iloc[1]:
+            logger.debug(f"[Pattern] Inside Bar rejected by cp at idx={idx}")
+            return False
+
+        # If cp confirms basic inside bar, proceed with this strategy's level check for the mother candle
         mother = candles.iloc[idx - 1]
-        child = candles.iloc[idx]
-        tol = child['close'] * self.price_tolerance
+        # child = candles.iloc[idx] # child characteristics checked by cp.detect_inside_bar
+
+        tol = mother['close'] * self.price_tolerance # Use mother's close for tolerance calculation relative to level
         atr_val = None
-        if len(candles) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
-        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
+        if len(candles) >= 14: # Check original df passed to _is_inside_bar for ATR
+            # from src.utils.indicators import calculate_atr # Already imported globally
+            atr_series = calculate_atr(candles, period=14) # Calculate ATR on the full 'candles' df
+            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                # Use ATR at the index of the mother candle if possible, else last valid ATR
+                atr_idx = idx -1 
+                if atr_idx < len(atr_series) and pd.notna(atr_series.iloc[atr_idx]):
+                    atr_val = float(atr_series.iloc[atr_idx])
+                elif pd.notna(atr_series.iloc[-1]):
+                     atr_val = float(atr_series.iloc[-1])
+
+
+        offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol) 
+        # Ensure offset is at least tol if atr_val is None or NaN
+
         if not isinstance(level, (float, int)):
-            return False  # Level must be provided for correct anchoring
+            logger.debug(f"[Pattern] Inside Bar rejected at idx={idx}: Invalid level type {type(level)}")
+            return False
         level = float(level)
-        if child['high'] < mother['high'] and child['low'] > mother['low']:
-            if abs(mother['low'] - level) <= offset or abs(mother['high'] - level) <= offset:
-                return True
+
+        # Check mother candle's proximity to the level
+        if abs(mother['low'] - level) <= offset or abs(mother['high'] - level) <= offset:
+            logger.debug(f"[Pattern] Inside Bar confirmed at idx={idx} with mother near level {level:.5f} (offset={offset:.5f})")
+            return True
+        
+        logger.debug(f"[Pattern] Inside Bar at idx={idx} rejected: mother not near level {level:.5f} (low={mother['low']:.5f}, high={mother['high']:.5f}, offset={offset:.5f})")
         return False
 
     def _is_hammer(self, df: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Hammer pattern (bullish reversal) near support."""
-        candle = df.iloc[idx]
-        body = abs(candle['close'] - candle['open'])
-        total = candle['high'] - candle['low']
-        lower_wick = min(candle['open'], candle['close']) - candle['low']
-        upper_wick = candle['high'] - max(candle['open'], candle['close'])
-        if total <= 0:
+        candle_slice = df.iloc[idx:idx+1]
+        if not cp.detect_hammer(candle_slice).iloc[0]: # Using default params for cp.detect_hammer
+            logger.debug(f"[Pattern] Hammer rejected by cp at idx={idx}")
             return False
-        wick_req = max(1.2 * body, 0)
-        return (
-            body / total < 0.3 and
-            lower_wick > wick_req and
-            upper_wick < body and
-            abs(candle['low'] - level) < level * self.price_tolerance
-        )
+        
+        # If cp confirms basic Hammer, apply level proximity check
+        candle = df.iloc[idx]
+        if abs(candle['low'] - level) < level * self.price_tolerance:
+            logger.debug(f"[Pattern] Hammer confirmed by cp at idx={idx} and near level {level:.5f}")
+            return True
+        
+        logger.debug(f"[Pattern] Hammer at idx={idx} rejected: basic shape OK by cp but not near level {level:.5f} (low={candle['low']:.5f})")
+        return False
 
     def _is_shooting_star(self, df: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Shooting Star pattern (bearish reversal) near resistance."""
-        candle = df.iloc[idx]
-        body = abs(candle['close'] - candle['open'])
-        total = candle['high'] - candle['low']
-        upper_wick = candle['high'] - max(candle['open'], candle['close'])
-        lower_wick = min(candle['open'], candle['close']) - candle['low']
-        if total <= 0:
+        candle_slice = df.iloc[idx:idx+1]
+        if not cp.detect_shooting_star(candle_slice).iloc[0]: # Using default params for cp.detect_shooting_star
+            logger.debug(f"[Pattern] Shooting Star rejected by cp at idx={idx}")
             return False
-        return (
-            body / total < 0.3 and
-            upper_wick > 2 * body and
-            lower_wick < body and
-            abs(candle['high'] - level) < level * self.price_tolerance
-        )
+
+        # If cp confirms basic Shooting Star, apply level proximity check
+        candle = df.iloc[idx]
+        if abs(candle['high'] - level) < level * self.price_tolerance:
+            logger.debug(f"[Pattern] Shooting Star confirmed by cp at idx={idx} and near level {level:.5f}")
+            return True
+            
+        logger.debug(f"[Pattern] Shooting Star at idx={idx} rejected: basic shape OK by cp but not near level {level:.5f} (high={candle['high']:.5f})")
+        return False
 
     def _is_morning_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Morning Star (bullish 3-bar reversal) near support, allow pattern only in last 5 bars."""
         if idx < 2:
             return False
-        # Only require pattern occurs anywhere in last 5 bars
-        if idx < len(candles) - 5:
+        # "pattern only in last 5 bars" - this check should be done by the caller if still needed.
+        # if idx < len(candles) - 5: 
+        #     return False
+            
+        candle_slice = candles.iloc[idx-2:idx+1] # Slice for 3-candle pattern
+        
+        if not cp.detect_morning_star(candle_slice, 
+                                     c1_body_min_percent_of_range=0.4, # local was 0.5
+                                     star_body_max_percent_of_range=0.3, 
+                                     c3_closes_into_c1_body_min_percent=0.01, # local: c3_close > c1_open (effectively 0% into body from open)
+                                     c1_c2_gap_down_percent=0.0, # No strict gap in local
+                                     c2_c3_gap_up_percent=0.0     # No strict gap in local
+                                     ).iloc[2]:
+            logger.debug(f"[Pattern] Morning Star rejected by cp at idx={idx}")
             return False
-        c1, c2, c3 = candles.iloc[idx-2], candles.iloc[idx-1], candles.iloc[idx]
-        return (
-            c1['close'] < c1['open'] and
-            abs(c1['close'] - c1['open']) > (c1['high'] - c1['low']) * 0.5 and
-            abs(c2['close'] - c2['open']) < (c2['high'] - c2['low']) * 0.3 and
-            c3['close'] > c3['open'] and
-            c3['close'] > c1['open'] and
-            abs(c3['low'] - level) < level * self.price_tolerance
-        )
+
+        # If cp confirms basic Morning Star shape, apply this strategy's specific level check for C3
+        c3 = candles.iloc[idx]
+        if abs(c3['low'] - level) < level * self.price_tolerance:
+            logger.debug(f"[Pattern] Morning Star confirmed by cp at idx={idx} and C3 near level {level:.5f}")
+            return True
+            
+        logger.debug(f"[Pattern] Morning Star at idx={idx} rejected: basic shape OK by cp but C3 not near level {level:.5f} (c3_low={c3['low']:.5f})")
+        return False
 
     def _is_evening_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect an Evening Star (bearish 3-bar reversal) near resistance, allow pattern only in last 5 bars."""
         if idx < 2:
             return False
-        if idx < len(candles) - 5:
+        # if idx < len(candles) - 5:
+        #     return False
+            
+        candle_slice = candles.iloc[idx-2:idx+1]
+        if not cp.detect_evening_star(candle_slice,
+                                     c1_body_min_percent_of_range=0.4, # local was 0.5
+                                     star_body_max_percent_of_range=0.3,
+                                     c3_closes_into_c1_body_min_percent=0.01, # local: c3_close < c1_open
+                                     c1_c2_gap_up_percent=0.0,   # No strict gap
+                                     c2_c3_gap_down_percent=0.0  # No strict gap
+                                     ).iloc[2]:
+            logger.debug(f"[Pattern] Evening Star rejected by cp at idx={idx}")
             return False
-        c1, c2, c3 = candles.iloc[idx-2], candles.iloc[idx-1], candles.iloc[idx]
-        return (
-            c1['close'] > c1['open'] and
-            abs(c1['close'] - c1['open']) > (c1['high'] - c1['low']) * 0.5 and
-            abs(c2['close'] - c2['open']) < (c2['high'] - c2['low']) * 0.3 and
-            c3['close'] < c3['open'] and
-            c3['close'] < c1['open'] and
-            abs(c3['high'] - level) < level * self.price_tolerance
-        )
+
+        # If cp confirms basic Evening Star shape, apply this strategy's specific level check for C3
+        c3 = candles.iloc[idx]
+        if abs(c3['high'] - level) < level * self.price_tolerance:
+            logger.debug(f"[Pattern] Evening Star confirmed by cp at idx={idx} and C3 near level {level:.5f}")
+            return True
+            
+        logger.debug(f"[Pattern] Evening Star at idx={idx} rejected: basic shape OK by cp but C3 not near level {level:.5f} (c3_high={c3['high']:.5f})")
+        return False
 
     def _is_false_breakout(self, candles: pd.DataFrame, idx: int, level: float, direction: str) -> bool:
         """Detect a quick reversal after a breakout around `level` with wick and volume analysis.
         Relaxed: volume > 1.0x avg, wick > 1.2x body, allow touch-breaks (not just full clean breakouts).
+        This method's logic is highly specific to this strategy and represents a sequence.
+        It will remain largely as is.
         """
         if idx <= 0 or idx >= len(candles):
             return False
         prev = candles.iloc[idx - 1]
         curr = candles.iloc[idx]
-        tol_val = level * self.price_tolerance
+        # tol_val = level * self.price_tolerance # Original tol_val not used here, price_tolerance is class member
         vol_col = 'volume' if 'volume' in candles.columns else 'tick_volume'
-        avg_vol = candles[vol_col].rolling(window=20).mean().iloc[idx]
+        
+        avg_vol = np.nan # Default to NaN
+        if vol_col in candles.columns and len(candles.iloc[max(0, idx-20):idx][vol_col]) > 0 : # Ensure slice isn't empty
+             avg_vol = candles.iloc[max(0, idx-20):idx][vol_col].mean() # Look back on candles up to prev bar
+
         # Require volume at least 1.0x average (was 1.2x)
-        vol_ok = curr[vol_col] > 1.0 * avg_vol
-        if direction == 'bullish':
-            wick = curr['close'] - curr['low']
+        # Handle avg_vol being NaN if not enough data
+        current_vol = curr.get(vol_col, 0)
+        vol_ok = current_vol > 1.0 * avg_vol if pd.notna(avg_vol) and avg_vol > 0 else False
+        
+        if not vol_ok and pd.notna(avg_vol) : # Log if vol not ok but avg_vol was calculable
+            logger.debug(f"[_is_false_breakout] Vol check fail: current={current_vol}, avg={avg_vol:.2f}")
+        elif not pd.notna(avg_vol):
+             logger.debug(f"[_is_false_breakout] Vol check cannot be performed: avg_vol is NaN")
+
+
+        if direction == 'bullish': # Looking for bullish reversal after a bearish break of support `level`
             body = abs(curr['close'] - curr['open'])
-            wick_ok = wick > 1.2 * body  # was 1.5x
-            # Allow touch-breaks: prev['low'] < level and curr['high'] > level
-            breakout = prev['low'] < level and curr['high'] > level
-            return breakout and wick_ok and vol_ok
-        else:
-            wick = curr['high'] - curr['close']
+            if body == 0: return False # Avoid division by zero if body is zero
+            wick = curr['close'] - curr['low'] # For bullish reversal, lower wick is not the rejection wick.
+                                            # It's the current candle's bullish move after breaking low.
+                                            # This logic seems to imply curr closes significantly higher than its low.
+                                            # Consider if `curr['high'] - curr['open']` for bullish body or `curr['close'] - curr['low']` as range of upward move is better.
+                                            # Original logic: wick = curr['close'] - curr['low']
+                                            # This means the distance from low to close (bullish reversal strength)
+            
+            wick_ok = wick > 1.2 * body if body > 0 else wick > 0 # was 1.5x. Handle zero body.
+
+            # Breakout: prev broke below level, curr came back above and closed above.
+            breakout_condition = prev['low'] < level and curr['close'] > level 
+            # Original code had: prev['low'] < level and curr['high'] > level. Switched to curr['close'] for confirmation.
+
+            if breakout_condition and wick_ok and vol_ok:
+                logger.debug(f"[_is_false_breakout] Bullish detected: prev_low={prev['low']:.5f}, level={level:.5f}, curr_close={curr['close']:.5f}, wick={wick:.5f}, body={body:.5f}, vol_ok={vol_ok}")
+                return True
+            else:
+                logger.debug(f"[_is_false_breakout] Bullish rejected: breakout={breakout_condition}, wick_ok={wick_ok} (wick={wick:.5f}, body={body:.5f}), vol_ok={vol_ok}")
+                return False
+        else: # 'bearish' - Looking for bearish reversal after a bullish break of resistance `level`
             body = abs(curr['close'] - curr['open'])
-            wick_ok = wick > 1.2 * body  # was 1.5x
-            breakout = prev['high'] > level and curr['low'] < level
-            return breakout and wick_ok and vol_ok
+            if body == 0: return False
+            wick = curr['high'] - curr['close'] # For bearish reversal, upper wick is not the rejection.
+                                             # It's the current candle's bearish move after breaking high.
+                                             # Original logic: wick = curr['high'] - curr['close']
+            
+            wick_ok = wick > 1.2 * body if body > 0 else wick > 0 # was 1.5x
+
+            # Breakout: prev broke above level, curr came back below and closed below.
+            breakout_condition = prev['high'] > level and curr['close'] < level
+            # Original code had: prev['high'] > level and curr['low'] < level. Switched to curr['close'] for confirmation.
+
+            if breakout_condition and wick_ok and vol_ok:
+                logger.debug(f"[_is_false_breakout] Bearish detected: prev_high={prev['high']:.5f}, level={level:.5f}, curr_close={curr['close']:.5f}, wick={wick:.5f}, body={body:.5f}, vol_ok={vol_ok}")
+                return True
+            else:
+                logger.debug(f"[_is_false_breakout] Bearish rejected: breakout={breakout_condition}, wick_ok={wick_ok} (wick={wick:.5f}, body={body:.5f}), vol_ok={vol_ok}")
+                return False
+        return False # Should not be reached if logic above is exhaustive
 
     # -- Confluence checks --
     def _find_recent_swing(self, df: pd.DataFrame, lookback: int = 50) -> tuple:
@@ -1353,50 +1478,121 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         return norm_score, details
 
     def _is_two_bar_reversal(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
-        """Detect a two-bar reversal pattern (bullish or bearish) near a level."""
+        """Detect a two-bar reversal pattern (bullish or bearish) near a level.
+        This method's logic is specific and combines pattern with level proximity.
+        It will remain largely as is, potentially calling cp for sub-candle checks if useful.
+        Current cp lib doesn't have a direct two-bar reversal like this with level context.
+        """
         if idx <= 0 or idx >= len(candles):
             return False
         curr = candles.iloc[idx]
         prev = candles.iloc[idx - 1]
-        tol = curr['close'] * self.price_tolerance
+        
+        # ATR and tolerance calculation for level proximity check
+        tol = curr['close'] * self.price_tolerance 
         atr_val = None
         if len(candles) >= 14:
-            from src.utils.indicators import calculate_atr
+            # from src.utils.indicators import calculate_atr # Global import
             atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
-        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
+            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                atr_idx = idx -1 # Check ATR at previous candle's index for prev candle's proximity
+                if atr_idx < len(atr_series) and pd.notna(atr_series.iloc[atr_idx]):
+                    atr_val = float(atr_series.iloc[atr_idx])
+                elif pd.notna(atr_series.iloc[-1]):
+                    atr_val = float(atr_series.iloc[-1])
+        
+        offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol)
+
+        if not isinstance(level, (float, int)): return False
+        level = float(level)
+
         if direction == 'bullish':
-            if prev['close'] < prev['open'] and curr['close'] > curr['open'] and curr['close'] > prev['high']:
+            # Pattern: Prev bearish, Curr bullish, Curr closes > Prev high
+            pattern_match = prev['close'] < prev['open'] and \
+                            curr['close'] > curr['open'] and \
+                            curr['close'] > prev['high']
+            if pattern_match:
+                # Level check: Prev low near the support level
                 if abs(prev['low'] - level) <= offset:
+                    logger.debug(f"[_is_two_bar_reversal] Bullish detected at idx={idx} near level {level:.5f}")
                     return True
-        else:
-            if prev['close'] > prev['open'] and curr['close'] < curr['open'] and curr['close'] < prev['low']:
+                else:
+                    logger.debug(f"[_is_two_bar_reversal] Bullish pattern OK at idx={idx}, but prev_low={prev['low']:.5f} not near level {level:.5f} (offset={offset:.5f})")
+            # else: logger.debug(f"[_is_two_bar_reversal] Bullish basic pattern fail at idx={idx}")
+
+        else: # bearish
+            # Pattern: Prev bullish, Curr bearish, Curr closes < Prev low
+            pattern_match = prev['close'] > prev['open'] and \
+                            curr['close'] < curr['open'] and \
+                            curr['close'] < prev['low']
+            if pattern_match:
+                # Level check: Prev high near the resistance level
                 if abs(prev['high'] - level) <= offset:
+                    logger.debug(f"[_is_two_bar_reversal] Bearish detected at idx={idx} near level {level:.5f}")
                     return True
+                else:
+                    logger.debug(f"[_is_two_bar_reversal] Bearish pattern OK at idx={idx}, but prev_high={prev['high']:.5f} not near level {level:.5f} (offset={offset:.5f})")
+            # else: logger.debug(f"[_is_two_bar_reversal] Bearish basic pattern fail at idx={idx}")
+            
         return False
 
     def _is_three_bar_reversal(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
-        """Detect a three-bar reversal pattern (bullish or bearish) near a level."""
+        """Detect a three-bar reversal pattern (bullish or bearish) near a level.
+        Logic is specific, combining pattern with level proximity for C1.
+        Will remain largely as is.
+        """
         if idx < 2 or idx >= len(candles):
             return False
         c1, c2, c3 = candles.iloc[idx-2], candles.iloc[idx-1], candles.iloc[idx]
-        tol = c3['close'] * self.price_tolerance
+        
+        # ATR and tolerance for level proximity
+        tol = c3['close'] * self.price_tolerance # Use C3's close for tol relative to level
         atr_val = None
         if len(candles) >= 14:
-            from src.utils.indicators import calculate_atr
+            # from src.utils.indicators import calculate_atr # Global import
             atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
-        offset = max(tol, (atr_val * 0.2) if atr_val else 0)
+            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+                atr_idx_c1 = idx - 2 # Check ATR at C1's index for C1's proximity
+                if atr_idx_c1 < len(atr_series) and pd.notna(atr_series.iloc[atr_idx_c1]):
+                    atr_val = float(atr_series.iloc[atr_idx_c1])
+                elif pd.notna(atr_series.iloc[-1]):
+                    atr_val = float(atr_series.iloc[-1])
+
+        offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol)
+        
+        if not isinstance(level, (float, int)): return False
+        level = float(level)
+
         if direction == 'bullish':
-            if c1['close'] < c1['open'] and c2['close'] < c2['open'] and c3['close'] > c3['open'] and c3['close'] > c1['open']:
+            # Pattern: C1, C2 bearish; C3 bullish & C3 closes > C1 open
+            pattern_match = c1['close'] < c1['open'] and \
+                            c2['close'] < c2['open'] and \
+                            c3['close'] > c3['open'] and \
+                            c3['close'] > c1['open']
+            if pattern_match:
+                # Level check: C1 low near the support level
                 if abs(c1['low'] - level) <= offset:
+                    logger.debug(f"[_is_three_bar_reversal] Bullish detected at idx={idx} near level {level:.5f}")
                     return True
-        else:
-            if c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] < c3['open'] and c3['close'] < c1['open']:
+                else:
+                    logger.debug(f"[_is_three_bar_reversal] Bullish pattern OK at idx={idx}, but c1_low={c1['low']:.5f} not near level {level:.5f} (offset={offset:.5f})")
+            # else: logger.debug(f"[_is_three_bar_reversal] Bullish basic pattern fail at idx={idx}")
+
+        else: # bearish
+            # Pattern: C1, C2 bullish; C3 bearish & C3 closes < C1 open
+            pattern_match = c1['close'] > c1['open'] and \
+                            c2['close'] > c2['open'] and \
+                            c3['close'] < c3['open'] and \
+                            c3['close'] < c1['open']
+            if pattern_match:
+                # Level check: C1 high near the resistance level
                 if abs(c1['high'] - level) <= offset:
+                    logger.debug(f"[_is_three_bar_reversal] Bearish detected at idx={idx} near level {level:.5f}")
                     return True
+                else:
+                    logger.debug(f"[_is_three_bar_reversal] Bearish pattern OK at idx={idx}, but c1_high={c1['high']:.5f} not near level {level:.5f} (offset={offset:.5f})")
+            # else: logger.debug(f"[_is_three_bar_reversal] Bearish basic pattern fail at idx={idx}")
+            
         return False
 
     @property

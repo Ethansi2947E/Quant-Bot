@@ -19,6 +19,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
+import src.utils.candlestick_patterns as cp
 
 class PriceActionSRStrategy(SignalGenerator):
     """
@@ -262,90 +263,6 @@ class PriceActionSRStrategy(SignalGenerator):
             high_in_zone = bool(self._is_in_zone(candle['high'], zone, tol))
             return close_in_zone or high_in_zone
 
-    def _is_bullish_engulfing(self, prev, curr) -> bool:
-        return (
-            prev['close'] < prev['open'] and
-            curr['close'] > curr['open'] and
-            curr['close'] > prev['open'] and
-            curr['open'] < prev['close']
-        )
-
-    def _is_bearish_engulfing(self, prev, curr) -> bool:
-        return (
-            prev['close'] > prev['open'] and
-            curr['close'] < curr['open'] and
-            curr['open'] > prev['close'] and
-            curr['close'] < prev['open']
-        )
-
-    def _is_hammer(self, candle) -> bool:
-        body = abs(candle['close'] - candle['open'])
-        total = candle['high'] - candle['low']
-        lower_wick = min(candle['open'], candle['close']) - candle['low']
-        upper_wick = candle['high'] - max(candle['open'], candle['close'])
-        return (
-            total > 0 and
-            body / total < 0.3 and
-            lower_wick > 2 * body and
-            upper_wick < body
-        )
-
-    def _is_shooting_star(self, candle) -> bool:
-        body = abs(candle['close'] - candle['open'])
-        total = candle['high'] - candle['low']
-        upper_wick = candle['high'] - max(candle['open'], candle['close'])
-        lower_wick = min(candle['open'], candle['close']) - candle['low']
-        return (
-            total > 0 and
-            body / total < 0.3 and
-            upper_wick > 2 * body and
-            lower_wick < body
-        )
-
-    def _is_bullish_harami(self, prev, curr) -> bool:
-        # Bullish Harami: large bearish candle, followed by small bullish candle inside previous body
-        return (
-            prev['close'] < prev['open'] and
-            curr['close'] > curr['open'] and
-            curr['open'] > prev['close'] and curr['close'] < prev['open']
-        )
-
-    def _is_bearish_harami(self, prev, curr) -> bool:
-        # Bearish Harami: large bullish candle, followed by small bearish candle inside previous body
-        return (
-            prev['close'] > prev['open'] and
-            curr['close'] < curr['open'] and
-            curr['open'] < prev['close'] and curr['close'] > prev['open']
-        )
-
-    def _is_morning_star(self, df: pd.DataFrame, idx: int) -> bool:
-        # Morning Star: bearish candle, small body (gap down), bullish candle closing into first
-        if idx < 2:
-            return False
-        c1 = df.iloc[idx-2]
-        c2 = df.iloc[idx-1]
-        c3 = df.iloc[idx]
-        return (
-            c1['close'] < c1['open'] and
-            abs(c2['close'] - c2['open']) < 0.5 * abs(c1['close'] - c1['open']) and
-            c3['close'] > c3['open'] and
-            c3['close'] > ((c1['open'] + c1['close']) / 2)
-        )
-
-    def _is_evening_star(self, df: pd.DataFrame, idx: int) -> bool:
-        # Evening Star: bullish candle, small body (gap up), bearish candle closing into first
-        if idx < 2:
-            return False
-        c1 = df.iloc[idx-2]
-        c2 = df.iloc[idx-1]
-        c3 = df.iloc[idx]
-        return (
-            c1['close'] > c1['open'] and
-            abs(c2['close'] - c2['open']) < 0.5 * abs(c1['close'] - c1['open']) and
-            c3['close'] < c3['open'] and
-            c3['close'] < ((c1['open'] + c1['close']) / 2)
-        )
-
     def _wick_rejection(self, candle, direction: str) -> bool:
         total = candle['high'] - candle['low']
         if total == 0:
@@ -428,43 +345,70 @@ class PriceActionSRStrategy(SignalGenerator):
         self.logger.debug(f"[VolumeWick] Analysis: bullish={is_bullish_volume}, bearish={is_bearish_volume}, combined_valid={combined_valid}")
         return is_bullish_volume or is_bearish_volume or combined_valid
 
-    def calculate_stop_loss(self, zone: float, direction: str, buffer: float = 0.001) -> float:
+    def calculate_stop_loss(self, zone: float, direction: str, candle_extremity: float, buffer: float = 0.001) -> float:
         if direction == "buy":
-            sl = zone - buffer
-            self.logger.debug(f"[SL] BUY: zone={zone}, buffer={buffer}, SL={sl}")
+            # SL for buy is below the lower of the zone or the candle's low
+            sl = min(zone, candle_extremity) - buffer
+            self.logger.debug(f"[SL] BUY: zone={zone}, candle_low={candle_extremity}, buffer={buffer}, SL={sl}")
             return sl
-        else:
-            sl = zone + buffer
-            self.logger.debug(f"[SL] SELL: zone={zone}, buffer={buffer}, SL={sl}")
+        else: # direction == "sell"
+            # SL for sell is above the higher of the zone or the candle's high
+            sl = max(zone, candle_extremity) + buffer
+            self.logger.debug(f"[SL] SELL: zone={zone}, candle_high={candle_extremity}, buffer={buffer}, SL={sl}")
             return sl
 
     def _pattern_match(self, df: pd.DataFrame, idx: int, direction: str) -> Optional[str]:
-        prev = df.iloc[idx-1]
-        curr = df.iloc[idx]
+        # Ensure we have enough data for 3-candle patterns (Morning/Evening Star)
+        if idx < 2: # Need at least c1, c2, c3 where c3 is at current idx
+            return None
+
+        # Slicing:
+        # For 1-candle patterns at df.iloc[idx]: df.iloc[idx:idx+1]
+        # For 2-candle patterns using df.iloc[idx-1] and df.iloc[idx]: df.iloc[idx-1:idx+1]
+        # For 3-candle patterns using df.iloc[idx-2], df.iloc[idx-1], df.iloc[idx]: df.iloc[idx-2:idx+1]
+        
+        # It's important that the series returned by cp functions are correctly indexed.
+        # .iloc[0] for 1-candle slice, .iloc[1] for 2-candle slice, .iloc[2] for 3-candle slice if the slice is passed.
+
         if direction == 'buy':
-            if self._is_bullish_engulfing(prev, curr):
+            # Hammer: 1-candle pattern at current idx
+            # Pass self.wick_threshold to lower_wick_min_ratio
+            if cp.detect_hammer(df.iloc[idx:idx+1], lower_wick_min_ratio=self.wick_threshold).iloc[0]:
+                return 'Hammer' # Pin-bar scoring handled in _score_signal_01 based on wick_rejection flag
+            # Bullish Engulfing: 2-candle pattern (prev, curr)
+            if cp.detect_bullish_engulfing(df.iloc[idx-1:idx+1]).iloc[1]:
                 return 'Bullish Engulfing'
-            if self._is_hammer(curr):
-                return 'Hammer'
-            if self._is_bullish_harami(prev, curr):
+            # Bullish Harami: 2-candle pattern (prev, curr)
+            if cp.detect_bullish_harami(df.iloc[idx-1:idx+1]).iloc[1]:
                 return 'Bullish Harami'
-            if self._is_morning_star(df, idx):
+            # Morning Star: 3-candle pattern (c1, c2, c3=curr)
+            # Pass strategy-specific params: c2_body_max_percent_c1_body=0.5, and ensure no strict gap via gap_xxx_percent=0.0
+            if cp.detect_morning_star(
+                df.iloc[idx-2:idx+1], 
+                star_body_max_percent_c1_body=0.5,
+                c1_c2_gap_down_percent=0.0, # Effectively require_gap=False for this part
+                c2_c3_gap_up_percent=0.0     # Effectively require_gap=False for this part
+            ).iloc[2]:
                 return 'Morning Star'
-            # Pin-bar: hammer with long lower wick
-            if self._wick_rejection(curr, 'buy') and abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.3:
-                return 'Pin-bar'
-        else:
-            if self._is_bearish_engulfing(prev, curr):
+        else: # direction == 'sell'
+            # Shooting Star: 1-candle pattern at current idx
+            # Pass self.wick_threshold to upper_wick_min_ratio
+            if cp.detect_shooting_star(df.iloc[idx:idx+1], upper_wick_min_ratio=self.wick_threshold).iloc[0]:
+                return 'Shooting Star' # Pin-bar scoring handled in _score_signal_01
+            # Bearish Engulfing: 2-candle pattern (prev, curr)
+            if cp.detect_bearish_engulfing(df.iloc[idx-1:idx+1]).iloc[1]:
                 return 'Bearish Engulfing'
-            if self._is_shooting_star(curr):
-                return 'Shooting Star'
-            if self._is_bearish_harami(prev, curr):
+            # Bearish Harami: 2-candle pattern (prev, curr)
+            if cp.detect_bearish_harami(df.iloc[idx-1:idx+1]).iloc[1]:
                 return 'Bearish Harami'
-            if self._is_evening_star(df, idx):
+            # Evening Star: 3-candle pattern (c1, c2, c3=curr)
+            if cp.detect_evening_star(
+                df.iloc[idx-2:idx+1], 
+                star_body_max_percent_c1_body=0.5,
+                c1_c2_gap_up_percent=0.0,   # Effectively require_gap=False
+                c2_c3_gap_down_percent=0.0  # Effectively require_gap=False
+            ).iloc[2]:
                 return 'Evening Star'
-            # Pin-bar: shooting star with long upper wick
-            if self._wick_rejection(curr, 'sell') and abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.3:
-                return 'Pin-bar'
         return None
 
     def _score_signal_01(self, pattern: str, wick: bool, volume_score: float, risk_reward: float, zone_touches: int, other_confluence: float = 0.0) -> Tuple[float, dict]:
@@ -481,17 +425,25 @@ class PriceActionSRStrategy(SignalGenerator):
         Returns:
             (float, dict): Tuple of (score, breakdown dict)
         """
-        # Pattern reliability mapping
-        pattern_map = {
-            'Bullish Engulfing': 1.0,
-            'Bearish Engulfing': 1.0,
-            'Hammer': 0.7,
-            'Shooting Star': 0.7,
-            'Pin-bar': 0.5,
-            '': 0.0,
-            None: 0.0
-        }
-        pattern_score = pattern_map.get(pattern, 0.0)
+        # Pattern reliability mapping & Pin-bar adjustment
+        pattern_score = 0.0
+        if pattern == 'Hammer':
+            pattern_score = 0.5 if wick else 0.7 # If wick rejection confirmed (Pin-bar), score 0.5, else 0.7
+        elif pattern == 'Shooting Star':
+            pattern_score = 0.5 if wick else 0.7 # If wick rejection confirmed (Pin-bar), score 0.5, else 0.7
+        elif pattern == 'Bullish Engulfing':
+            pattern_score = 1.0
+        elif pattern == 'Bearish Engulfing':
+            pattern_score = 1.0
+        elif pattern == 'Bullish Harami': # Added Harami
+            pattern_score = 0.6 # Assign a score, e.g., 0.6
+        elif pattern == 'Bearish Harami': # Added Harami
+            pattern_score = 0.6 # Assign a score, e.g., 0.6
+        elif pattern == 'Morning Star': # Added Morning Star
+             pattern_score = 0.8 # Assign a score, e.g., 0.8
+        elif pattern == 'Evening Star': # Added Evening Star
+             pattern_score = 0.8 # Assign a score, e.g., 0.8
+       
         wick_score = 1.0 if wick else 0.0
         # Volume: allow float for partial spike (e.g. 0.5 if just above threshold)
         volume_score = max(0.0, min(volume_score, 1.0))
@@ -503,7 +455,7 @@ class PriceActionSRStrategy(SignalGenerator):
         elif risk_reward >= 2.0:
             risk_reward_score = 0.5 + 0.5 * (risk_reward - 2.0)
             risk_reward_score = min(risk_reward_score, 1.0)
-        else:
+        else: # 1.0 <= risk_reward < 2.0
             risk_reward_score = 0.5 * (risk_reward - 1.0)
         risk_reward_score = max(0.0, min(risk_reward_score, 1.0))
         # Zone strength: 0 if 1 touch, 0.5 at 3, 1.0 at 5+
@@ -511,27 +463,22 @@ class PriceActionSRStrategy(SignalGenerator):
             zone_strength_score = 0.0
         elif zone_touches >= 5:
             zone_strength_score = 1.0
-        elif zone_touches >= 3:
-            zone_strength_score = 0.5 + 0.5 * (zone_touches - 3) / 2
-        else:
-            zone_strength_score = 0.5 * (zone_touches - 1) / 2
+        elif zone_touches >= 3: # 3 or 4 touches
+            zone_strength_score = 0.5 + 0.5 * (zone_touches - 3) / 2.0 # Scale from 0.5 to 1.0
+        else: # zone_touches == 2
+            zone_strength_score = 0.25 # Halfway to 0.5 for 2 touches
         zone_strength_score = max(0.0, min(zone_strength_score, 1.0))
+        
         # Other confluence (future)
         other_confluence_score = max(0.0, min(other_confluence, 1.0))
-        # Weights
-        w_pattern = 0.30
-        w_wick = 0.15
-        w_volume = 0.15
-        w_risk = 0.20
-        w_zone = 0.10
-        w_other = 0.10
+
         score = (
-            pattern_score * w_pattern +
-            wick_score * w_wick +
-            volume_score * w_volume +
-            risk_reward_score * w_risk +
-            zone_strength_score * w_zone +
-            other_confluence_score * w_other
+            pattern_score * 0.30 +
+            wick_score * 0.15 +
+            volume_score * 0.15 +
+            risk_reward_score * 0.20 +
+            zone_strength_score * 0.10 +
+            other_confluence_score * 0.10
         )
         breakdown = {
             'pattern_score': pattern_score,
@@ -541,12 +488,12 @@ class PriceActionSRStrategy(SignalGenerator):
             'zone_strength_score': zone_strength_score,
             'other_confluence_score': other_confluence_score,
             'weights': {
-                'pattern': w_pattern,
-                'wick': w_wick,
-                'volume': w_volume,
-                'risk_reward': w_risk,
-                'zone_strength': w_zone,
-                'other_confluence': w_other
+                'pattern': 0.30,
+                'wick': 0.15,
+                'volume': 0.15,
+                'risk_reward': 0.20,
+                'zone_strength': 0.10,
+                'other_confluence': 0.10
             },
             'final_score': score
         }
@@ -616,6 +563,10 @@ class PriceActionSRStrategy(SignalGenerator):
             "Hammer": 4,
             "Shooting Star": 4,
             "Pin-bar": 3,
+            "Bullish Harami": 2,
+            "Bearish Harami": 2,
+            "Morning Star": 1,
+            "Evening Star": 1,
             # Add more patterns with their ranks as needed
         }
         return pattern_ranks.get(pattern, 1)  # Default rank = 1
@@ -823,8 +774,18 @@ class PriceActionSRStrategy(SignalGenerator):
                     avg_vol = df_primary['tick_volume'].iloc[process_idx-20:process_idx].mean()
                     current_vol = df_primary['tick_volume'].iloc[process_idx]
                     volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 1.0) if avg_vol > 0 else 0.0
+                    
                     entry = df_primary['open'].iloc[idx] if idx < len(df_primary) else candle['close']
-                    stop = self.calculate_stop_loss(zone, direction)
+                    
+                    # Determine candle extremity for SL calculation
+                    candle_low = candle['low']
+                    candle_high = candle['high']
+                    stop = self.calculate_stop_loss(
+                        zone, 
+                        direction, 
+                        candle_low if direction == 'buy' else candle_high
+                    ) # Default buffer is used
+
                     opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
                     tp = None
                     for opp in (sorted(opp_zones) if direction == 'buy' else sorted(opp_zones, reverse=True)):
