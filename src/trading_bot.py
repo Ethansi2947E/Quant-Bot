@@ -1304,56 +1304,67 @@ class TradingBot:
         try:
             # Store all found signal generators
             self.available_signal_generators = {}
-            
+            logger.info("[LOAD_STRAT] Initialized self.available_signal_generators.")
+
             # Try to import the main breakout reversal strategy
             try:
                 # Try importing from strategy module first
                 try:
                     from src.strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
                     self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
-                    logger.info("Successfully imported BreakoutReversalStrategy from strategy module")
+                    logger.info("[LOAD_STRAT] Successfully imported BreakoutReversalStrategy from strategy module")
                 except ImportError:
                     # Fallback to direct import
                     from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
                     self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
-                    logger.info("Imported BreakoutReversalStrategy directly from file")
-                
+                    logger.info("[LOAD_STRAT] Imported BreakoutReversalStrategy directly from file")
+                logger.info(f"[LOAD_STRAT] After BreakoutReversal: {list(self.available_signal_generators.keys())}")
+
                 # Try importing the new price action SR strategy
                 try:
                     from src.strategy.price_action_sr_strategy import PriceActionSRStrategy
                     self.available_signal_generators["price_action_sr"] = PriceActionSRStrategy
-                    logger.info("Successfully imported PriceActionSRStrategy")
+                    logger.info("[LOAD_STRAT] Successfully imported PriceActionSRStrategy")
                 except ImportError as e:
-                    logger.warning(f"PriceActionSRStrategy not found in strategy module: {str(e)}")
-                
+                    logger.warning(f"[LOAD_STRAT] PriceActionSRStrategy not found in strategy module: {str(e)}")
+                logger.info(f"[LOAD_STRAT] After PriceActionSR: {list(self.available_signal_generators.keys())}")
+
                 # Try importing the confluence strategy
                 try:
                     from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy  # type: ignore
                     self.available_signal_generators["confluence_price_action"] = ConfluencePriceActionStrategy
-                    logger.info("Successfully imported ConfluencePriceActionStrategy")
+                    logger.info("[LOAD_STRAT] Successfully imported ConfluencePriceActionStrategy")
                 except ImportError as e:
-                    logger.warning(f"ConfluencePriceActionStrategy not found in strategy module: {str(e)}")
+                    logger.warning(f"[LOAD_STRAT] ConfluencePriceActionStrategy not found in strategy module: {str(e)}")
+                logger.info(f"[LOAD_STRAT] After ConfluencePriceAction: {list(self.available_signal_generators.keys())}")
+
                 # Import the new BreakoutTradingStrategy
                 try:
-                    logger.info("Attempting to import BreakoutTradingStrategy")
+                    logger.info("[LOAD_STRAT] Attempting to import BreakoutTradingStrategy")
                     from src.strategy.breakout_trading_strategy import BreakoutTradingStrategy
                     self.available_signal_generators["breakout_trading"] = BreakoutTradingStrategy
-                    logger.info("Successfully imported BreakoutTradingStrategy")
-                    logger.info(f"Available strategies after import: {list(self.available_signal_generators.keys())}")
+                    logger.info("[LOAD_STRAT] Successfully imported BreakoutTradingStrategy")
                 except ImportError as e:
-                    logger.error(f"Error importing BreakoutTradingStrategy: {str(e)}")
+                    logger.error(f"[LOAD_STRAT] Error importing BreakoutTradingStrategy: {str(e)}")
                     logger.error(traceback.format_exc())
+                logger.info(f"[LOAD_STRAT] After BreakoutTrading: {list(self.available_signal_generators.keys())}")
+
                 # Import the new TrendFollowingStrategy
                 try:
+                    logger.info("[LOAD_STRAT] Attempting to import TrendFollowingStrategy")
                     from src.strategy.trend_following_strategy import TrendFollowingStrategy
                     self.available_signal_generators["trend_following"] = TrendFollowingStrategy
-                    logger.info("Successfully imported TrendFollowingStrategy")
+                    logger.info("[LOAD_STRAT] Successfully imported TrendFollowingStrategy")
                 except ImportError as e:
-                    logger.error(f"Error importing TrendFollowingStrategy: {str(e)}")
+                    logger.error(f"[LOAD_STRAT] Error importing TrendFollowingStrategy: {str(e)}")
                     logger.error(traceback.format_exc())
+                logger.info(f"[LOAD_STRAT] After TrendFollowing: {list(self.available_signal_generators.keys())}")
+
             except ImportError as e:
-                logger.warning(f"Could not import BreakoutReversalStrategy: {str(e)}")
+                logger.warning(f"[LOAD_STRAT] Could not import BreakoutReversalStrategy (outer try-except): {str(e)}")
             
+            logger.info(f"[LOAD_STRAT] After all explicit imports: {list(self.available_signal_generators.keys())}")
+
             # Try to import other available strategies
             try:
                 # Import strategy directory
@@ -1401,13 +1412,12 @@ class TradingBot:
                 
             # Log successful loading
             if self.available_signal_generators:
-                logger.info(f"Loaded {len(self.available_signal_generators)} signal generators: {list(self.available_signal_generators.keys())}")
+                logger.info(f"[LOAD_STRAT] Finally loaded {len(self.available_signal_generators)} signal generators: {list(self.available_signal_generators.keys())}")
             else:
-                logger.warning("No signal generators were loaded")
+                logger.warning("[LOAD_STRAT] No signal generators were loaded by _load_available_signal_generators")
                 
         except Exception as e:
-            logger.error(f"Error loading signal generators: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[LOAD_STRAT] Error in _load_available_signal_generators: {str(e)}")
     
     async def send_notification_task(self):
         """Periodically send status notifications to the Telegram bot."""

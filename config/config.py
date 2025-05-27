@@ -70,8 +70,8 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        "confluence_price_action",
-        "breakout_reversal",
+        #"confluence_price_action",
+        #"breakout_reversal",
         "breakout_trading",
         "trend_following",
         "price_action_sr"

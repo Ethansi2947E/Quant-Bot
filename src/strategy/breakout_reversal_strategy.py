@@ -29,7 +29,7 @@ import time
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr
 from src.risk_manager import RiskManager
-import src.utils.candlestick_patterns as cp # Added import
+import talib # Added talib import
 
 # Strategy parameter profiles for different timeframes
 TIMEFRAME_PROFILES = {
@@ -2043,18 +2043,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                 # Use relaxed breakout logic
                 if self._is_breakout_candle(current_candle, df, level['zone_max'], 'buy'):
                     # False-breakout filter for bullish breakouts (safe check)
-                    fb = cp.detect_key_reversal_bar_after_breakout(
-                        df.iloc[:i+1], # Pass data up to and including current candle
-                        level=level['zone_max'],
-                        break_direction='bullish',
-                        reversal_close_percent_of_range=0.3, # Default from breakout_reversal
-                        body_min_percent_of_range=0.3, # Default assumption
-                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
-                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
-                    )
-                    if not fb.empty and fb.iloc[-1]:
-                        logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at resistance breakout (bar {i}), skipping signal.")
-                        continue  # skip this candle—likely a fakeout
+                    # Removed: cp.detect_key_reversal_bar_after_breakout call
+                    # if not fb.empty and fb.iloc[-1]:
+                    #     logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at resistance breakout (bar {i}), skipping signal.")
+                    #     continue  # skip this candle—likely a fakeout
                     # Generate buy signal
                     entry_price = current_candle['close']
                     
@@ -2084,18 +2076,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                     h1_trend != 'bearish'):  # Just avoid counter-trend signals
                     
                     # False-breakout filter for bullish trendline breakouts
-                    fb = cp.detect_key_reversal_bar_after_breakout(
-                        df.iloc[:i+1],
-                        level=curr_line_value, # The trend line value acts as the dynamic level
-                        break_direction='bullish',
-                        reversal_close_percent_of_range=0.3,
-                        body_min_percent_of_range=0.3,
-                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
-                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
-                    )
-                    if not fb.empty and fb.iloc[-1]:
-                        logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at trendline breakout (bar {i}), skipping signal.")
-                        continue
+                    # Removed: cp.detect_key_reversal_bar_after_breakout call
+                    # if not fb.empty and fb.iloc[-1]:
+                    #     logger.debug(f"🚫 False breakout (key reversal) detected for {symbol} at trendline breakout (bar {i}), skipping signal.")
+                    #     continue
                     # Generate buy signal
                     entry_price = current_candle['close']
                     
@@ -2171,18 +2155,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                 logger.debug(f"🔄 {symbol}: Checking support level {level['zone_min']:.5f}-{level['zone_max']:.5f}")
                 # Use relaxed breakout logic
                 if self._is_breakout_candle(current_candle, df, level['zone_min'], 'sell'):
-                    fb = cp.detect_key_reversal_bar_after_breakout(
-                        df.iloc[:i+1],
-                        level=level['zone_min'],
-                        break_direction='bearish',
-                        reversal_close_percent_of_range=0.3,
-                        body_min_percent_of_range=0.3,
-                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
-                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
-                    )
-                    if not fb.empty and fb.iloc[-1]:
-                        logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at support breakdown (bar {i}), skipping signal.")
-                        continue
+                    # Removed: cp.detect_key_reversal_bar_after_breakout call
+                    # if not fb.empty and fb.iloc[-1]:
+                    #     logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at support breakdown (bar {i}), skipping signal.")
+                    #     continue
                     entry_price = current_candle['close']
                     stop_loss = max(current_candle['high'], previous_candle['high'])
                     logger.info(f"👀 Detected potential breakdown for {symbol} at level {level['zone_min']:.5f}")
@@ -2199,18 +2175,10 @@ class BreakoutReversalStrategy(SignalGenerator):
                     current_candle['close'] < curr_line_value * (1 - self.price_tolerance) and
                     h1_trend != 'bullish'):
                     # False-breakout filter for bearish trendline breakdowns
-                    fb = cp.detect_key_reversal_bar_after_breakout(
-                        df.iloc[:i+1],
-                        level=curr_line_value, # The trend line value acts as the dynamic level
-                        break_direction='bearish',
-                        reversal_close_percent_of_range=0.3,
-                        body_min_percent_of_range=0.3,
-                        volume_series=df['tick_volume'].iloc[:i+1] if 'tick_volume' in df.columns else None,
-                        volume_threshold_quantile=self.volume_percentile / 100.0 if hasattr(self, 'volume_percentile') else None
-                    )
-                    if not fb.empty and fb.iloc[-1]:
-                        logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at trendline breakdown (bar {i}), skipping signal.")
-                        continue
+                    # Removed: cp.detect_key_reversal_bar_after_breakout call
+                    # if not fb.empty and fb.iloc[-1]:
+                    #     logger.debug(f"🚫 False breakdown (key reversal) detected for {symbol} at trendline breakdown (bar {i}), skipping signal.")
+                    #     continue
                     # Generate sell signal
                     entry_price = current_candle['close']
                     stop_loss = max(current_candle['high'], previous_candle['high'])
@@ -2301,12 +2269,24 @@ class BreakoutReversalStrategy(SignalGenerator):
         bearish_trend_lines = [line for line in trend_lines if line['angle'] > -60]
 
         # Precompute vectorized pattern detections for efficiency
-        hammer_pattern = cp.detect_hammer(df) # Removed price_tolerance
-        shooting_star_pattern = cp.detect_shooting_star(df) # Removed price_tolerance
-        bullish_engulfing_pattern = cp.detect_bullish_engulfing(df)
-        bearish_engulfing_pattern = cp.detect_bearish_engulfing(df)
-        morning_star_pattern = cp.detect_morning_star(df, c1_c2_gap_down_percent=self.price_tolerance, c2_c3_gap_up_percent=self.price_tolerance) # Pass relevant params
-        evening_star_pattern = cp.detect_evening_star(df, c1_c2_gap_up_percent=self.price_tolerance, c2_c3_gap_down_percent=self.price_tolerance) # Pass relevant params
+        # Ensure data is in np.float64 as required by TA-Lib
+        open_prices = df['open'].values.astype(np.float64)
+        high_prices = df['high'].values.astype(np.float64)
+        low_prices = df['low'].values.astype(np.float64)
+        close_prices = df['close'].values.astype(np.float64)
+
+        hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
+        shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        engulfing_talib = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
+        morning_star_talib = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices) # Default penetration = 0.3
+        evening_star_talib = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices) # Default penetration = 0.3
+
+        hammer_pattern = pd.Series(hammer_talib > 0, index=df.index)
+        shooting_star_pattern = pd.Series(shooting_star_talib < 0, index=df.index) # Shooting star is bearish
+        bullish_engulfing_pattern = pd.Series(engulfing_talib > 0, index=df.index)
+        bearish_engulfing_pattern = pd.Series(engulfing_talib < 0, index=df.index)
+        morning_star_pattern = pd.Series(morning_star_talib > 0, index=df.index)
+        evening_star_pattern = pd.Series(evening_star_talib < 0, index=df.index)
         # False breakout is more custom, so keep as is for now
 
         # Check for reversal at support (bullish patterns)
@@ -2323,7 +2303,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 if is_near_support:
                     # Use only precomputed vectorized pattern detection
                     pattern_types = []
-                    idx = i if i >= 0 else len(df) + i
+                    idx = i if i >= 0 else len(df) + i # Ensure positive index for iloc
                     if hammer_pattern.iloc[idx]:
                         pattern_types.append("Hammer")
                     if bullish_engulfing_pattern.iloc[idx]:
@@ -2395,7 +2375,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 if is_near_trendline:
                     # Detect bullish reversal pattern using precomputed vectorized series
                     pattern_types = []
-                    idx = i if i >= 0 else len(df) + i
+                    idx = i if i >= 0 else len(df) + i # Ensure positive index for iloc
                     if hammer_pattern.iloc[idx]:
                         pattern_types.append("Hammer")
                     if bullish_engulfing_pattern.iloc[idx]:
@@ -2491,7 +2471,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 if abs(current_candle['high'] - level['zone_min']) <= self._get_dynamic_tolerance_band(df, i, level['zone_min']):
                     # Use only precomputed vectorized pattern detection
                     pattern_types = []
-                    idx = i if i >= 0 else len(df) + i
+                    idx = i if i >= 0 else len(df) + i # Ensure positive index for iloc
                     if shooting_star_pattern.iloc[idx]:
                         pattern_types.append("Shooting Star")
                     if bearish_engulfing_pattern.iloc[idx]:
@@ -2557,7 +2537,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 if abs(current_candle['high'] - line_value) <= self._get_dynamic_tolerance_band(df, i, line_value):
                     # Detect bearish reversal pattern using precomputed vectorized series
                     pattern_types = []
-                    idx = i if i >= 0 else len(df) + i
+                    idx = i if i >= 0 else len(df) + i # Ensure positive index for iloc
                     if shooting_star_pattern.iloc[idx]:
                         pattern_types.append("Shooting Star")
                     if bearish_engulfing_pattern.iloc[idx]:

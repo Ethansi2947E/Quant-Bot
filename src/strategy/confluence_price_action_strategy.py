@@ -12,7 +12,7 @@ from typing import Optional, List, Dict, Any
 
 from src.trading_bot import SignalGenerator
 from src.utils.indicators import calculate_atr, calculate_adx
-import src.utils.candlestick_patterns as cp # Added import
+import talib # Added talib import
 from config.config import TRADING_CONFIG,get_risk_manager_config
 from src.risk_manager import RiskManager
 
@@ -43,6 +43,15 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     Confluence-based price action strategy with pullbacks, candlestick confirmations,
     Fibonacci and moving-average confluence, plus strict risk management.
     """
+
+    @staticmethod
+    def _detect_inside_bar_vectorized(df: pd.DataFrame) -> pd.Series:
+        """Detects inside bars (current high < prev high AND current low > prev low)."""
+        if len(df) < 2:
+            return pd.Series([False] * len(df), index=df.index)
+        # Current high < previous high AND current low > previous low
+        inside_bar = (df['high'] < df['high'].shift(1)) & (df['low'] > df['low'].shift(1))
+        return inside_bar.fillna(False)
 
     def __init__(self,
                  primary_timeframe: str = "M15",
@@ -796,13 +805,30 @@ class ConfluencePriceActionStrategy(SignalGenerator):
     # -- Candlestick pattern checks --
     def _is_pin_bar(self, df: pd.DataFrame, idx: int, level: float, direction: str) -> bool:
         """Loosened: More tolerant pin bar detection. Accept near-miss, log reason if rejected."""
-        candle_slice = df.iloc[idx:idx+1] # Use a slice for cp functions
-        # Basic Hammer/SS check
-        is_basic_hammer = direction == 'bullish' and cp.detect_hammer(candle_slice).iloc[0]
-        is_basic_ss = direction == 'bearish' and cp.detect_shooting_star(candle_slice).iloc[0]
+        if idx < 0 or idx >= len(df):
+            return False
+        
+        candle_slice = df.iloc[idx:idx+1]
+        if candle_slice.empty:
+            return False
+
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+
+        is_basic_hammer = False
+        is_basic_ss = False
+
+        if direction == 'bullish':
+            hammer_result = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
+            is_basic_hammer = hammer_result[0] != 0
+        else: # bearish
+            ss_result = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
+            is_basic_ss = ss_result[0] != 0
 
         if not (is_basic_hammer or is_basic_ss):
-            # If cp doesn't detect basic shape, try local more lenient logic for pin-bar like shapes
+            # If talib doesn't detect basic shape, try local more lenient logic for pin-bar like shapes
             # This part retains the original detailed wick/body ratio logic if cp basic check fails
             candle = df.iloc[idx]
             body = abs(candle['close'] - candle['open'])
@@ -838,19 +864,28 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     def _is_engulfing(self, candles: pd.DataFrame, idx: int, direction: str, level: float) -> bool:
         """Loosened: More tolerant engulfing detection. Accept near-miss, log reason if rejected."""
-        if idx < 1:
+        if idx < 1 or idx >= len(candles):
             return False
         
-        candle_slice = candles.iloc[idx-1:idx+1] # Slice for 2-candle pattern
+        candle_slice = candles.iloc[idx-1:idx+1]
+        if len(candle_slice) < 2:
+            return False
+
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+        
+        engulfing_result = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
         
         basic_engulfing = False
         if direction == 'bullish':
-            basic_engulfing = cp.detect_bullish_engulfing(candle_slice).iloc[1]
+            basic_engulfing = engulfing_result[-1] > 0 # Bullish Engulfing is 100
         else: # bearish
-            basic_engulfing = cp.detect_bearish_engulfing(candle_slice).iloc[1]
+            basic_engulfing = engulfing_result[-1] < 0 # Bearish Engulfing is -100
 
         if basic_engulfing:
-            logger.debug(f"[Pattern] Engulfing ({direction}) detected by cp at idx={idx}")
+            logger.debug(f"[Pattern] Engulfing ({direction}) detected by talib at idx={idx}")
             # Original local logic included near-miss, which cp doesn't. We can retain it here.
             prev = candles.iloc[idx - 1]
             curr = candles.iloc[idx]
@@ -899,12 +934,15 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             return False
         
         candle_slice = candles.iloc[idx-1:idx+1] # Slice for 2-candle pattern
-
-        if not cp.detect_inside_bar(candle_slice).iloc[1]:
-            logger.debug(f"[Pattern] Inside Bar rejected by cp at idx={idx}")
+        if len(candle_slice) < 2:
             return False
 
-        # If cp confirms basic inside bar, proceed with this strategy's level check for the mother candle
+        # Use the class's static vectorized method for inside bar detection
+        if not self._detect_inside_bar_vectorized(candle_slice).iloc[-1]:
+            logger.debug(f"[Pattern] Inside Bar rejected by _detect_inside_bar_vectorized at idx={idx}")
+            return False
+
+        # If basic inside bar is confirmed, proceed with this strategy's level check for the mother candle
         mother = candles.iloc[idx - 1]
         # child = candles.iloc[idx] # child characteristics checked by cp.detect_inside_bar
 
@@ -940,90 +978,118 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     def _is_hammer(self, df: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Hammer pattern (bullish reversal) near support."""
+        if idx < 0 or idx >= len(df):
+            return False
         candle_slice = df.iloc[idx:idx+1]
-        if not cp.detect_hammer(candle_slice).iloc[0]: # Using default params for cp.detect_hammer
-            logger.debug(f"[Pattern] Hammer rejected by cp at idx={idx}")
+        if candle_slice.empty:
+            return False
+            
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+
+        hammer_result = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
+        if not (hammer_result[0] != 0):
+            logger.debug(f"[Pattern] Hammer rejected by talib at idx={idx}")
             return False
         
-        # If cp confirms basic Hammer, apply level proximity check
+        # If talib confirms basic Hammer, apply level proximity check
         candle = df.iloc[idx]
         if abs(candle['low'] - level) < level * self.price_tolerance:
-            logger.debug(f"[Pattern] Hammer confirmed by cp at idx={idx} and near level {level:.5f}")
+            logger.debug(f"[Pattern] Hammer confirmed by talib at idx={idx} and near level {level:.5f}")
             return True
         
-        logger.debug(f"[Pattern] Hammer at idx={idx} rejected: basic shape OK by cp but not near level {level:.5f} (low={candle['low']:.5f})")
+        logger.debug(f"[Pattern] Hammer at idx={idx} rejected: basic shape OK by talib but not near level {level:.5f} (low={candle['low']:.5f})")
         return False
 
     def _is_shooting_star(self, df: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Shooting Star pattern (bearish reversal) near resistance."""
+        if idx < 0 or idx >= len(df):
+            return False
         candle_slice = df.iloc[idx:idx+1]
-        if not cp.detect_shooting_star(candle_slice).iloc[0]: # Using default params for cp.detect_shooting_star
-            logger.debug(f"[Pattern] Shooting Star rejected by cp at idx={idx}")
+        if candle_slice.empty:
             return False
 
-        # If cp confirms basic Shooting Star, apply level proximity check
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+        
+        ss_result = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        if not (ss_result[0] != 0):
+            logger.debug(f"[Pattern] Shooting Star rejected by talib at idx={idx}")
+            return False
+
+        # If talib confirms basic Shooting Star, apply level proximity check
         candle = df.iloc[idx]
         if abs(candle['high'] - level) < level * self.price_tolerance:
-            logger.debug(f"[Pattern] Shooting Star confirmed by cp at idx={idx} and near level {level:.5f}")
+            logger.debug(f"[Pattern] Shooting Star confirmed by talib at idx={idx} and near level {level:.5f}")
             return True
             
-        logger.debug(f"[Pattern] Shooting Star at idx={idx} rejected: basic shape OK by cp but not near level {level:.5f} (high={candle['high']:.5f})")
+        logger.debug(f"[Pattern] Shooting Star at idx={idx} rejected: basic shape OK by talib but not near level {level:.5f} (high={candle['high']:.5f})")
         return False
 
     def _is_morning_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect a Morning Star (bullish 3-bar reversal) near support, allow pattern only in last 5 bars."""
-        if idx < 2:
+        if idx < 2 or idx >= len(candles): # Need at least 3 candles (idx-2, idx-1, idx)
             return False
-        # "pattern only in last 5 bars" - this check should be done by the caller if still needed.
-        # if idx < len(candles) - 5: 
-        #     return False
             
         candle_slice = candles.iloc[idx-2:idx+1] # Slice for 3-candle pattern
-        
-        if not cp.detect_morning_star(candle_slice, 
-                                     c1_body_min_percent_of_range=0.4, # local was 0.5
-                                     star_body_max_percent_of_range=0.3, 
-                                     c3_closes_into_c1_body_min_percent=0.01, # local: c3_close > c1_open (effectively 0% into body from open)
-                                     c1_c2_gap_down_percent=0.0, # No strict gap in local
-                                     c2_c3_gap_up_percent=0.0     # No strict gap in local
-                                     ).iloc[2]:
-            logger.debug(f"[Pattern] Morning Star rejected by cp at idx={idx}")
+        if len(candle_slice) < 3:
             return False
 
-        # If cp confirms basic Morning Star shape, apply this strategy's specific level check for C3
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+
+        # Using talib.CDLMORNINGSTAR with default penetration (0.3)
+        # penetration=0 means the third day's close must be above the midpoint of the first day's body.
+        # TA-Lib's default might be suitable.
+        morning_star_result = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        
+        if not (morning_star_result[-1] != 0): # Check the last value in the series (corresponds to idx)
+            logger.debug(f"[Pattern] Morning Star rejected by talib at idx={idx}")
+            return False
+
+        # If talib confirms basic Morning Star shape, apply this strategy's specific level check for C3
         c3 = candles.iloc[idx]
         if abs(c3['low'] - level) < level * self.price_tolerance:
-            logger.debug(f"[Pattern] Morning Star confirmed by cp at idx={idx} and C3 near level {level:.5f}")
+            logger.debug(f"[Pattern] Morning Star confirmed by talib at idx={idx} and C3 near level {level:.5f}")
             return True
             
-        logger.debug(f"[Pattern] Morning Star at idx={idx} rejected: basic shape OK by cp but C3 not near level {level:.5f} (c3_low={c3['low']:.5f})")
+        logger.debug(f"[Pattern] Morning Star at idx={idx} rejected: basic shape OK by talib but C3 not near level {level:.5f} (c3_low={c3['low']:.5f})")
         return False
 
     def _is_evening_star(self, candles: pd.DataFrame, idx: int, level: float) -> bool:
         """Detect an Evening Star (bearish 3-bar reversal) near resistance, allow pattern only in last 5 bars."""
-        if idx < 2:
+        if idx < 2 or idx >= len(candles): # Need at least 3 candles
             return False
-        # if idx < len(candles) - 5:
-        #     return False
             
         candle_slice = candles.iloc[idx-2:idx+1]
-        if not cp.detect_evening_star(candle_slice,
-                                     c1_body_min_percent_of_range=0.4, # local was 0.5
-                                     star_body_max_percent_of_range=0.3,
-                                     c3_closes_into_c1_body_min_percent=0.01, # local: c3_close < c1_open
-                                     c1_c2_gap_up_percent=0.0,   # No strict gap
-                                     c2_c3_gap_down_percent=0.0  # No strict gap
-                                     ).iloc[2]:
-            logger.debug(f"[Pattern] Evening Star rejected by cp at idx={idx}")
+        if len(candle_slice) < 3:
             return False
 
-        # If cp confirms basic Evening Star shape, apply this strategy's specific level check for C3
+        open_prices = candle_slice['open'].to_numpy(dtype=np.float64)
+        high_prices = candle_slice['high'].to_numpy(dtype=np.float64)
+        low_prices = candle_slice['low'].to_numpy(dtype=np.float64)
+        close_prices = candle_slice['close'].to_numpy(dtype=np.float64)
+
+        # Using talib.CDLEVENINGSTAR with default penetration (0.3)
+        evening_star_result = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
+        
+        if not (evening_star_result[-1] != 0): # Check the last value for the pattern at idx
+            logger.debug(f"[Pattern] Evening Star rejected by talib at idx={idx}")
+            return False
+
+        # If talib confirms basic Evening Star shape, apply this strategy's specific level check for C3
         c3 = candles.iloc[idx]
         if abs(c3['high'] - level) < level * self.price_tolerance:
-            logger.debug(f"[Pattern] Evening Star confirmed by cp at idx={idx} and C3 near level {level:.5f}")
+            logger.debug(f"[Pattern] Evening Star confirmed by talib at idx={idx} and C3 near level {level:.5f}")
             return True
             
-        logger.debug(f"[Pattern] Evening Star at idx={idx} rejected: basic shape OK by cp but C3 not near level {level:.5f} (c3_high={c3['high']:.5f})")
+        logger.debug(f"[Pattern] Evening Star at idx={idx} rejected: basic shape OK by talib but C3 not near level {level:.5f} (c3_high={c3['high']:.5f})")
         return False
 
     def _is_false_breakout(self, candles: pd.DataFrame, idx: int, level: float, direction: str) -> bool:
@@ -1057,13 +1123,7 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         if direction == 'bullish': # Looking for bullish reversal after a bearish break of support `level`
             body = abs(curr['close'] - curr['open'])
             if body == 0: return False # Avoid division by zero if body is zero
-            wick = curr['close'] - curr['low'] # For bullish reversal, lower wick is not the rejection wick.
-                                            # It's the current candle's bullish move after breaking low.
-                                            # This logic seems to imply curr closes significantly higher than its low.
-                                            # Consider if `curr['high'] - curr['open']` for bullish body or `curr['close'] - curr['low']` as range of upward move is better.
-                                            # Original logic: wick = curr['close'] - curr['low']
-                                            # This means the distance from low to close (bullish reversal strength)
-            
+            wick = curr['close'] - curr['low'] 
             wick_ok = wick > 1.2 * body if body > 0 else wick > 0 # was 1.5x. Handle zero body.
 
             # Breakout: prev broke below level, curr came back above and closed above.

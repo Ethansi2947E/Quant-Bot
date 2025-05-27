@@ -19,7 +19,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
-import src.utils.candlestick_patterns as cp
+import talib # Added TA-Lib import
 
 class PriceActionSRStrategy(SignalGenerator):
     """
@@ -357,58 +357,44 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug(f"[SL] SELL: zone={zone}, candle_high={candle_extremity}, buffer={buffer}, SL={sl}")
             return sl
 
-    def _pattern_match(self, df: pd.DataFrame, idx: int, direction: str) -> Optional[str]:
+    def _pattern_match(
+        self, 
+        idx: int, 
+        direction: str,
+        hammer_series: pd.Series,
+        shooting_star_series: pd.Series,
+        bullish_engulfing_series: pd.Series,
+        bearish_engulfing_series: pd.Series,
+        bullish_harami_series: pd.Series,
+        bearish_harami_series: pd.Series,
+        morning_star_series: pd.Series,
+        evening_star_series: pd.Series
+    ) -> Optional[str]:
         # Ensure we have enough data for 3-candle patterns (Morning/Evening Star)
-        if idx < 2: # Need at least c1, c2, c3 where c3 is at current idx
+        # This check is implicitly handled by TA-Lib functions returning 0 for early bars
+        # and the generate_signals method ensuring enough bars.
+        # However, direct access to iloc[idx] needs valid idx.
+        if idx < 0: # Basic check, TA-Lib functions handle lookback internally
             return None
 
-        # Slicing:
-        # For 1-candle patterns at df.iloc[idx]: df.iloc[idx:idx+1]
-        # For 2-candle patterns using df.iloc[idx-1] and df.iloc[idx]: df.iloc[idx-1:idx+1]
-        # For 3-candle patterns using df.iloc[idx-2], df.iloc[idx-1], df.iloc[idx]: df.iloc[idx-2:idx+1]
-        
-        # It's important that the series returned by cp functions are correctly indexed.
-        # .iloc[0] for 1-candle slice, .iloc[1] for 2-candle slice, .iloc[2] for 3-candle slice if the slice is passed.
-
         if direction == 'buy':
-            # Hammer: 1-candle pattern at current idx
-            # Pass self.wick_threshold to lower_wick_min_ratio
-            if cp.detect_hammer(df.iloc[idx:idx+1], lower_wick_min_ratio=self.wick_threshold).iloc[0]:
-                return 'Hammer' # Pin-bar scoring handled in _score_signal_01 based on wick_rejection flag
-            # Bullish Engulfing: 2-candle pattern (prev, curr)
-            if cp.detect_bullish_engulfing(df.iloc[idx-1:idx+1]).iloc[1]:
-                return 'Bullish Engulfing'
-            # Bullish Harami: 2-candle pattern (prev, curr)
-            if cp.detect_bullish_harami(df.iloc[idx-1:idx+1]).iloc[1]:
-                return 'Bullish Harami'
-            # Morning Star: 3-candle pattern (c1, c2, c3=curr)
-            # Pass strategy-specific params: c2_body_max_percent_c1_body=0.5, and ensure no strict gap via gap_xxx_percent=0.0
-            if cp.detect_morning_star(
-                df.iloc[idx-2:idx+1], 
-                star_body_max_percent_c1_body=0.5,
-                c1_c2_gap_down_percent=0.0, # Effectively require_gap=False for this part
-                c2_c3_gap_up_percent=0.0     # Effectively require_gap=False for this part
-            ).iloc[2]:
-                return 'Morning Star'
+            if hammer_series.iloc[idx]:
+                return 'Hammer (TA-Lib)'
+            if bullish_engulfing_series.iloc[idx]:
+                return 'Bullish Engulfing (TA-Lib)'
+            if bullish_harami_series.iloc[idx]:
+                return 'Bullish Harami (TA-Lib)'
+            if morning_star_series.iloc[idx]:
+                return 'Morning Star (TA-Lib)'
         else: # direction == 'sell'
-            # Shooting Star: 1-candle pattern at current idx
-            # Pass self.wick_threshold to upper_wick_min_ratio
-            if cp.detect_shooting_star(df.iloc[idx:idx+1], upper_wick_min_ratio=self.wick_threshold).iloc[0]:
-                return 'Shooting Star' # Pin-bar scoring handled in _score_signal_01
-            # Bearish Engulfing: 2-candle pattern (prev, curr)
-            if cp.detect_bearish_engulfing(df.iloc[idx-1:idx+1]).iloc[1]:
-                return 'Bearish Engulfing'
-            # Bearish Harami: 2-candle pattern (prev, curr)
-            if cp.detect_bearish_harami(df.iloc[idx-1:idx+1]).iloc[1]:
-                return 'Bearish Harami'
-            # Evening Star: 3-candle pattern (c1, c2, c3=curr)
-            if cp.detect_evening_star(
-                df.iloc[idx-2:idx+1], 
-                star_body_max_percent_c1_body=0.5,
-                c1_c2_gap_up_percent=0.0,   # Effectively require_gap=False
-                c2_c3_gap_down_percent=0.0  # Effectively require_gap=False
-            ).iloc[2]:
-                return 'Evening Star'
+            if shooting_star_series.iloc[idx]:
+                return 'Shooting Star (TA-Lib)'
+            if bearish_engulfing_series.iloc[idx]:
+                return 'Bearish Engulfing (TA-Lib)'
+            if bearish_harami_series.iloc[idx]:
+                return 'Bearish Harami (TA-Lib)'
+            if evening_star_series.iloc[idx]:
+                return 'Evening Star (TA-Lib)'
         return None
 
     def _score_signal_01(self, pattern: str, wick: bool, volume_score: float, risk_reward: float, zone_touches: int, other_confluence: float = 0.0) -> Tuple[float, dict]:
@@ -726,6 +712,30 @@ class PriceActionSRStrategy(SignalGenerator):
             if 'tick_volume' not in df_primary.columns:
                 df_primary['tick_volume'] = df_primary.get('volume', 1)
 
+            # Prepare data for TA-Lib
+            open_prices = np.array(df_primary['open'].values, dtype=np.float64)
+            high_prices = np.array(df_primary['high'].values, dtype=np.float64)
+            low_prices = np.array(df_primary['low'].values, dtype=np.float64)
+            close_prices = np.array(df_primary['close'].values, dtype=np.float64)
+
+            # Calculate TA-Lib patterns
+            hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
+            shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
+            engulfing_talib = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
+            harami_talib = talib.CDLHARAMI(open_prices, high_prices, low_prices, close_prices)
+            morning_star_talib = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
+            evening_star_talib = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
+
+            # Convert TA-Lib output to boolean Series, aligned with df_primary.index
+            hammer_series = pd.Series(hammer_talib > 0, index=df_primary.index)
+            shooting_star_series = pd.Series(shooting_star_talib < 0, index=df_primary.index)
+            bullish_engulfing_series = pd.Series(engulfing_talib > 0, index=df_primary.index)
+            bearish_engulfing_series = pd.Series(engulfing_talib < 0, index=df_primary.index)
+            bullish_harami_series = pd.Series(harami_talib > 0, index=df_primary.index)
+            bearish_harami_series = pd.Series(harami_talib < 0, index=df_primary.index)
+            morning_star_series = pd.Series(morning_star_talib > 0, index=df_primary.index)
+            evening_star_series = pd.Series(evening_star_talib < 0, index=df_primary.index)
+
             zones = self.get_sr_zones(df_primary)
             symbol_signals = []
 
@@ -755,7 +765,13 @@ class PriceActionSRStrategy(SignalGenerator):
                         continue
                     candle = df_primary.iloc[process_idx]
                     in_zone = self._bar_touches_zone(candle, zone, direction)
-                    pattern = self._pattern_match(df_primary, process_idx, direction)
+                    pattern = self._pattern_match(
+                        process_idx, direction,
+                        hammer_series, shooting_star_series,
+                        bullish_engulfing_series, bearish_engulfing_series,
+                        bullish_harami_series, bearish_harami_series,
+                        morning_star_series, evening_star_series
+                    )
                     wick = self._wick_rejection(candle, direction)
                     vol_spike = self._volume_spike(df_primary, process_idx)
                     vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike, df_primary)
