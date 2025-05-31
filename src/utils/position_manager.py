@@ -253,7 +253,12 @@ class PositionManager:
                     required_bars = max(50, atr_period * 3)
                     df = self.mt5_handler.get_market_data(symbol, 'M1', required_bars)
                     if df is not None and len(df) >= atr_period:
-                        atr_series = talib.ATR(df['high'], df['low'], df['close'], timeperiod=atr_period)
+                        atr_series = talib.ATR(
+                            df['high'].to_numpy(dtype=float),
+                            df['low'].to_numpy(dtype=float),
+                            df['close'].to_numpy(dtype=float),
+                            timeperiod=atr_period
+                        )
                         if isinstance(atr_series, pd.Series):
                             atr = float(atr_series.iloc[-1])
                         elif isinstance(atr_series, (np.ndarray, list)):
