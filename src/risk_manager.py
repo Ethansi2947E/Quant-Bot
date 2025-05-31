@@ -6,11 +6,27 @@ import MetaTrader5 as mt5
 # Use TYPE_CHECKING for import that's only used for type hints
 if TYPE_CHECKING:
     from src.mt5_handler import MT5Handler
-from src.utils.indicators import calculate_atr
 from src.utils.market_utils import calculate_pip_value, convert_pips_to_price
 
 # Singleton instance for global reference
 _risk_manager_instance = None
+
+# Custom Exceptions for RiskManager
+class RiskManagerError(Exception):
+    """Base class for exceptions in RiskManager."""
+    pass
+
+class InsufficientBalanceError(RiskManagerError):
+    """Raised when account balance is insufficient for an operation."""
+    pass
+
+class InvalidRiskParameterError(RiskManagerError):
+    """Raised when a risk parameter (e.g., risk percent, SL) is invalid."""
+    pass
+
+class RiskCalculationError(RiskManagerError):
+    """Raised when there's an error during risk calculation (e.g., position sizing)."""
+    pass
 
 class RiskManager:
     """Risk manager handles position sizing, risk control, and trade management."""
@@ -134,9 +150,9 @@ class RiskManager:
         risk_per_trade: float,
         entry_price: float,
         stop_loss_price: float
-    ) -> bool:
+    ) -> None:
         """
-        Validate position sizing inputs to prevent errors.
+        Validate position sizing inputs. Raises an exception if inputs are invalid.
         
         Args:
             account_balance: Account balance
@@ -144,39 +160,51 @@ class RiskManager:
             entry_price: Entry price for the trade
             stop_loss_price: Stop loss price for the trade
             
-        Returns:
-            bool: True if inputs are valid, False otherwise
+        Raises:
+            InsufficientBalanceError: If account_balance is <= 0.0
+            InvalidRiskParameterError: For other invalid inputs.
         """
         # Check if account balance is valid
         if account_balance <= 0.0:
-            logger.error(f"Invalid account balance: {account_balance}")
-            # Recover with a default balance rather than failing
-            logger.warning("Using default account balance of 10000 for calculations")
-            # Use a sensible default (won't modify the input parameter, but allows processing to continue)
-            account_balance = 10000.0
-            return True
+            msg = f"Invalid account balance: {account_balance}. Cannot calculate position size."
+            logger.error(msg)
+            raise InsufficientBalanceError(msg)
             
         # Check if risk parameter is valid
-        if risk_per_trade <= 0.0 or risk_per_trade > 1.0:
-            logger.error(f"Invalid risk percentage: {risk_per_trade}")
-            return False
+        if not (0.0 < risk_per_trade <= 1.0): # risk_per_trade should be a decimal here
+            msg = f"Invalid risk percentage: {risk_per_trade*100:.2f}%. Must be between 0% and 100%."
+            logger.error(msg)
+            raise InvalidRiskParameterError(msg)
             
         # Check if prices are valid
         if entry_price <= 0.0:
-            logger.error(f"Invalid entry price: {entry_price}")
-            return False
+            msg = f"Invalid entry price: {entry_price}"
+            logger.error(msg)
+            raise InvalidRiskParameterError(msg)
             
         if stop_loss_price <= 0.0:
-            logger.error(f"Invalid stop loss price: {stop_loss_price}")
-            return False
+            msg = f"Invalid stop loss price: {stop_loss_price}"
+            logger.error(msg)
+            raise InvalidRiskParameterError(msg)
             
-        # Check if entry and stop loss are the same
-        if abs(entry_price - stop_loss_price) < 0.00001:
-            logger.error(f"Entry price and stop loss are too close: {entry_price} vs {stop_loss_price}")
-            return False
+        # Check if entry and stop loss are the same or SL is on wrong side (basic check)
+        if (entry_price > stop_loss_price and entry_price - stop_loss_price < 0.00001) or \
+           (stop_loss_price > entry_price and stop_loss_price - entry_price < 0.00001) or \
+           (entry_price == stop_loss_price):
+            msg = f"Entry price and stop loss are too close or invalid: Entry={entry_price}, SL={stop_loss_price}"
+            logger.error(msg)
+            raise InvalidRiskParameterError(msg)
+        
+        # Ensure SL is on the correct side for a potential trade
+        # This is a simplified check here; full directional check happens in validate_trade
+        # if (direction == "buy" and stop_loss_price >= entry_price) or \
+        #    (direction == "sell" and stop_loss_price <= entry_price):
+        #     msg = f"Stop loss price {stop_loss_price} is on the wrong side of entry price {entry_price} for a {direction} trade."
+        #     logger.error(msg)
+        #     raise InvalidRiskParameterError(msg)
             
-        return True
-    
+        logger.debug("Position sizing inputs validated successfully.")
+
     def validate_trade(self, trade: Dict, account_balance: float, 
                      open_trades: List[Dict], 
                      correlation_matrix: Optional[Dict] = None) -> Dict:
@@ -289,9 +317,13 @@ class RiskManager:
             logger.info(f"Using requested position_size (adjusted): {position_size}")
         else:
             try:
+                # risk_per_trade in self.max_risk_per_trade is already a decimal e.g. 0.01 for 1%
+                # calculate_position_size expects it as a raw percentage e.g. 1.0 for 1%
+                risk_percentage_for_calc = self.max_risk_per_trade * 100.0
+                
                 position_size = self.calculate_position_size(
                     account_balance=account_balance,
-                    risk_per_trade=self.max_risk_per_trade, # Already a decimal
+                    risk_per_trade=risk_percentage_for_calc, 
                     entry_price=entry,
                     stop_loss_price=stop,
                     symbol=symbol
@@ -302,9 +334,12 @@ class RiskManager:
                     position_size = self.mt5_handler.normalize_volume(symbol, position_size)
                 position_size = min(position_size, self.max_lot_size) # Apply max lot cap
                 logger.info(f"Calculated position size based on risk: {position_size}")
-            except Exception as e:
-                logger.error(f"Error calculating position size: {str(e)}. Using min lot for {symbol}.")
-                position_size = min_lot_from_symbol
+            except (InvalidRiskParameterError, RiskCalculationError) as e: # Catch specific errors
+                logger.error(f"Trade validation failed due to error in position sizing for {symbol}: {str(e)}")
+                return {'is_valid': False, 'reason': f"Position sizing error: {str(e)}", 'position_size': 0.0}
+            except Exception as e: # Catch any other unexpected error during calculation
+                logger.error(f"Unexpected error calculating position size for {symbol}: {str(e)}. Trade invalid.")
+                return {'is_valid': False, 'reason': f"Unexpected position sizing error: {str(e)}", 'position_size': 0.0}
         
         if position_size <= 0:
             logger.warning(f"Initial position size for {symbol} is {position_size}. Trade invalid.")
@@ -559,34 +594,30 @@ class RiskManager:
                 
             # If not using fixed lot size, calculate based on risk
             # Validate inputs first
-            if not self._validate_position_inputs(account_balance, risk_per_trade / 100.0, entry_price, stop_loss_price):
-                logger.warning("Invalid position sizing inputs, using default size")
-                # Use symbol-specific minimum as fallback
-                if self.mt5_handler:
-                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
-                    return min_lot_size
-                return 0.01  # Default minimum
+            self._validate_position_inputs(account_balance, risk_per_trade / 100.0, entry_price, stop_loss_price)
+            # If _validate_position_inputs passes, we can proceed. It raises exceptions on failure.
                 
             # Calculate risk amount
             risk_amount = account_balance * (risk_per_trade / 100.0) # Convert risk_per_trade percentage to decimal
             
             # Calculate stop distance
             stop_distance = abs(entry_price - stop_loss_price)
-            if stop_distance <= 0:
-                logger.error(f"Invalid stop distance: {stop_distance}")
-                # Use symbol-specific minimum as fallback
-                if self.mt5_handler:
-                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
-                    return min_lot_size
-                return 0.01  # Default minimum
+            if stop_distance <= 0: # This should ideally be caught by _validate_position_inputs
+                msg = f"Invalid stop distance: {stop_distance} for {symbol}. Entry: {entry_price}, SL: {stop_loss_price}"
+                logger.error(msg)
+                raise RiskCalculationError(msg) # Raise specific error
                 
             # Calculate risk per pip
             risk_per_pip = risk_amount / stop_distance
             
-            # Calculate position size based on risk
-            position_size = risk_per_pip * 0.0001  # Convert to lots
+            # Use symbol's point value instead of hardcoded 0.0001
+            point_value = 0.0001
+            if self.mt5_handler and hasattr(self.mt5_handler, 'get_point_value'):
+                try:
+                    point_value = self.mt5_handler.get_point_value(symbol)
+                except Exception as e:
+                    logger.warning(f"Could not fetch point value for {symbol}: {e}. Using default 0.0001.")
+            position_size = risk_per_pip * point_value  # FIXED: use symbol's point value
             
             # Ensure position size doesn't exceed max
             position_size = min(position_size, self.max_lot_size)
@@ -613,17 +644,16 @@ class RiskManager:
             logger.info(f"Calculated position size: {position_size} lots for {symbol} based on risk")
             return position_size
             
+        except (InvalidRiskParameterError, InsufficientBalanceError) as e: # Catch specific validation errors
+            logger.error(f"Validation error in calculate_position_size for {symbol}: {str(e)}")
+            raise # Re-raise to be caught by validate_trade or other callers
+        except RiskCalculationError as e: # Catch specific calculation errors
+            logger.error(f"Calculation error in calculate_position_size for {symbol}: {str(e)}")
+            raise # Re-raise
         except Exception as e:
-            logger.error(f"Error calculating position size: {str(e)}")
-            # Return symbol-specific minimum lot size on error
-            if self.mt5_handler:
-                try:
-                    min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                    logger.info(f"Using symbol-specific minimum lot size: {min_lot_size}")
-                    return min_lot_size
-                except:
-                    pass
-            return 0.01  # Default minimum
+            # Catch any other unexpected error and wrap it
+            logger.error(f"Unexpected error calculating position size for {symbol}: {str(e)}")
+            raise RiskCalculationError(f"Unexpected error during position sizing for {symbol}: {str(e)}")
         
     @classmethod
     def get_instance(cls):

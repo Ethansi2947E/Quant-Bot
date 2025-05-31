@@ -1,15 +1,3 @@
-# config.py -- Centralized configuration for Trading Bot
-"""
-This file contains all configuration for the trading bot system, including:
-- MT5 connection
-- Trading and risk management
-- Telegram integration
-- Logging
-- Trade exit logic
-
-Unused/legacy configs have been removed for clarity.
-"""
-
 from pathlib import Path
 from dotenv import load_dotenv
 import os
@@ -70,8 +58,8 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        #"confluence_price_action",
-        #"breakout_reversal",
+        "confluence_price_action",
+        "breakout_reversal",
         "breakout_trading",
         "trend_following",
         "price_action_sr"

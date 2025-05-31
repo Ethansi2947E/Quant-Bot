@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import asyncio
 import pandas as pd
 import numpy as np
-import re # For regex matching
+import talib
 
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
@@ -249,12 +249,11 @@ class PositionManager:
             atr = None
             if trailing_mode == 'atr':
                 try:
-                    from src.utils.indicators import calculate_atr
                     # Use minimum of 50 bars or 3x ATR period for calculation
                     required_bars = max(50, atr_period * 3)
                     df = self.mt5_handler.get_market_data(symbol, 'M1', required_bars)
                     if df is not None and len(df) >= atr_period:
-                        atr_series = calculate_atr(df, atr_period)
+                        atr_series = talib.ATR(df['high'], df['low'], df['close'], timeperiod=atr_period)
                         if isinstance(atr_series, pd.Series):
                             atr = float(atr_series.iloc[-1])
                         elif isinstance(atr_series, (np.ndarray, list)):

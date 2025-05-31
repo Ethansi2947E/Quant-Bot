@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from src.trading_bot import SignalGenerator
-from src.utils.indicators import calculate_atr, calculate_adx
 import talib # Added talib import
 from config.config import TRADING_CONFIG,get_risk_manager_config
 from src.risk_manager import RiskManager
@@ -220,11 +219,20 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             adx_series = None
             if isinstance(primary, pd.DataFrame) and len(primary) >= 14:
                 try:
-                    atr_series = calculate_atr(primary, period=14)
+                    if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
+                        high = np.asarray(primary['high'].values, dtype=np.float64)
+                        low = np.asarray(primary['low'].values, dtype=np.float64)
+                        close = np.asarray(primary['close'].values, dtype=np.float64)
+                        atr_series = talib.ATR(high, low, close, timeperiod=14)
+                    else:
+                        logger.warning(f"ATR calculation failed for {sym}: DataFrame missing required columns or is empty")
                 except Exception as e:
                     logger.warning(f"ATR calculation failed for {sym}: {e}")
                 try:
-                    adx_series, _, _ = calculate_adx(primary, period=14)
+                    high = np.asarray(primary['high'].values, dtype=np.float64)
+                    low = np.asarray(primary['low'].values, dtype=np.float64)
+                    close = np.asarray(primary['close'].values, dtype=np.float64)
+                    adx_series = talib.ADX(high, low, close, timeperiod=14)
                 except Exception as e:
                     logger.warning(f"ADX calculation failed for {sym}: {e}")
             
@@ -430,17 +438,19 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     # --- ATR-based SL tolerance ---
                     atr_val = None
                     if len(primary) >= 14:
-                        atr_series = calculate_atr(primary, period=14)
-                        if isinstance(atr_series, pd.Series):
-                            atr_val = float(atr_series.iloc[idx]) if idx < len(atr_series) else float(atr_series.iloc[-1])
+                        if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
+                            high = np.asarray(primary['high'].values, dtype=np.float64)
+                            low = np.asarray(primary['low'].values, dtype=np.float64)
+                            close = np.asarray(primary['close'].values, dtype=np.float64)
+                            atr_series = talib.ATR(high, low, close, timeperiod=14)
+                            if len(atr_series) > 0:
+                                atr_idx = idx -1 
+                                if atr_idx < len(atr_series) and pd.notna(atr_series[atr_idx]):
+                                    atr_val = float(atr_series[atr_idx])
+                                elif pd.notna(atr_series[-1]):
+                                     atr_val = float(atr_series[-1])
                         else:
-                            try:
-                                if isinstance(atr_series, (float, int, np.floating, np.integer)):
-                                    atr_val = float(atr_series)
-                                else:
-                                    atr_val = None
-                            except Exception:
-                                atr_val = None
+                            logger.warning(f"ATR calculation failed for {sym}: DataFrame missing required columns or is empty")
                     else:
                         atr_val = level['level'] * self.price_tolerance
                     # Ensure atr_val is a valid float, fallback to sane default if not
@@ -500,8 +510,41 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     
                     # Build concise analysis string
                     volume_desc = "strong volume" if volume_score > 0.7 else ("adequate volume" if volume_score > 0.3 else "weak volume")
-                    rationale = f"Detected a {pattern} at {level_type}, suggesting a potential {direction} reversal. Volume is {volume_desc}, supporting the signal."
-                    concise_analysis = f"📝 Analysis:\n{direction.capitalize()} reversal ({pattern}) at {level_type} {level['level']:.5f} with {volume_desc}.\nRationale: {rationale}"
+                    
+                    # Determine if it's a continuation or reversal pattern
+                    # Default to reversal unless pattern suggests breakout/acceptance
+                    trade_type_suggestion = 'reversal'
+                    if pattern and ('Breakout' in pattern or 'Acceptance' in pattern):
+                        trade_type_suggestion = 'continuation'
+
+                    reason_parts = [
+                        f"Detected {pattern if pattern else 'unspecified pattern'} at {level_type} level {level.get('level', 'N/A'):.5f} (strength: {level.get('strength', 'N/A')}).",
+                        f"This suggests a potential {direction} {trade_type_suggestion}.",
+                        f"Volume: {volume_desc}."
+                    ]
+
+                    if fib_ok and self.use_fibonacci:
+                        fib_level_val = fib_details.get('fib_level', 'N/A')
+                        calculated_fib_val_str = f"{fib_details.get('calculated_value', 'N/A'):.5f}" if isinstance(fib_details.get('calculated_value'), (int, float)) else 'N/A'
+                        reason_parts.append(f"Confluence with Fibonacci level {fib_level_val} ({calculated_fib_val_str}).")
+                    
+                    if ma_ok:
+                        ma_period_val = ma_details.get('ma_period', 'N/A')
+                        ma_value_str = f"{ma_details.get('ma_value', 'N/A'):.5f}" if isinstance(ma_details.get('ma_value'), (int, float)) else 'N/A'
+                        reason_parts.append(f"Confluence with MA ({ma_period_val}MA at {ma_value_str}).")
+
+                    if technical_metrics:
+                        rsi_val = technical_metrics.get('rsi')
+                        if rsi_val is not None:
+                            reason_parts.append(f"RSI: {rsi_val:.1f}.")
+                        
+                        stop_dist_atr = technical_metrics.get('stop_distance_atr')
+                        if stop_dist_atr is not None:
+                            reason_parts.append(f"Stop distance: {stop_dist_atr:.2f} ATR.")
+
+                    rationale = " ".join(reason_parts)
+                    concise_analysis = f"📝 Analysis ({sym} - {self.primary_timeframe}):\n{direction.capitalize()} signal based on {pattern if pattern else 'unspecified pattern'} at {level_type} {level.get('level', 'N/A'):.5f}.\nRationale: {rationale}"
+                    
                     reasoning = [concise_analysis]
                    
                     # Technical metrics for entry
@@ -518,17 +561,17 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                         technical_metrics['rsi'] = current_rsi
                         reasoning.append(f"RSI: {current_rsi:.1f}")
                     if len(primary) >= 14:
-                        atr_series = calculate_atr(primary, period=14)
-                        if isinstance(atr_series, pd.Series):
-                            current_atr = atr_series.iloc[-1]
-                        else:
-                            try:
-                                if isinstance(atr_series, (float, int, np.floating, np.integer)):
-                                    current_atr = float(atr_series)
-                                else:
-                                    current_atr = None
-                            except Exception:
+                        if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
+                            high = np.asarray(primary['high'].values, dtype=np.float64)
+                            low = np.asarray(primary['low'].values, dtype=np.float64)
+                            close = np.asarray(primary['close'].values, dtype=np.float64)
+                            atr_series = talib.ATR(high, low, close, timeperiod=14)
+                            if len(atr_series) > 0:
+                                current_atr = float(atr_series[-1])
+                            else:
                                 current_atr = None
+                        else:
+                            current_atr = None
                         if current_atr is not None and current_atr > 0:
                             stop_distance_atr = risk_pips / current_atr
                             technical_metrics['atr'] = current_atr
@@ -595,10 +638,10 @@ class ConfluencePriceActionStrategy(SignalGenerator):
                     signal['signal_bar_index'] = idx
                     signal['signal_timestamp'] = str(candle.name)
                     result = rm.validate_and_size_trade(signal)
-                    if not result['valid']:
+                    if not result['is_valid']:
                         logger.info(f"Signal for {sym} rejected by RiskManager: {result['reason']}")
                         continue
-                    adjusted_signal = result['adjusted_trade']
+                    adjusted_signal = result['final_trade_params']
                     for k in signal:
                         if k not in adjusted_signal:
                             adjusted_signal[k] = signal[k]
@@ -661,27 +704,31 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         if df is None or 'close' not in df.columns or len(df) < self.ma_period + 3:
             logger.debug("[Trend] Insufficient data for trend determination.")
             return 'neutral'
-        ma = df['close'].rolling(window=self.ma_period).mean().iloc[-1]
-        last = df['close'].iloc[-1]
+        close = np.asarray(df['close'].values, dtype=np.float64)
+        ma = talib.SMA(close, timeperiod=self.ma_period)[-1]
+        last = close[-1]
         ma_trend = 'bullish' if last > ma else 'bearish' if last < ma else 'neutral'
-        highs = df['high']
-        lows = df['low']
-        swing_highs = highs[(highs.shift(1) < highs) & (highs.shift(-1) < highs)]
-        swing_lows = lows[(lows.shift(1) > lows) & (lows.shift(-1) > lows)]
-        last_highs = swing_highs.tail(3)
-        last_lows = swing_lows.tail(3)
+        highs = np.asarray(df['high'].values, dtype=np.float64)
+        lows = np.asarray(df['low'].values, dtype=np.float64)
+        # Use TA-Lib for swing high/low detection
+        w = 2
+        swing_highs = [highs[i] for i in range(w, len(highs) - w)
+                       if highs[i] == talib.MAX(highs, timeperiod=2 * w + 1)[i] and not np.isnan(talib.MAX(highs, timeperiod=2 * w + 1)[i])]
+        swing_lows = [lows[i] for i in range(w, len(lows) - w)
+                      if lows[i] == talib.MIN(lows, timeperiod=2 * w + 1)[i] and not np.isnan(talib.MIN(lows, timeperiod=2 * w + 1)[i])]
+        last_highs = swing_highs[-3:]
+        last_lows = swing_lows[-3:]
         price_trend = 'neutral'
         if len(last_highs) == 3 and len(last_lows) == 3:
-            if last_highs.iloc[2] > last_highs.iloc[1] > last_highs.iloc[0] and last_lows.iloc[2] > last_lows.iloc[1] > last_lows.iloc[0]:
+            if last_highs[2] > last_highs[1] > last_highs[0] and last_lows[2] > last_lows[1] > last_lows[0]:
                 price_trend = 'bullish'
-            elif last_highs.iloc[2] < last_highs.iloc[1] < last_highs.iloc[0] and last_lows.iloc[2] < last_lows.iloc[1] < last_lows.iloc[0]:
+            elif last_highs[2] < last_highs[1] < last_highs[0] and last_lows[2] < last_lows[1] < last_lows[0]:
                 price_trend = 'bearish'
         logger.debug(f"[Trend] MA trend: {ma_trend}, Price structure trend: {price_trend}")
         if ma_trend == price_trend and ma_trend != 'neutral':
             logger.info(f"[Trend] Confirmed {ma_trend} trend (MA + price structure)")
             return ma_trend
         elif ma_trend != 'neutral' or price_trend != 'neutral':
-            # Loosened: allow if either is clear
             logger.info(f"[Trend] Loosened: Accepting {ma_trend if ma_trend != 'neutral' else price_trend} trend (one clear)")
             return ma_trend if ma_trend != 'neutral' else price_trend
         logger.info("[Trend] No clear trend (both neutral)")
@@ -694,24 +741,26 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         subset = df.copy()
         if len(df) > self.pivot_lookback:
             subset = df.iloc[-self.pivot_lookback:]
-        # Pivot detection (use subset for all indexing)
-        for i in range(2, len(subset) - 2):
-            if (subset['low'].iat[i] < subset['low'].iat[i-1] and subset['low'].iat[i] < subset['low'].iat[i-2]
-                    and subset['low'].iat[i] < subset['low'].iat[i+1] and subset['low'].iat[i] < subset['low'].iat[i+2]):
-                lows.append(subset['low'].iat[i])
-            if (subset['high'].iat[i] > subset['high'].iat[i-1] and subset['high'].iat[i] > subset['high'].iat[i-2]
-                    and subset['high'].iat[i] > subset['high'].iat[i+1] and subset['high'].iat[i] > subset['high'].iat[i+2]):
-                highs.append(subset['high'].iat[i])
+        highs_arr = np.asarray(subset['high'].values, dtype=np.float64)
+        lows_arr = np.asarray(subset['low'].values, dtype=np.float64)
+        w = 2
+        for i in range(w, len(subset) - w):
+            if lows_arr[i] == talib.MIN(lows_arr, timeperiod=2 * w + 1)[i] and not np.isnan(talib.MIN(lows_arr, timeperiod=2 * w + 1)[i]):
+                lows.append(lows_arr[i])
+            if highs_arr[i] == talib.MAX(highs_arr, timeperiod=2 * w + 1)[i] and not np.isnan(talib.MAX(highs_arr, timeperiod=2 * w + 1)[i]):
+                highs.append(highs_arr[i])
         logger.debug(f"[KeyLevels] Raw pivot lows: {len(lows)}, pivot highs: {len(highs)} (before clustering)")
         # Clustering tolerance is the maximum of 5 ticks and the minimum of (mean price * price_tolerance, 15 ticks),
         # but is further widened to at least ATR*0.1 if ATR is available. This ensures clusters are not too loose, but still adapt to volatility.
         clustering_tol = max(5 * TICK_SIZE, min(subset['close'].mean() * self.price_tolerance, 15 * TICK_SIZE))
         atr_val = None
         if len(subset) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(subset, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[-1])
+            high = np.asarray(subset['high'].values, dtype=np.float64)
+            low = np.asarray(subset['low'].values, dtype=np.float64)
+            close = np.asarray(subset['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
+                atr_val = float(atr_series[-1])
         if atr_val:
             clustering_tol = max(clustering_tol, atr_val * 0.1)
         support_levels = self._cluster_levels_with_strength(sorted(lows), clustering_tol, subset, is_support=True)
@@ -768,10 +817,12 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             return False
         atr_val = None
         if len(df) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(df, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[-1])
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
+                atr_val = float(atr_series[-1])
         pullback_tolerance = max(level * self.price_tolerance, (atr_val * 0.5) if atr_val else 0)
         # Loosened min_penetration
         min_penetration = 0.0  # Loosened: allow touch
@@ -950,14 +1001,17 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         atr_val = None
         if len(candles) >= 14: # Check original df passed to _is_inside_bar for ATR
             # from src.utils.indicators import calculate_atr # Already imported globally
-            atr_series = calculate_atr(candles, period=14) # Calculate ATR on the full 'candles' df
-            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+            high = np.asarray(candles['high'].values, dtype=np.float64)
+            low = np.asarray(candles['low'].values, dtype=np.float64)
+            close = np.asarray(candles['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14) # Calculate ATR on the full 'candles' df
+            if len(atr_series) > 0:
                 # Use ATR at the index of the mother candle if possible, else last valid ATR
                 atr_idx = idx -1 
-                if atr_idx < len(atr_series) and pd.notna(atr_series.iloc[atr_idx]):
-                    atr_val = float(atr_series.iloc[atr_idx])
-                elif pd.notna(atr_series.iloc[-1]):
-                     atr_val = float(atr_series.iloc[-1])
+                if atr_idx < len(atr_series) and pd.notna(atr_series[atr_idx]):
+                    atr_val = float(atr_series[atr_idx])
+                elif pd.notna(atr_series[-1]):
+                     atr_val = float(atr_series[-1])
 
 
         offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol) 
@@ -1182,10 +1236,12 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # Flexible zone: max(0.0015 * price, 0.5 * ATR)
         atr_val = None
         if len(df) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(df, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[-1])
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
+                atr_val = float(atr_series[-1])
         zone = max(swing_high * 0.0015, (atr_val * 0.5) if atr_val else 0)
         for f in self.fib_levels:
             fib_lv = swing_low + (swing_high - swing_low) * f
@@ -1196,25 +1252,26 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         return False
 
     def _check_ma(self, df: pd.DataFrame, level: float) -> bool:
-        """Return True if `level` is near the moving-average support/resistance (within a flexible zone).
-        Now allows MA +/- 0.2% of price or 0.5x ATR, whichever is greater.
-        """
+        """Return True if `level` is near the moving-average support/resistance (within a flexible zone)."""
         if df is None or len(df) < self.ma_period:
             return False
-        ma = df['close'].rolling(self.ma_period).mean().iloc[-1]
+        close = np.asarray(df['close'].values, dtype=np.float64)
+        ma = talib.SMA(close, timeperiod=self.ma_period)[-1]
         # Flexible zone: max(0.002 * price, 0.5 * ATR)
         atr_val = None
         if len(df) >= 14:
-            from src.utils.indicators import calculate_atr
-            atr_series = calculate_atr(df, period=14)
-            if isinstance(atr_series, pd.Series):
-                atr_val = float(atr_series.iloc[-1])
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
+                atr_val = float(atr_series[-1])
         zone = max(ma * 0.002, (atr_val * 0.5) if atr_val else 0)
         if abs(level - ma) > zone:
             return False
         # Check MA slope: positive for bullish, negative for bearish
-        ma_series = df['close'].rolling(self.ma_period).mean()
-        slope = ma_series.iloc[-1] - ma_series.iloc[-2] if len(ma_series) >= 2 else 0
+        ma_series = talib.SMA(close, timeperiod=self.ma_period)
+        slope = ma_series[-1] - ma_series[-2] if len(ma_series) >= 2 else 0
         if slope > 0:
             return True  # Bullish
         elif slope < 0:
@@ -1295,8 +1352,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         if df is None or len(df) < 20:
             logger.debug("[Regime] Not enough data for regime check.")
             return False
-        adx_series, _, _ = calculate_adx(df, period=14)
-        adx = adx_series.iloc[-1] if isinstance(adx_series, pd.Series) and not adx_series.empty else None
+        high = np.asarray(df['high'].values, dtype=np.float64)
+        low = np.asarray(df['low'].values, dtype=np.float64)
+        close = np.asarray(df['close'].values, dtype=np.float64)
+        adx_series = talib.ADX(high, low, close, timeperiod=14)
+        adx = adx_series[-1] if len(adx_series) > 0 else None
         context = self._analyze_market_context(df)
         adx_ok = True
         if hasattr(self, 'use_adx_filter') and self.use_adx_filter:
@@ -1329,9 +1389,12 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # Calculate ATR-based trailing stop
         atr_value = 0
         if len(primary) >= 14:
-            atr_series = calculate_atr(primary, period=14)
-            if isinstance(atr_series, pd.Series) and not atr_series.empty:
-                atr_value = float(atr_series.iloc[-1])
+            high = np.asarray(primary['high'].values, dtype=np.float64)
+            low = np.asarray(primary['low'].values, dtype=np.float64)
+            close = np.asarray(primary['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
+                atr_value = float(atr_series[-1])
             else:
                 try:
                     if isinstance(atr_series, (float, int, np.floating, np.integer)):
@@ -1553,13 +1616,16 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         atr_val = None
         if len(candles) >= 14:
             # from src.utils.indicators import calculate_atr # Global import
-            atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+            high = np.asarray(candles['high'].values, dtype=np.float64)
+            low = np.asarray(candles['low'].values, dtype=np.float64)
+            close = np.asarray(candles['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
                 atr_idx = idx -1 # Check ATR at previous candle's index for prev candle's proximity
-                if atr_idx < len(atr_series) and pd.notna(atr_series.iloc[atr_idx]):
-                    atr_val = float(atr_series.iloc[atr_idx])
-                elif pd.notna(atr_series.iloc[-1]):
-                    atr_val = float(atr_series.iloc[-1])
+                if atr_idx < len(atr_series) and pd.notna(atr_series[atr_idx]):
+                    atr_val = float(atr_series[atr_idx])
+                elif pd.notna(atr_series[-1]):
+                    atr_val = float(atr_series[-1])
         
         offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol)
 
@@ -1610,13 +1676,16 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         atr_val = None
         if len(candles) >= 14:
             # from src.utils.indicators import calculate_atr # Global import
-            atr_series = calculate_atr(candles, period=14)
-            if isinstance(atr_series, pd.Series) and not atr_series.empty:
+            high = np.asarray(candles['high'].values, dtype=np.float64)
+            low = np.asarray(candles['low'].values, dtype=np.float64)
+            close = np.asarray(candles['close'].values, dtype=np.float64)
+            atr_series = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr_series) > 0:
                 atr_idx_c1 = idx - 2 # Check ATR at C1's index for C1's proximity
-                if atr_idx_c1 < len(atr_series) and pd.notna(atr_series.iloc[atr_idx_c1]):
-                    atr_val = float(atr_series.iloc[atr_idx_c1])
-                elif pd.notna(atr_series.iloc[-1]):
-                    atr_val = float(atr_series.iloc[-1])
+                if atr_idx_c1 < len(atr_series) and pd.notna(atr_series[atr_idx_c1]):
+                    atr_val = float(atr_series[atr_idx_c1])
+                elif pd.notna(atr_series[-1]):
+                    atr_val = float(atr_series[-1])
 
         offset = max(tol, (atr_val * 0.2) if atr_val and pd.notna(atr_val) else tol)
         
@@ -1657,7 +1726,11 @@ class ConfluencePriceActionStrategy(SignalGenerator):
 
     @property
     def required_timeframes(self):
-        return [self.primary_timeframe]
+        # return [self.primary_timeframe] # BUG: This was only returning the primary
+        requirements = {self.primary_timeframe, self.higher_timeframe}
+        if hasattr(self, 'use_fibonacci') and self.use_fibonacci: # Check if use_fibonacci exists
+            requirements.add("D1") # D1 for long-term fibs if enabled
+        return list(requirements)
 
     @property
     def lookback_periods(self):

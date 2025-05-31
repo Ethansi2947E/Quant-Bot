@@ -4,12 +4,11 @@ import pytz
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Type, Optional, Set
+from typing import Dict, List, Any, Type, Optional
 
 from loguru import logger
 import copy
 
-# Import custom modules
 from src.mt5_handler import MT5Handler
 from src.risk_manager import RiskManager
 from src.telegram.telegram_bot import TelegramBot
@@ -88,33 +87,55 @@ class TradingBot:
             config: Configuration dictionary (optional)
             signal_generator_class: Signal generator class to use (optional)
         """
-        # Store configuration dictionary
-        self.config = config or {}
-        
-        # Load and merge with default config if not provided or empty
-        if not self.config:
-            logger.info("No config provided, loading default configuration from config.py")
-            from config.config import TRADING_CONFIG, TELEGRAM_CONFIG, MT5_CONFIG
-            self.config = {
-                "trading": TRADING_CONFIG,
-                "telegram": TELEGRAM_CONFIG,
-                "mt5": MT5_CONFIG,
-            }
-        self.trading_config = self.config.get("trading", {})
-        self.telegram_config = self.config.get("telegram", {})
-        self.mt5_config = self.config.get("mt5", {})
+        # Load default configurations
+        from config.config import TRADING_CONFIG as DEFAULT_TRADING_CONFIG
+        from config.config import TELEGRAM_CONFIG as DEFAULT_TELEGRAM_CONFIG
+        from config.config import MT5_CONFIG as DEFAULT_MT5_CONFIG
+
+        passed_config = config or {}
+
+        # Start with deep copies of defaults
+        self.trading_config = copy.deepcopy(DEFAULT_TRADING_CONFIG)
+        self.telegram_config = copy.deepcopy(DEFAULT_TELEGRAM_CONFIG)
+        self.mt5_config = copy.deepcopy(DEFAULT_MT5_CONFIG)
+
+        # If a config was passed, override defaults with its values
+        # .update() is used to merge dictionaries, prioritizing keys from passed_config
+        if passed_config:
+            logger.info("External config provided, merging with defaults.")
+            if "trading" in passed_config and isinstance(passed_config["trading"], dict):
+                self.trading_config.update(passed_config["trading"])
+            elif "trading" in passed_config:
+                 logger.warning("External config 'trading' key is not a dictionary or is None. Using default trading_config values, not merging.")
+            
+            if "telegram" in passed_config and isinstance(passed_config["telegram"], dict):
+                self.telegram_config.update(passed_config["telegram"])
+            elif "telegram" in passed_config:
+                 logger.warning("External config 'telegram' key is not a dictionary or is None. Using default telegram_config values, not merging.")
+
+            if "mt5" in passed_config and isinstance(passed_config["mt5"], dict):
+                self.mt5_config.update(passed_config["mt5"])
+            elif "mt5" in passed_config:
+                 logger.warning("External config 'mt5' key is not a dictionary or is None. Using default mt5_config values, not merging.")
+        else:
+            logger.info("No external config provided, using default configurations from config.py.")
+
+        # self.config stores the original passed_config for direct access to other potential top-level keys like 'mt5_handler'
+        self.config = passed_config
         
         # Initialize market status tracking
         self.market_status = {}  # Track market open/closed status for each symbol
         
         # Initialize MT5 handler first (needed by other components)
-        mt5_handler_candidate = self.config.get('mt5_handler')
+        mt5_handler_candidate = self.config.get('mt5_handler') # Check from original passed_config
         if isinstance(mt5_handler_candidate, MT5Handler):
             self.mt5_handler = mt5_handler_candidate
-            logger.info(f"Using provided MT5Handler instance")
+            logger.info(f"Using provided MT5Handler instance from passed_config.")
         else:
-            self.mt5_handler = MT5Handler()
-            logger.info(f"Created new MT5Handler instance")
+            # MT5Handler() likely uses its own config loading or defaults if config arg is not supported/used.
+            # If MT5Handler could take self.mt5_config, it would be MT5Handler(config=self.mt5_config)
+            self.mt5_handler = MT5Handler() 
+            logger.info(f"Created new MT5Handler instance (default initialization).")
         # Verify MT5 connection is working
         if self.mt5_handler is not None and not getattr(self.mt5_handler, 'connected', False):
             self.mt5_handler.initialize()
@@ -232,9 +253,7 @@ class TradingBot:
         self.queue_processor_task = None
 
         # Log config order at the very start
-        logger.info(f"[TRACE INIT] Initial config signal_generators order: {self.config.get('trading', {}).get('signal_generators', 'NOT FOUND')}")
-        # Log config order after extracting trading_config
-        logger.info(f"[TRACE INIT] trading_config signal_generators order: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
+        logger.info(f"[TRACE INIT] Initial trading_config signal_generators order: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
 
     # --- NEW: Tick listener/dispatcher ---
     async def tick_event_loop(self):
@@ -391,11 +410,24 @@ class TradingBot:
             self._load_available_signal_generators()
 
             # Build a normalized lookup for available strategies
-            normalized_available = {self._normalize_strategy_key(k): v for k, v in self.available_signal_generators.items()}
+            normalized_available = {}
+            normalized_key_to_original_key = {} # To track which original key maps to a normalized key
+
+            for k, v in self.available_signal_generators.items():
+                norm_key = self._normalize_strategy_key(k)
+                if norm_key not in normalized_available:
+                    normalized_available[norm_key] = v
+                    normalized_key_to_original_key[norm_key] = k
+                else:
+                    logger.warning(
+                        f"Normalized key collision: '{norm_key}' from original key '{k}' conflicts with existing original key "
+                        f"'{normalized_key_to_original_key[norm_key]}'. '{k}' will be ignored. "
+                        f"Please ensure unique normalized strategy names by renaming strategy files/classes."
+                    )
             
             # Debug logging for normalized keys
-            logger.info(f"Available signal generators: {list(self.available_signal_generators.keys())}")
-            logger.info(f"Normalized available keys: {list(normalized_available.keys())}")
+            logger.info(f"Available signal generators (original keys): {list(self.available_signal_generators.keys())}")
+            logger.info(f"Normalized available keys (after collision check): {list(normalized_available.keys())}")
             
             # Initialize active generators from config
             for generator_name in active_generator_names:
@@ -1234,8 +1266,6 @@ class TradingBot:
             await self._initialize_signal_generators()
             logger.info("Signal generators initialized with shared MT5Handler")
             
-            # The rest of the initialization
-            # ... existing code ...
         
         except Exception as e:
             logger.error(f"Error during TradingBot initialization: {str(e)}")

@@ -115,39 +115,43 @@ class PriceActionSRStrategy(SignalGenerator):
 
     def _find_pivot_highs(self, df: pd.DataFrame) -> List[float]:
         """
-        Find pivot highs over the configured window.
+        Find pivot highs over the configured window using TA-Lib MAX.
         Args:
             df (pd.DataFrame): Price data with 'high' column
         Returns:
             List[float]: List of pivot high prices
         """
-        pivots = []
         w = self.pivot_window
-        for i in range(w, len(df) - w):
-            window = df['high'].iloc[i-w:i+w+1]
-            if df['high'].iloc[i] == window.max():
-                pivots.append(df['high'].iloc[i])
+        if len(df) < 2 * w + 1:
+            return []
+        highs = np.array(df['high'].values, dtype=np.float64)
+        # Use TA-Lib MAX to get rolling max
+        max_highs = talib.MAX(highs, timeperiod=2 * w + 1)
+        pivots = [highs[i] for i in range(w, len(highs) - w)
+                  if highs[i] == max_highs[i] and not np.isnan(max_highs[i])]
         return pivots
 
     def _find_pivot_lows(self, df: pd.DataFrame) -> List[float]:
         """
-        Find pivot lows over the configured window.
+        Find pivot lows over the configured window using TA-Lib MIN.
         Args:
             df (pd.DataFrame): Price data with 'low' column
         Returns:
             List[float]: List of pivot low prices
         """
-        pivots = []
         w = self.pivot_window
-        for i in range(w, len(df) - w):
-            window = df['low'].iloc[i-w:i+w+1]
-            if df['low'].iloc[i] == window.min():
-                pivots.append(df['low'].iloc[i])
+        if len(df) < 2 * w + 1:
+            return []
+        lows = np.array(df['low'].values, dtype=np.float64)
+        # Use TA-Lib MIN to get rolling min
+        min_lows = talib.MIN(lows, timeperiod=2 * w + 1)
+        pivots = [lows[i] for i in range(w, len(lows) - w)
+                  if lows[i] == min_lows[i] and not np.isnan(min_lows[i])]
         return pivots
 
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """
-        Calculate the Average True Range (ATR) over the given period.
+        Calculate the Average True Range (ATR) over the given period using TA-Lib.
         Args:
             df (pd.DataFrame): Price data with 'high', 'low', 'close'
             period (int): ATR period (default 14)
@@ -156,17 +160,11 @@ class PriceActionSRStrategy(SignalGenerator):
         """
         if len(df) < period + 1:
             return 0.0
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        prev_close = close.shift(1)
-        tr = pd.concat([
-            (high - low),
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean().iloc[-1]
-        return float(atr) if not np.isnan(atr) else 0.0
+        high = np.asarray(df['high'].values, dtype=np.float64)
+        low = np.asarray(df['low'].values, dtype=np.float64)
+        close = np.asarray(df['close'].values, dtype=np.float64)
+        atr = talib.ATR(high, low, close, timeperiod=period)
+        return float(atr[-1]) if not np.isnan(atr[-1]) else 0.0
 
     def _cluster_levels(self, levels: List[float], tol: float = 0.003, df: Optional[pd.DataFrame] = None) -> List[float]:
         """
@@ -304,8 +302,8 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold_85}, 70th percentile={threshold_70}, 1.5x mean={1.5*avg_vol if not np.isnan(avg_vol) else 'N/A'} - NO SPIKE")
             return False
 
-    def is_valid_volume_spike(self, candle, volume_spike: bool, df: pd.DataFrame) -> bool:
-        # If volume spike already failed, try more lenient validation
+    def is_valid_volume_spike(self, candle, volume_spike: bool, df: pd.DataFrame, direction: str) -> bool:
+        # If volume spike already failed by primary _volume_spike checks, try more lenient validation
         if not volume_spike:
             # Enhanced fallback: check if volume is at least above average with good pattern
             if df is not None and 'tick_volume' in df.columns:
@@ -327,23 +325,33 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug("[VolumeWick] Volume spike failed and no pattern override available")
             return False
             
-        # Original logic for when volume spike is detected
+        # Original logic for when volume spike IS detected (volume_spike == True)
+        # Now made directionally sensitive
         body = abs(candle['close'] - candle['open'])
         total_range = candle['high'] - candle['low']
         if total_range == 0:
             self.logger.debug("[VolumeWick] Total range is zero, cannot calculate wick ratios")
             return False
+            
         upper_wick = candle['high'] - max(candle['open'], candle['close'])
         lower_wick = min(candle['open'], candle['close']) - candle['low']
-        upper_wick_ratio = upper_wick / total_range
-        lower_wick_ratio = lower_wick / total_range
-        # Relaxed thresholds (kept as is since they're already reasonable)
-        is_bullish_volume = upper_wick_ratio < 0.6
-        is_bearish_volume = lower_wick_ratio < 0.6
-        combined_valid = body > 0 and ((upper_wick + lower_wick) / body < 2.0)
-        self.logger.debug(f"[VolumeWick] Stats: upper_ratio={upper_wick_ratio:.2f}, lower_ratio={lower_wick_ratio:.2f}, body={body}")
-        self.logger.debug(f"[VolumeWick] Analysis: bullish={is_bullish_volume}, bearish={is_bearish_volume}, combined_valid={combined_valid}")
-        return is_bullish_volume or is_bearish_volume or combined_valid
+        upper_wick_ratio = upper_wick / total_range if total_range > 0 else 0
+        lower_wick_ratio = lower_wick / total_range if total_range > 0 else 0
+
+        # General check for candle proportion: sum of wicks not too large compared to body
+        combined_valid_proportion = body > 0 and ((upper_wick + lower_wick) / body < 2.0)
+        self.logger.debug(f"[VolumeWick] Stats: upper_ratio={upper_wick_ratio:.2f}, lower_ratio={lower_wick_ratio:.2f}, body={body:.5f}, combined_proportion_ok={combined_valid_proportion}")
+
+        if direction == 'buy':
+            # For a buy signal on volume spike, a small upper wick is preferred (less selling pressure from above).
+            directional_wick_ok = upper_wick_ratio < 0.5 
+            self.logger.debug(f"[VolumeWick] Buy signal check: upper_wick_ratio={upper_wick_ratio:.2f} (must be < 0.5 for directional_wick_ok). Result: {directional_wick_ok or combined_valid_proportion}")
+            return directional_wick_ok or combined_valid_proportion
+        else: # direction == 'sell'
+            # For a sell signal on volume spike, a small lower wick is preferred (less buying pressure from below).
+            directional_wick_ok = lower_wick_ratio < 0.5
+            self.logger.debug(f"[VolumeWick] Sell signal check: lower_wick_ratio={lower_wick_ratio:.2f} (must be < 0.5 for directional_wick_ok). Result: {directional_wick_ok or combined_valid_proportion}")
+            return directional_wick_ok or combined_valid_proportion
 
     def calculate_stop_loss(self, zone: float, direction: str, candle_extremity: float, buffer: float = 0.001) -> float:
         if direction == "buy":
@@ -402,8 +410,8 @@ class PriceActionSRStrategy(SignalGenerator):
         Compute a normalized 0-1 score for a trading signal based on pattern, wick rejection, volume, risk-reward, zone strength, and optional other confluence.
 
         Args:
-            pattern (str): Candlestick pattern name
-            wick (bool): Whether wick rejection is present
+            pattern (str): Candlestick pattern name (e.g., 'Hammer (TA-Lib)')
+            wick (bool): Whether wick rejection is present (from _wick_rejection method)
             volume_score (float): Volume spike score (0-1, e.g. 1 if strong spike, 0 if not)
             risk_reward (float): Risk-reward ratio (e.g. 2.5 for 2.5:1)
             zone_touches (int): Number of times price has touched/respected the zone
@@ -411,24 +419,25 @@ class PriceActionSRStrategy(SignalGenerator):
         Returns:
             (float, dict): Tuple of (score, breakdown dict)
         """
-        # Pattern reliability mapping & Pin-bar adjustment
+        # Pattern reliability mapping
         pattern_score = 0.0
-        if pattern == 'Hammer':
-            pattern_score = 0.5 if wick else 0.7 # If wick rejection confirmed (Pin-bar), score 0.5, else 0.7
-        elif pattern == 'Shooting Star':
-            pattern_score = 0.5 if wick else 0.7 # If wick rejection confirmed (Pin-bar), score 0.5, else 0.7
-        elif pattern == 'Bullish Engulfing':
+        if pattern == 'Hammer (TA-Lib)':
+            pattern_score = 0.8 # Consistently high score for Hammer as a rejection pattern
+        elif pattern == 'Shooting Star (TA-Lib)':
+            pattern_score = 0.8 # Consistently high score for Shooting Star
+        elif pattern == 'Bullish Engulfing (TA-Lib)':
             pattern_score = 1.0
-        elif pattern == 'Bearish Engulfing':
+        elif pattern == 'Bearish Engulfing (TA-Lib)':
             pattern_score = 1.0
-        elif pattern == 'Bullish Harami': # Added Harami
-            pattern_score = 0.6 # Assign a score, e.g., 0.6
-        elif pattern == 'Bearish Harami': # Added Harami
-            pattern_score = 0.6 # Assign a score, e.g., 0.6
-        elif pattern == 'Morning Star': # Added Morning Star
-             pattern_score = 0.8 # Assign a score, e.g., 0.8
-        elif pattern == 'Evening Star': # Added Evening Star
-             pattern_score = 0.8 # Assign a score, e.g., 0.8
+        elif pattern == 'Bullish Harami (TA-Lib)':
+            pattern_score = 0.6
+        elif pattern == 'Bearish Harami (TA-Lib)':
+            pattern_score = 0.6
+        elif pattern == 'Morning Star (TA-Lib)':
+             pattern_score = 0.9 # Morning/Evening stars are strong 3-candle patterns
+        elif pattern == 'Evening Star (TA-Lib)':
+             pattern_score = 0.9 # Morning/Evening stars are strong 3-candle patterns
+        # The 'wick' boolean parameter (from _wick_rejection) directly contributes to 'wick_score'
        
         wick_score = 1.0 if wick else 0.0
         # Volume: allow float for partial spike (e.g. 0.5 if just above threshold)
@@ -632,30 +641,54 @@ class PriceActionSRStrategy(SignalGenerator):
         return periods
 
     def is_uptrend(self, df: pd.DataFrame) -> bool:
+        # Use TA-Lib ADX for trend detection if available, fallback to original logic
         if df is None or len(df) < self.trend_lookback:
             return False
+        try:
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            adx = talib.ADX(high, low, close, timeperiod=14)
+            plus_di = talib.PLUS_DI(high, low, close, timeperiod=14)
+            minus_di = talib.MINUS_DI(high, low, close, timeperiod=14)
+            # Uptrend if ADX > 20 and +DI > -DI
+            if adx[-1] > 20 and plus_di[-1] > minus_di[-1]:
+                self.logger.debug(f"[TrendCheck][TA-Lib] Uptrend detected: ADX={adx[-1]:.2f}, +DI={plus_di[-1]:.2f}, -DI={minus_di[-1]:.2f}")
+                return True
+        except Exception as e:
+            self.logger.debug(f"[TrendCheck][TA-Lib] Exception: {e}")
+        # Fallback to original logic
         highs = df['high'].iloc[-self.trend_lookback:]
         lows = df['low'].iloc[-self.trend_lookback:]
-        closes = df['close'].iloc[-self.trend_lookback:]
         higher_high = highs.iloc[-1] > highs.iloc[0]
         higher_low = lows.iloc[-1] > lows.iloc[0]
-        recent_strong_move = closes.iloc[-1] > closes.iloc[-3] if len(closes) > 3 else False
-        self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}, recent_strong_move={recent_strong_move}")
-        self.logger.debug(f"[TrendCheck] Last {self.trend_lookback} bars: highs={highs.tolist()[:5]}...{highs.tolist()[-5:]}, lows={lows.tolist()[:5]}...{lows.tolist()[-5:]}")
-        return higher_high or higher_low or recent_strong_move
+        self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}")
+        return higher_high and higher_low
 
     def is_downtrend(self, df: pd.DataFrame) -> bool:
+        # Use TA-Lib ADX for trend detection if available, fallback to original logic
         if df is None or len(df) < self.trend_lookback:
             return False
+        try:
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            adx = talib.ADX(high, low, close, timeperiod=14)
+            plus_di = talib.PLUS_DI(high, low, close, timeperiod=14)
+            minus_di = talib.MINUS_DI(high, low, close, timeperiod=14)
+            # Downtrend if ADX > 20 and -DI > +DI
+            if adx[-1] > 20 and minus_di[-1] > plus_di[-1]:
+                self.logger.debug(f"[TrendCheck][TA-Lib] Downtrend detected: ADX={adx[-1]:.2f}, +DI={plus_di[-1]:.2f}, -DI={minus_di[-1]:.2f}")
+                return True
+        except Exception as e:
+            self.logger.debug(f"[TrendCheck][TA-Lib] Exception: {e}")
+        # Fallback to original logic
         highs = df['high'].iloc[-self.trend_lookback:]
         lows = df['low'].iloc[-self.trend_lookback:]
-        closes = df['close'].iloc[-self.trend_lookback:]
         lower_high = highs.iloc[-1] < highs.iloc[0]
         lower_low = lows.iloc[-1] < lows.iloc[0]
-        recent_strong_move = closes.iloc[-1] < closes.iloc[-3] if len(closes) > 3 else False
-        self.logger.debug(f"[TrendCheck] Downtrend analysis: lower_high={lower_high}, lower_low={lower_low}, recent_strong_move={recent_strong_move}")
-        self.logger.debug(f"[TrendCheck] Last {self.trend_lookback} bars: highs={highs.tolist()[:5]}...{highs.tolist()[-5:]}, lows={lows.tolist()[:5]}...{lows.tolist()[-5:]}")
-        return lower_high or lower_low or recent_strong_move
+        self.logger.debug(f"[TrendCheck] Downtrend analysis: lower_high={lower_high}, lower_low={lower_low}")
+        return lower_high and lower_low
 
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         """
@@ -774,7 +807,8 @@ class PriceActionSRStrategy(SignalGenerator):
                     )
                     wick = self._wick_rejection(candle, direction)
                     vol_spike = self._volume_spike(df_primary, process_idx)
-                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike, df_primary)
+                    # Pass direction to is_valid_volume_spike
+                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike, df_primary, direction)
                     # Granular logging for all filters
                     logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern} wick={wick} vol_spike={vol_spike} vol_wick_ok={vol_wick_ok}")
                     if not in_zone:

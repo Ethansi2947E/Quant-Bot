@@ -22,62 +22,9 @@ from typing import Dict, List, Any, Optional
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib
+from talib._ta_lib import MA_Type
 # import custom_patterns as cp # This line was incorrectly added and will be removed
 
-
-# Define custom implementations of the indicators we need
-def calculate_bollinger_bands(df, length=20, std=2.0):
-    """Calculate Bollinger Bands without pandas_ta"""
-    # Initialize an empty DataFrame with the same index
-    df_bb = pd.DataFrame(index=df.index)
-    
-    if len(df) < length:
-        # Return empty DataFrame with required columns
-        df_bb[f"BBM_{length}_{std}"] = np.nan
-        df_bb[f"BBU_{length}_{std}"] = np.nan
-        df_bb[f"BBL_{length}_{std}"] = np.nan
-        df_bb[f"BBB_{length}_{std}"] = np.nan
-        return df_bb
-    
-    # Calculate middle band (SMA)
-    df_bb[f"BBM_{length}_{std}"] = df["close"].rolling(length).mean()
-    
-    # Calculate standard deviation
-    stdev = df["close"].rolling(length).std()
-    
-    # Calculate upper and lower bands
-    df_bb[f"BBU_{length}_{std}"] = df_bb[f"BBM_{length}_{std}"] + (std * stdev)
-    df_bb[f"BBL_{length}_{std}"] = df_bb[f"BBM_{length}_{std}"] - (std * stdev)
-    
-    # Calculate bandwidth
-    df_bb[f"BBB_{length}_{std}"] = (
-        (df_bb[f"BBU_{length}_{std}"] - df_bb[f"BBL_{length}_{std}"]) / 
-        df_bb[f"BBM_{length}_{std}"] * 100
-    )
-    
-    return df_bb
-
-def calculate_atr(df, length=14):
-    """Calculate ATR without pandas_ta"""
-    if len(df) < length + 1:
-        # Return a Series of NaNs with the same index as df
-        return pd.Series(np.nan, index=df.index)
-    
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    prev_close = close.shift(1)
-    
-    # True Range calculation
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # ATR calculation
-    atr = tr.rolling(window=length).mean()
-        
-    return atr
 
 def is_consolidating(df: pd.DataFrame, window=10, tolerance=0.02) -> bool:
     """
@@ -284,21 +231,19 @@ class BreakoutTradingStrategy(SignalGenerator):
         if not all(col in df.columns for col in ["high", "low", "close"]):
             self.logger.error("[Indicators] DataFrame missing HLC columns for indicator calculation.")
             return df
-            
-        # Calculate ATR using our custom function instead of df.ta
-        df[f"ATR_{self.atr_period_consolidation}"] = calculate_atr(df, self.atr_period_consolidation)
+        # Calculate ATR using TA-Lib
+        high = np.asarray(df['high'].values, dtype=np.float64)
+        low = np.asarray(df['low'].values, dtype=np.float64)
+        close = np.asarray(df['close'].values, dtype=np.float64)
+        atr = talib.ATR(high, low, close, timeperiod=self.atr_period_consolidation)
+        df[f"ATR_{self.atr_period_consolidation}"] = atr
+        # Calculate Bollinger Bands using TA-Lib
+        upper, middle, lower = talib.BBANDS(close, timeperiod=self.bb_period, nbdevup=self.bb_std_dev, nbdevdn=self.bb_std_dev, matype=MA_Type.SMA)
+        df[f"BB_LOWER_{self.bb_period}_{self.bb_std_dev}"] = lower
+        df[f"BB_MID_{self.bb_period}_{self.bb_std_dev}"] = middle
+        df[f"BB_UPPER_{self.bb_period}_{self.bb_std_dev}"] = upper
+        df[f"BB_WIDTH_{self.bb_period}_{self.bb_std_dev}"] = (upper - lower) / middle
         
-        # Calculate Bollinger Bands using our custom function
-        bbands = calculate_bollinger_bands(df, self.bb_period, self.bb_std_dev)
-        if bbands is not None and not bbands.empty:
-            df[f"BB_LOWER_{self.bb_period}_{self.bb_std_dev}"] = bbands[f"BBL_{self.bb_period}_{self.bb_std_dev}"]
-            df[f"BB_MID_{self.bb_period}_{self.bb_std_dev}"] = bbands[f"BBM_{self.bb_period}_{self.bb_std_dev}"]
-            df[f"BB_UPPER_{self.bb_period}_{self.bb_std_dev}"] = bbands[f"BBU_{self.bb_period}_{self.bb_std_dev}"]
-            df[f"BB_WIDTH_{self.bb_period}_{self.bb_std_dev}"] = bbands[f"BBB_{self.bb_period}_{self.bb_std_dev}"] / 100
-        else:
-            for col_suffix in ["LOWER", "MID", "UPPER", "WIDTH"]:
-                df[f"BB_{col_suffix}_{self.bb_period}_{self.bb_std_dev}"] = np.nan
-                
         # Calculate volume moving average, backfill to avoid NaN
         if "tick_volume" in df.columns:
             df[f"volume_ma_{self.volume_avg_period}"] = df["tick_volume"].rolling(window=self.volume_avg_period).mean().bfill()
@@ -400,29 +345,20 @@ class BreakoutTradingStrategy(SignalGenerator):
                 pivots.append(df['low'].iloc[i])
         return pivots
 
-    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate the Average True Range (ATR) over the given period."""
-        if len(df) < period + 1:
-            return 0.0
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        prev_close = close.shift(1)
-        tr = pd.concat([
-            (high - low),
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean().iloc[-1]
-        return float(atr) if not np.isnan(atr) else 0.0
-
     def _cluster_levels(self, levels: list, tol: float = 0.003, df: Optional[pd.DataFrame] = None) -> list:
         """Cluster price levels into horizontal zones within ±tol (as a fraction of price)."""
         if not levels:
             return []
         if df is not None and len(df) > 15:
             latest_price = df['close'].iloc[-1]
-            atr = self._calculate_atr(df)
+            high = np.asarray(df['high'].values, dtype=np.float64)
+            low = np.asarray(df['low'].values, dtype=np.float64)
+            close = np.asarray(df['close'].values, dtype=np.float64)
+            atr = talib.ATR(high, low, close, timeperiod=14)
+            if len(atr) > 0:
+                atr = float(atr[-1])
+            else:
+                atr = 0.0
             tol = max(0.003, 0.5 * atr / latest_price) if latest_price > 0 else 0.003
             self.logger.debug(f"Dynamic zone tolerance set to {tol:.5f} (ATR={atr:.5f}, price={latest_price:.5f})")
         levels = sorted(levels)
@@ -710,10 +646,32 @@ class BreakoutTradingStrategy(SignalGenerator):
             logger.debug(f"[{self.name}/{sym}] Volume Confirmation: CandleVol={candle['tick_volume'] if 'tick_volume' in candle else 'N/A'}, VolMA={volume_ma_value:.2f}, RequiredVol={volume_ma_value * current_vol_mult:.2f}, HighBuyingVol={high_buying_volume}, HighSellingVol={high_selling_volume}")
 
 
-            # Dynamic ATR multiplier for breakout confirmation
-            threshold_multiplier = self._get_dynamic_atr_multiplier(df.iloc[:confirmation_bar_idx+1]) # Pass df up to confirmation candle
-            logger.info(f"[{self.name}/{sym}] Dynamic ATR Multiplier for Breakout: {threshold_multiplier:.3f}")
-
+            # Inline dynamic ATR multiplier logic (formerly _get_dynamic_atr_multiplier)
+            df_subset = df.iloc[:confirmation_bar_idx+1]
+            if df_subset is None or df_subset.empty or len(df_subset) < self.atr_period_consolidation + 1:
+                logger.warning(f"[{self.name}] DataFrame subset too small or None. Using default multiplier: {self.breakout_confirmation_atr_multiplier}")
+                threshold_multiplier = self.breakout_confirmation_atr_multiplier
+            else:
+                high = np.asarray(df_subset['high'].values, dtype=np.float64)
+                low = np.asarray(df_subset['low'].values, dtype=np.float64)
+                close = np.asarray(df_subset['close'].values, dtype=np.float64)
+                atr = talib.ATR(high, low, close, timeperiod=self.atr_period_consolidation)
+                last_atr = atr[-1] if len(atr) > 0 else 0
+                last_close = close[-1] if len(close) > 0 else 0
+                logger.debug(f"[{self.name}] Subset Last ATR={last_atr}, Last Close={last_close}")
+                if last_atr > 0 and last_close > 0:
+                    volatility_ratio = last_atr / last_close
+                    logger.debug(f"[{self.name}] Subset VolatilityRatio={volatility_ratio:.4f}")
+                    if volatility_ratio > 0.03:
+                        threshold_multiplier = 0.20
+                    elif volatility_ratio > 0.02:
+                        threshold_multiplier = 0.15
+                    elif volatility_ratio > 0.01:
+                        threshold_multiplier = 0.12
+                    else:
+                        threshold_multiplier = 0.08
+                else:
+                    threshold_multiplier = self.breakout_confirmation_atr_multiplier
 
             breakout_high_str = f"{breakout_high:.5f}" if breakout_high is not None else "N/A"
             breakout_low_str = f"{breakout_low:.5f}" if breakout_low is not None else "N/A"
@@ -1078,39 +1036,3 @@ class BreakoutTradingStrategy(SignalGenerator):
                  self.logger.debug(f"[{symbol}] Retest condition not met or no clear rejection. Touch_High: {touch_candle['high']:.5f}, Level: {breakout_level:.5f}")
             
         return is_rejection
-
-    def _get_dynamic_atr_multiplier(self, df_subset: pd.DataFrame) -> float:
-        """Return a dynamic ATR multiplier for breakout confirmation based on volatility of the provided DataFrame subset."""
-        # Ensure df_subset is not empty and has the required columns and length
-        if df_subset is None or df_subset.empty or len(df_subset) < self.atr_period_consolidation +1 : # Need enough data for ATR
-            logger.warning(f"[{self.name}/_get_dynamic_atr_multiplier] DataFrame subset too small or None. Using default multiplier: {self.breakout_confirmation_atr_multiplier}")
-            return self.breakout_confirmation_atr_multiplier
-
-        atr_col = f"ATR_{self.atr_period_consolidation}"
-        # Recalculate ATR on the subset if not present or to ensure it's up-to-date for this specific segment
-        if atr_col not in df_subset.columns or df_subset[atr_col].isnull().all():
-            df_subset = df_subset.copy() # Avoid SettingWithCopyWarning
-            df_subset[atr_col] = calculate_atr(df_subset, self.atr_period_consolidation)
-            logger.debug(f"[{self.name}/_get_dynamic_atr_multiplier] Recalculated ATR for subset. Last ATR: {df_subset[atr_col].iloc[-1] if not df_subset[atr_col].empty else 'N/A'}")
-
-
-        last_atr = df_subset[atr_col].iloc[-1] if not df_subset[atr_col].empty and not pd.isna(df_subset[atr_col].iloc[-1]) else 0
-        last_close = df_subset['close'].iloc[-1] if not df_subset['close'].empty and not pd.isna(df_subset['close'].iloc[-1]) else 0
-        
-        logger.debug(f"[{self.name}/_get_dynamic_atr_multiplier] Subset Last ATR={last_atr}, Last Close={last_close}")
-
-        if last_atr > 0 and last_close > 0:
-            volatility_ratio = last_atr / last_close
-            logger.debug(f"[{self.name}/_get_dynamic_atr_multiplier] Subset VolatilityRatio={volatility_ratio:.4f}")
-            
-            # More granular adjustments based on volatility
-            if volatility_ratio > 0.03:  # Extremely volatile
-                return 0.20  # Wider threshold for confirmation
-            elif volatility_ratio > 0.02:  # Highly volatile
-                return 0.15
-            elif volatility_ratio > 0.01:  # Moderately volatile
-                return 0.12
-            else:  # Low volatility
-                return 0.08  # Tighter threshold for confirmation
-                
-        return self.breakout_confirmation_atr_multiplier 

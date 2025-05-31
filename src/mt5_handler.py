@@ -2053,3 +2053,40 @@ class MT5Handler:
         except Exception as e:
             logger.error(f"Error checking symbol availability for {symbol}: {str(e)}")
             return False
+
+    def get_point_value(self, symbol: str) -> float:
+        """
+        Get the point value for a given symbol.
+
+        Args:
+            symbol: The trading symbol.
+
+        Returns:
+            The point value (e.g., 0.00001 for EURUSD) or a default (0.0001) if not found.
+        """
+        if not self.connected:
+            logger.error(f"MT5 not connected, cannot get point value for {symbol}")
+            return 0.0001 # Default fallback
+
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info is None:
+            logger.warning(f"Could not get symbol_info for {symbol} to determine point value. Using default.")
+            return 0.0001
+
+        try:
+            point = getattr(symbol_info, 'point', None)
+            if point is None or point == 0:
+                logger.warning(f"Point value for {symbol} is None or zero in symbol_info. Symbol info details: Digits={getattr(symbol_info, 'digits', 'N/A')}, Spread={getattr(symbol_info, 'spread', 'N/A')}. Using default point value 0.0001.")
+                # Attempt to calculate based on digits if point is missing/zero
+                digits = getattr(symbol_info, 'digits', None)
+                if digits is not None and digits > 0:
+                    calculated_point = 1 / (10**digits)
+                    logger.info(f"Calculated point value for {symbol} based on digits ({digits}): {calculated_point}")
+                    return float(calculated_point)
+                return 0.0001 # Default if digits also not helpful
+            
+            logger.debug(f"Point value for {symbol}: {point}")
+            return float(point)
+        except Exception as e:
+            logger.error(f"Error accessing point value for {symbol} from symbol_info: {e}. Symbol info: {symbol_info}. Using default 0.0001.")
+            return 0.0001

@@ -175,7 +175,8 @@ class SignalProcessor:
             Dictionary with validation result including:
                 - valid (bool): Whether the trade is valid
                 - reason (str): Reason if invalid
-                - adjusted_position_size (float): Adjusted position size if needed
+                - position_size (float): Final position size (canonical key)
+                - adjusted_position_size (float): (Deprecated, for backward compatibility)
         """
         result = {"valid": True, "reason": ""}
         
@@ -262,11 +263,9 @@ class SignalProcessor:
                     if key != "is_valid": # Don't re-copy 'is_valid'
                         result[key] = value # This will copy 'position_size' and 'reason'
                 
-                # If validation has position_size, log it (already handled by above loop)
                 # Ensure the 'adjusted_position_size' key is populated if 'position_size' exists, for downstream compatibility
                 if "position_size" in result:
-                    result["adjusted_position_size"] = result["position_size"]
-                    # logger.debug(f"[{symbol}] Position size from risk manager: {result['position_size']}") # Already logged if needed
+                    result["adjusted_position_size"] = result["position_size"]  # Deprecated, use 'position_size' instead
                 
                 # Log if signal doesn't comply with risk rules
                 if not result.get("valid", False): # Check our local 'valid' flag

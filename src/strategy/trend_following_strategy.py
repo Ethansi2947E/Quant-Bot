@@ -67,38 +67,69 @@ class TrendFollowingStrategy(SignalGenerator):
         logger.info(f"  Primary Timeframe: {self.primary_timeframe}, Secondary Timeframe: {self.secondary_timeframe}, Lookback: {self.lookback_period}")
         logger.info(f"  Risk: Risk Per Trade={self.risk_per_trade}")
 
-    def _get_trend_direction(self, df: pd.DataFrame, window: int = 200) -> Optional[str]:
-        if len(df) < window + 1:
+    def _get_trend_direction(self, df: pd.DataFrame, window: int = 20) -> Optional[str]:
+        if len(df) < window:
+            self.logger.debug(f"[_get_trend_direction] Not enough data for window {window}, have {len(df)}")
             return None
-        highs = df['high'].iloc[-window:]
-        lows = df['low'].iloc[-window:]
-        latest_high = highs.iloc[-1]
-        latest_low = lows.iloc[-1]
-        is_uptrend = (latest_high == highs.max()) and (latest_low == lows.max())
-        is_downtrend = (latest_high == highs.min()) and (latest_low == lows.min())
-        self.logger.debug(f"[TrendWindow] highs={highs.tolist()}, lows={lows.tolist()}, latest_high={latest_high}, latest_low={latest_low}, is_uptrend={is_uptrend}, is_downtrend={is_downtrend}")
-        if is_uptrend:
+
+        # Divide the window into two halves
+        prior_half_df = df.iloc[-window : -window//2]
+        recent_half_df = df.iloc[-window//2:]
+
+        if prior_half_df.empty or recent_half_df.empty:
+            self.logger.debug(f"[_get_trend_direction] One of the halves is empty for window {window}.")
+            return None
+
+        prior_high = prior_half_df['high'].max()
+        prior_low = prior_half_df['low'].min()
+        recent_high = recent_half_df['high'].max()
+        recent_low = recent_half_df['low'].min()
+        latest_close = df['close'].iloc[-1]
+
+        is_uptrend_progression = recent_high > prior_high and recent_low > prior_low
+        is_downtrend_progression = recent_high < prior_high and recent_low < prior_low
+        
+        # Check current position within the recent segment's range
+        recent_segment_midpoint = (recent_high + recent_low) / 2
+        is_current_strength = latest_close > recent_segment_midpoint
+        is_current_weakness = latest_close < recent_segment_midpoint
+
+        if is_uptrend_progression and is_current_strength:
+            self.logger.debug(f"[_get_trend_direction] UP trend: recent_high={recent_high:.4f} > prior_high={prior_high:.4f}, recent_low={recent_low:.4f} > prior_low={prior_low:.4f}, latest_close={latest_close:.4f} > midpoint={recent_segment_midpoint:.4f}")
             return "UP"
-        elif is_downtrend:
+        elif is_downtrend_progression and is_current_weakness:
+            self.logger.debug(f"[_get_trend_direction] DOWN trend: recent_high={recent_high:.4f} < prior_high={prior_high:.4f}, recent_low={recent_low:.4f} < prior_low={prior_low:.4f}, latest_close={latest_close:.4f} < midpoint={recent_segment_midpoint:.4f}")
             return "DOWN"
+        
+        self.logger.debug(f"[_get_trend_direction] No clear trend: RH={recent_high:.4f}, PH={prior_high:.4f}, RL={recent_low:.4f}, PL={prior_low:.4f}, Close={latest_close:.4f}, Mid={recent_segment_midpoint:.4f}")
         return None
 
     def _get_trend_direction_long(self, df: pd.DataFrame, window: int = 300) -> Optional[str]:
         if df is None or len(df) < window:
+            self.logger.debug(f"[_get_trend_direction_long] Not enough data for window {window}, have {len(df) if df is not None else 0}")
             return None
+            
         highs = df['high'].iloc[-window:]
         lows = df['low'].iloc[-window:]
-        closes = df['close'].iloc[-window:]
-        higher_high = highs.iloc[-1] > highs.iloc[0]
-        higher_low = lows.iloc[-1] > lows.iloc[0]
-        recent_strong_move = closes.iloc[-1] > closes.iloc[-3] if len(closes) > 3 else False
-        lower_high = highs.iloc[-1] < highs.iloc[0]
-        lower_low = lows.iloc[-1] < lows.iloc[0]
-        recent_weak_move = closes.iloc[-1] < closes.iloc[-3] if len(closes) > 3 else False
-        if higher_high or higher_low or recent_strong_move:
+        # closes = df['close'].iloc[-window:] # No longer needed for recent_strong_move
+
+        # Rely on comparison of highs/lows at the start and end of the window
+        end_high = highs.iloc[-1]
+        start_high = highs.iloc[0]
+        end_low = lows.iloc[-1]
+        start_low = lows.iloc[0]
+
+        is_clear_uptrend = end_high > start_high and end_low > start_low
+        is_clear_downtrend = end_high < start_high and end_low < start_low
+        
+        if is_clear_uptrend:
+            self.logger.debug(f"[_get_trend_direction_long] UP trend: end_high={end_high:.4f} > start_high={start_high:.4f}, end_low={end_low:.4f} > start_low={start_low:.4f}")
             return "UP"
-        elif lower_high or lower_low or recent_weak_move:
+        elif is_clear_downtrend:
+            self.logger.debug(f"[_get_trend_direction_long] DOWN trend: end_high={end_high:.4f} < start_high={start_high:.4f}, end_low={end_low:.4f} < start_low={start_low:.4f}")
             return "DOWN"
+            
+        self.logger.debug(f"[_get_trend_direction_long] No clear long trend: EH={end_high:.4f}, SH={start_high:.4f}, EL={end_low:.4f}, SL={start_low:.4f}")
         return None
 
     def _build_signal(
@@ -110,6 +141,7 @@ class TrendFollowingStrategy(SignalGenerator):
         pattern: str,
         confidence: float,
         size: float,
+        position_size: float,
         timeframe: str,
         reason: str,
         signal_timestamp: str,
@@ -125,6 +157,7 @@ class TrendFollowingStrategy(SignalGenerator):
             "pattern": pattern,
             "confidence": float(confidence),
             "size": float(size),
+            "position_size": float(position_size),
             "timeframe": timeframe,
             "reason": reason,
             "strategy_name": self.name,
@@ -272,50 +305,92 @@ class TrendFollowingStrategy(SignalGenerator):
         return near_resistance
     
     def check_price_acceptance_rejection(self, df: pd.DataFrame) -> Dict[str, bool]:
-        """Check if price has broken through and accepted/rejected S/R levels.
-        
-        This function detects if price has closed above resistance (bullish) or 
-        below support (bearish), confirming zone acceptance/rejection.
-        
-        Args:
-            df (pd.DataFrame): Price data with OHLC columns
-            
-        Returns:
-            Dict[str, bool]: Dictionary with acceptance/rejection flags
         """
+        Enhanced Price Acceptance/Rejection Logic:
+        - Breakout: Requires 3-bar close rule AND a high-volume, strong-bodied breakout candle.
+        - Rejection: Uses dynamic wick/body threshold (e.g., based on ATR or recent volatility) and close location.
+        - Explicitly links TA-Lib patterns (Hammer, Shooting Star) to rejection flags.
+        - Modular for reuse in other strategies.
+        """
+        SR_WINDOW = 20
+        MIN_BARS_FOR_LOGIC = 3
         result = {
-            "close_above_resistance": False,
-            "close_below_support": False,
+            "breakout_resistance_confirmed": False,
+            "breakout_support_confirmed": False,
             "rejection_at_resistance": False,
             "rejection_at_support": False
         }
-        
-        if len(df) < 3:
+        if len(df) < SR_WINDOW + MIN_BARS_FOR_LOGIC - 1:
+            self.logger.debug(f"[PriceAcceptance] Not enough data: Need {SR_WINDOW + MIN_BARS_FOR_LOGIC -1}, have {len(df)}")
             return result
-            
-        # Find recent S/R levels
-        resistance_level = df['high'].rolling(20).max().iloc[-2]
-        support_level = df['low'].rolling(20).min().iloc[-2]
-        
-        current_close = df['close'].iloc[-1]
-        prev_close = df['close'].iloc[-2]
-        
-        # Price acceptance: Close above resistance or below support
-        result["close_above_resistance"] = (prev_close < resistance_level) & (current_close > resistance_level)
-        result["close_below_support"] = (prev_close > support_level) & (current_close < support_level)
-        
-        # Price rejection: Long wick indicating rejection
-        if self.is_near_resistance(df):
-            upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
-            body_size = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
-            result["rejection_at_resistance"] = (upper_wick > body_size) & (df['close'].iloc[-1] < df['open'].iloc[-1])
-            
+        highs = np.asarray(df['high'].values, dtype=np.float64)
+        lows = np.asarray(df['low'].values, dtype=np.float64)
+        closes = np.asarray(df['close'].values, dtype=np.float64)
+        opens = np.asarray(df['open'].values, dtype=np.float64)
+        resistance_level_T_minus_2 = talib.MAX(highs, timeperiod=SR_WINDOW)[-3]
+        support_level_T_minus_2 = talib.MIN(lows, timeperiod=SR_WINDOW)[-3]
+        current_close_T = closes[-1]
+        prev_close_T_minus_1 = closes[-2]
+        prev_prev_close_T_minus_2 = closes[-3]
+        current_open_T = opens[-1]
+        # --- Breakout Confirmation: 3-bar close rule + volume/body check ---
+        breakout_body = abs(current_close_T - current_open_T)
+        breakout_range = abs(df['high'].iloc[-1] - df['low'].iloc[-1])
+        # Use ATR for dynamic body threshold
+        atr = talib.ATR(highs, lows, closes, timeperiod=14)[-1] if len(df) >= 14 else breakout_range
+        strong_body = breakout_body > 0.5 * atr if atr and not np.isnan(atr) else breakout_body > 0.5 * breakout_range
+        high_volume = self.is_valid_volume_spike(df)
+        # Resistance breakout
+        result["breakout_resistance_confirmed"] = (
+            prev_prev_close_T_minus_2 < resistance_level_T_minus_2 and
+            prev_close_T_minus_1 > resistance_level_T_minus_2 and
+            current_close_T > resistance_level_T_minus_2 and
+            strong_body and high_volume
+        )
+        # Support breakout
+        result["breakout_support_confirmed"] = (
+            prev_prev_close_T_minus_2 > support_level_T_minus_2 and
+            prev_close_T_minus_1 < support_level_T_minus_2 and
+            current_close_T < support_level_T_minus_2 and
+            strong_body and high_volume
+        )
+        # --- Rejection Logic: Dynamic wick/body threshold, close location, TA-Lib pattern ---
+        # Use ATR for dynamic wick threshold
+        wick_atr = atr if atr and not np.isnan(atr) else breakout_range
+        wick_threshold = 0.4 * wick_atr
+        # Support rejection
         if self.is_near_support(df):
             lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
             body_size = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
-            result["rejection_at_support"] = (lower_wick > body_size) & (df['close'].iloc[-1] > df['open'].iloc[-1])
-            
-        self.logger.debug(f"[PriceAcceptance] {result}")
+            close_location = abs(df['close'].iloc[-1] - df['open'].iloc[-1]) < 0.3 * breakout_range
+            # TA-Lib Hammer pattern
+            open_prices = np.array(df['open'].values, dtype=np.float64)
+            high_prices = np.array(df['high'].values, dtype=np.float64)
+            low_prices = np.array(df['low'].values, dtype=np.float64)
+            close_prices = np.array(df['close'].values, dtype=np.float64)
+            hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)[-1] > 0
+            # Rejection if wick is large, close is near open, and/or hammer pattern
+            result["rejection_at_support"] = (
+                (lower_wick > wick_threshold and close_location) or hammer_talib
+            )
+        # Resistance rejection
+        if self.is_near_resistance(df):
+            upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
+            body_size = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+            close_location = abs(df['close'].iloc[-1] - df['open'].iloc[-1]) < 0.3 * breakout_range
+            # TA-Lib Shooting Star pattern
+            open_prices = np.array(df['open'].values, dtype=np.float64)
+            high_prices = np.array(df['high'].values, dtype=np.float64)
+            low_prices = np.array(df['low'].values, dtype=np.float64)
+            close_prices = np.array(df['close'].values, dtype=np.float64)
+            shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)[-1] < 0
+            # Rejection if wick is large, close is near open, and/or shooting star pattern
+            result["rejection_at_resistance"] = (
+                (upper_wick > wick_threshold and close_location) or shooting_star_talib
+            )
+        self.logger.debug(f"[PriceAcceptance] ResLvl(T-2): {resistance_level_T_minus_2:.4f}, SupLvl(T-2): {support_level_T_minus_2:.4f}")
+        self.logger.debug(f"[PriceAcceptance] Closes: T-2={prev_prev_close_T_minus_2:.4f}, T-1={prev_close_T_minus_1:.4f}, T={current_close_T:.4f}")
+        self.logger.debug(f"[PriceAcceptance] Results: {result}")
         return result
 
     def is_valid_volume_spike(self, df: pd.DataFrame) -> bool:
@@ -324,92 +399,64 @@ class TrendFollowingStrategy(SignalGenerator):
             return False
         current_volume = df['volume'].iloc[-1]
         vol_mean = df['volume'].rolling(20).mean().iloc[-1]
-        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
-        wick = (df['high'].iloc[-1] - df['low'].iloc[-1]) - body
-        
-        if body == 0:
-            self.logger.debug(f"[Volume] Body is zero, cannot compute wick/body ratio.")
+        if vol_mean == 0 or np.isnan(vol_mean):
+            self.logger.debug("[Volume] Rolling mean is zero or NaN.")
             return False
-        wick_body_ratio = wick / body
-        
-        # More flexible volume thresholds
-        strong_spike = current_volume > 1.5 * vol_mean
-        moderate_spike = current_volume > 1.1 * vol_mean  # Added: More lenient threshold
-        above_average = current_volume > vol_mean  # Added: Basic volume requirement
-        
-        # Enhanced volume context with wick location analysis
-        upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
-        lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
+        # --- Simple, robust volume spike definition ---
+        is_spike = current_volume > 2 * vol_mean
+        if not is_spike:
+            self.logger.debug(f"[Volume] No spike: current={current_volume}, mean={vol_mean}")
+            return False
+        # --- Candle shape analysis after spike confirmed ---
+        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
         total_range = df['high'].iloc[-1] - df['low'].iloc[-1]
-        
         if total_range == 0:
             self.logger.debug(f"[Volume] Total range is zero, cannot compute wick ratios.")
             return False
-            
-        upper_wick_ratio = upper_wick / total_range if total_range > 0 else 0
-        lower_wick_ratio = lower_wick / total_range if total_range > 0 else 0
-        
-        # Volume spike with long upper wick at resistance = bearish
-        is_bearish_volume = (upper_wick_ratio > 0.5) and self.is_near_resistance(df) and strong_spike
-        
-        # Volume spike with long lower wick at support = bullish
-        is_bullish_volume = (lower_wick_ratio > 0.5) and self.is_near_support(df) and strong_spike
-        
-        # Enhanced validation logic - more flexible conditions
-        # 1. Strong spike with any pattern
-        if strong_spike and wick_body_ratio < 0.5:  # Relaxed from 0.3 to 0.5
-            valid = True
-        # 2. Moderate spike with good pattern
-        elif moderate_spike and wick_body_ratio < 0.3:
-            valid = True
-        # 3. Directional volume at key levels
-        elif is_bearish_volume or is_bullish_volume:
-            valid = True
-        # 4. Above average volume with excellent pattern (very low wick/body ratio)
-        elif above_average and wick_body_ratio < 0.15:
-            valid = True
-        # 5. Low volume with perfect pattern at key levels (new lenient path)
-        elif (self.is_near_support(df) or self.is_near_resistance(df)) and wick_body_ratio < 0.1:
-            valid = True
-            self.logger.debug(f"[Volume] Low volume accepted: near S/R with excellent pattern (wick/body={wick_body_ratio:.3f})")
-        # 6. Fallback: if volume confirmation is disabled, always pass
-        elif not self.volume_confirmation_enabled:
+        wick = (df['high'].iloc[-1] - df['low'].iloc[-1]) - body
+        wick_body_ratio = wick / body if body > 0 else 0
+        upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
+        lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
+        upper_wick_ratio = upper_wick / total_range
+        lower_wick_ratio = lower_wick / total_range
+        # --- Simple pattern: prefer small wick/body ratio for conviction ---
+        if wick_body_ratio < 0.5:
             valid = True
         else:
             valid = False
-        
-        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, strong_spike={strong_spike}, moderate_spike={moderate_spike}, above_average={above_average}")
-        self.logger.debug(f"[Volume] {wick_body_ratio=:.3f}, upper_wick_ratio={upper_wick_ratio:.3f}, lower_wick_ratio={lower_wick_ratio:.3f}")
-        self.logger.debug(f"[Volume] is_bearish_volume={is_bearish_volume}, is_bullish_volume={is_bullish_volume}, valid={valid}")
+        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, is_spike={is_spike}, wick_body_ratio={wick_body_ratio:.3f}, valid={valid}")
+        # --- VSA-style enhancement (future): ---
+        # High volume + small range + close in middle: possible absorption/indecision
+        # High volume + small range + close near low (in uptrend): selling pressure
+        # Low volume + large range (breakout): weak breakout, likely to fail
+        # These can be added as advanced filters if needed.
         return valid
 
     def get_support_resistance_zones(self, df: pd.DataFrame) -> Dict[str, List[float]]:
         """
         Identify key support and resistance zones based on recent price action.
-        
+        Uses TA-Lib for rolling max/min.
         Args:
             df (pd.DataFrame): Price data with OHLC
-            
         Returns:
             Dict[str, List[float]]: Dictionary with support and resistance levels
         """
         if len(df) < 20:
             return {"support": [], "resistance": []}
-            
         current_price = df['close'].iloc[-1]
-            
-        # Find support zones (recent lows)
+        lows = np.asarray(df['low'].values, dtype=np.float64)
+        highs = np.asarray(df['high'].values, dtype=np.float64)
+        # Use TA-Lib MIN/MAX for swing detection
         swing_lows = []
-        for i in range(10, len(df) - 10):
-            if df['low'].iloc[i] <= min(df['low'].iloc[i-10:i]) and df['low'].iloc[i] <= min(df['low'].iloc[i+1:i+10]):
-                swing_lows.append(df['low'].iloc[i])
-                
-        # Find resistance zones (recent highs)
         swing_highs = []
-        for i in range(10, len(df) - 10):
-            if df['high'].iloc[i] >= max(df['high'].iloc[i-10:i]) and df['high'].iloc[i] >= max(df['high'].iloc[i+1:i+10]):
-                swing_highs.append(df['high'].iloc[i])
-                
+        w = 10
+        min_lows = talib.MIN(lows, timeperiod=2 * w + 1)
+        max_highs = talib.MAX(highs, timeperiod=2 * w + 1)
+        for i in range(w, len(df) - w):
+            if lows[i] == min_lows[i] and not np.isnan(min_lows[i]):
+                swing_lows.append(lows[i])
+            if highs[i] == max_highs[i] and not np.isnan(max_highs[i]):
+                swing_highs.append(highs[i])
         # Cluster similar levels (within 0.3% of each other)
         def cluster_levels(levels, tolerance=0.003):
             if not levels:
@@ -417,7 +464,6 @@ class TrendFollowingStrategy(SignalGenerator):
             levels = sorted(levels)
             clusters = []
             current_cluster = [levels[0]]
-            
             for price in levels[1:]:
                 if abs(price - current_cluster[-1]) / current_cluster[-1] <= tolerance:
                     current_cluster.append(price)
@@ -425,42 +471,23 @@ class TrendFollowingStrategy(SignalGenerator):
                     clusters.append(current_cluster)
                     current_cluster = [price]
             clusters.append(current_cluster)
-            
-            # Return average of each cluster
             return [sum(cluster) / len(cluster) for cluster in clusters]
-            
         support_zones = cluster_levels(swing_lows)
         resistance_zones = cluster_levels(swing_highs)
-        
         # Separate levels by current price (support below, resistance above)
-        filtered_support = []
-        filtered_resistance = []
-        
-        for level in support_zones:
-            # Support must be below current price
-            if level < current_price:
-                filtered_support.append(level)
-                
-        for level in resistance_zones:
-            # Resistance must be above current price
-            if level > current_price:
-                filtered_resistance.append(level)
-        
+        filtered_support = [level for level in support_zones if level < current_price]
+        filtered_resistance = [level for level in resistance_zones if level > current_price]
         # Use recent min/max as backup if no zones found
         if not filtered_support:
-            recent_low = df['low'].rolling(20).min().iloc[-1]
+            recent_low = talib.MIN(lows, timeperiod=20)[-1]
             if recent_low < current_price:
                 filtered_support = [recent_low]
-                
         if not filtered_resistance:
-            recent_high = df['high'].rolling(20).max().iloc[-1]
+            recent_high = talib.MAX(highs, timeperiod=20)[-1]
             if recent_high > current_price:
                 filtered_resistance = [recent_high]
-            
-        # Sort levels by proximity to current price (most relevant first)
         filtered_support = sorted(filtered_support, key=lambda x: abs(current_price - x))
         filtered_resistance = sorted(filtered_resistance, key=lambda x: abs(current_price - x))
-            
         self.logger.debug(f"[S/R Zones] Current: {current_price}, Support: {filtered_support}, Resistance: {filtered_resistance}")
         return {"support": filtered_support, "resistance": filtered_resistance}
 
@@ -515,19 +542,23 @@ class TrendFollowingStrategy(SignalGenerator):
             self.logger.debug(f"[StopLoss] SELL: resistance={resistance}, buffer={buffer}, SL={stop}")
             return stop
 
-    def calculate_take_profit(self, df: pd.DataFrame, direction: str) -> Optional[float]:
+    def calculate_take_profit(self, df: pd.DataFrame, direction: str, entry_price_override: Optional[float] = None, stop_loss_override: Optional[float] = None) -> Optional[float]:
         """
         Calculate take profit based on opposing S/R zones, with 2R fallback.
         
         Args:
             df (pd.DataFrame): Price data
             direction (str): Trade direction ("buy" or "sell")
+            entry_price_override (Optional[float]): If provided, use this entry for 2R calculation.
+            stop_loss_override (Optional[float]): If provided, use this SL for 2R calculation.
             
         Returns:
             Optional[float]: Calculated take profit price or None if not possible
         """
         zones = self.get_support_resistance_zones(df)
-        current_price = df['close'].iloc[-1]
+        current_price = df['close'].iloc[-1] # Still use current_price for S/R zone selection
+        
+        entry_for_risk_calc = entry_price_override if entry_price_override is not None else current_price
         
         if direction == "buy":
             # For buy, use resistance zones as take profit
@@ -536,35 +567,49 @@ class TrendFollowingStrategy(SignalGenerator):
             # Find next resistance above current price
             tp = None
             for level in resistance_levels:
-                if level > current_price:
+                if level > entry_for_risk_calc: # Check against entry, not current_price
                     tp = level
                     break
                     
             if tp is None:
                 # Fallback to 2R
-                risk = abs(current_price - self.calculate_stop_loss(df, direction))
-                tp = current_price + 2 * risk
-                self.logger.debug(f"[TP] BUY: Using fallback 2R TP={tp} (no suitable resistance found)")
+                if stop_loss_override is not None and entry_price_override is not None:
+                    risk = abs(entry_price_override - stop_loss_override)
+                else: # Fallback to original S/R based SL if overrides not provided
+                    risk = abs(entry_for_risk_calc - self.calculate_stop_loss(df, direction))
+                
+                if risk == 0: # Avoid division by zero or no profit
+                    self.logger.debug(f"[TP] BUY: Risk is zero, cannot calculate 2R TP. Entry: {entry_for_risk_calc}, SL: {stop_loss_override if stop_loss_override else self.calculate_stop_loss(df, direction)}")
+                    return None 
+                tp = entry_for_risk_calc + 2 * risk
+                self.logger.debug(f"[TP] BUY: Using fallback 2R TP={tp} (risk={risk}, entry={entry_for_risk_calc})")
             else:
                 self.logger.debug(f"[TP] BUY: Using resistance zone TP={tp}")
             
             return tp
-        else:
+        else: # direction == "sell"
             # For sell, use support zones as take profit
             support_levels = sorted(zones["support"], reverse=True)  # Sort descending
             
             # Find next support below current price
             tp = None
             for level in support_levels:
-                if level < current_price:
+                if level < entry_for_risk_calc: # Check against entry, not current_price
                     tp = level
                     break
                     
             if tp is None:
                 # Fallback to 2R
-                risk = abs(current_price - self.calculate_stop_loss(df, direction))
-                tp = current_price - 2 * risk
-                self.logger.debug(f"[TP] SELL: Using fallback 2R TP={tp} (no suitable support found)")
+                if stop_loss_override is not None and entry_price_override is not None:
+                    risk = abs(entry_price_override - stop_loss_override)
+                else: # Fallback to original S/R based SL if overrides not provided
+                    risk = abs(entry_for_risk_calc - self.calculate_stop_loss(df, direction))
+
+                if risk == 0: # Avoid division by zero or no profit
+                    self.logger.debug(f"[TP] SELL: Risk is zero, cannot calculate 2R TP. Entry: {entry_for_risk_calc}, SL: {stop_loss_override if stop_loss_override else self.calculate_stop_loss(df, direction)}")
+                    return None
+                tp = entry_for_risk_calc - 2 * risk
+                self.logger.debug(f"[TP] SELL: Using fallback 2R TP={tp} (risk={risk}, entry={entry_for_risk_calc})")
             else:
                 self.logger.debug(f"[TP] SELL: Using support zone TP={tp}")
             
@@ -625,7 +670,7 @@ class TrendFollowingStrategy(SignalGenerator):
             idx = len(df_primary) - 1
             if idx < 0: continue # Should not happen if min_bars check passed
 
-            trend = self._get_trend_direction(df_primary, window=5)
+            trend = self._get_trend_direction(df_primary, window=20)
             self.logger.debug(f"[Trend] {sym} idx={idx} trend={trend} HTF trend={trend_ht}")
             
             if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
@@ -639,40 +684,40 @@ class TrendFollowingStrategy(SignalGenerator):
             
             price_action = self.check_price_acceptance_rejection(df_primary)
             
-            if not (self.is_near_support_resistance(df_primary) or price_action["close_above_resistance"] or price_action["close_below_support"]):
-                self.logger.info(f"[Skip] {sym} idx={idx} Price not near any S/R level and no breakout detected.")
+            # Check if price is either near S/R for pullback/rejection, OR a confirmed breakout has occurred.
+            is_at_pullback_sr = self.is_near_support_resistance(df_primary) 
+            is_confirmed_breakout = price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]
+
+            if not (is_at_pullback_sr or is_confirmed_breakout):
+                self.logger.info(f"[Skip] {sym} idx={idx} Price not near S/R for pullback AND no confirmed breakout. PullbackSR: {is_at_pullback_sr}, ConfBreakout: {is_confirmed_breakout}")
                 continue
             
             detected_patterns = []
-            if trend == "UP" and (self.is_near_support(df_primary) or price_action["close_above_resistance"]):
-                if hammer.iloc[idx]:
-                    detected_patterns.append("Hammer (TA-Lib)")
-                if bullish_engulfing.iloc[idx]:
-                    detected_patterns.append("Bullish Engulfing (TA-Lib)")
-                if morning_star.iloc[idx]:
-                    detected_patterns.append("Morning Star (TA-Lib)")
-                if inside_bar.iloc[idx]:
-                    detected_patterns.append("Inside Bar (cp)")
-                # Removed false_breakout_buy for this TA-Lib trial
-                if price_action["close_above_resistance"]:
-                    detected_patterns.append("Resistance Breakout")
-                if price_action["rejection_at_support"]:
-                    detected_patterns.append("Support Rejection (Bullish)")
+            if trend == "UP":
+                if is_at_pullback_sr and self.is_near_support(df_primary): # Pullback to support
+                    if hammer.iloc[idx]: detected_patterns.append("Hammer (TA-Lib)")
+                    if bullish_engulfing.iloc[idx]: detected_patterns.append("Bullish Engulfing (TA-Lib)")
+                    if morning_star.iloc[idx]: detected_patterns.append("Morning Star (TA-Lib)")
+                    if inside_bar.iloc[idx]: detected_patterns.append("Inside Bar (cp)")
+                    if price_action["rejection_at_support"]: detected_patterns.append("Support Rejection (Bullish)")
+                
+                if price_action["breakout_resistance_confirmed"]: # Confirmed breakout above resistance
+                    detected_patterns.append("Resistance Breakout Confirmed")
+                    # Potentially add breakout-specific patterns here if needed, e.g. strong close on breakout bar T
+                    if bullish_engulfing.iloc[idx]: detected_patterns.append("Bullish Engulfing on Breakout (TA-Lib)")
 
-            elif trend == "DOWN" and (self.is_near_resistance(df_primary) or price_action["close_below_support"]):
-                if shooting_star.iloc[idx]:
-                    detected_patterns.append("Shooting Star (TA-Lib)")
-                if bearish_engulfing.iloc[idx]:
-                    detected_patterns.append("Bearish Engulfing (TA-Lib)")
-                if evening_star.iloc[idx]:
-                    detected_patterns.append("Evening Star (TA-Lib)")
-                if inside_bar.iloc[idx]:
-                    detected_patterns.append("Inside Bar (cp)")
-                # Removed false_breakout_sell for this TA-Lib trial
-                if price_action["close_below_support"]:
-                    detected_patterns.append("Support Breakdown")
-                if price_action["rejection_at_resistance"]:
-                    detected_patterns.append("Resistance Rejection (Bearish)")
+
+            elif trend == "DOWN":
+                if is_at_pullback_sr and self.is_near_resistance(df_primary): # Pullback to resistance
+                    if shooting_star.iloc[idx]: detected_patterns.append("Shooting Star (TA-Lib)")
+                    if bearish_engulfing.iloc[idx]: detected_patterns.append("Bearish Engulfing (TA-Lib)")
+                    if evening_star.iloc[idx]: detected_patterns.append("Evening Star (TA-Lib)")
+                    if inside_bar.iloc[idx]: detected_patterns.append("Inside Bar (cp)")
+                    if price_action["rejection_at_resistance"]: detected_patterns.append("Resistance Rejection (Bearish)")
+
+                if price_action["breakout_support_confirmed"]: # Confirmed breakdown below support
+                    detected_patterns.append("Support Breakdown Confirmed")
+                    if bearish_engulfing.iloc[idx]: detected_patterns.append("Bearish Engulfing on Breakdown (TA-Lib)")
                     
             self.logger.debug(f"[Pattern] {sym} idx={idx} detected_patterns={detected_patterns}")
             pattern_ok = bool(detected_patterns) or self.debug_disable_pattern
@@ -687,10 +732,24 @@ class TrendFollowingStrategy(SignalGenerator):
                 continue
                 
             pattern = ", ".join(detected_patterns)
-            entry_price = df_primary['close'].iloc[idx]
+            # Get signal candle data
+            signal_candle_open = df_primary['open'].iloc[idx]
+            signal_candle_high = df_primary['high'].iloc[idx]
+            signal_candle_low = df_primary['low'].iloc[idx]
+            signal_candle_close = df_primary['close'].iloc[idx] # Keep for reference, entry is candle H/L
+
             direction = "buy" if trend == "UP" else "sell"
-            stop_loss = self.calculate_stop_loss(df_primary, direction)
-            take_profit = self.calculate_take_profit(df_primary, direction)
+
+            if direction == "buy":
+                entry_price = signal_candle_high
+                stop_loss = signal_candle_low
+            else: # direction == "sell"
+                entry_price = signal_candle_low
+                stop_loss = signal_candle_high
+            
+            # Original S/R based SL is now only used by TP logic if candle-based SL is not suitable for TP calc, or for S/R TP targets.
+            # For consistency, TP calculation will now use the candle-based entry and SL for its 2R fallback.
+            take_profit = self.calculate_take_profit(df_primary, direction, entry_price_override=entry_price, stop_loss_override=stop_loss)
 
             if not take_profit or take_profit == 0: # Ensure take_profit is valid
                 self.logger.info(f"[Skip] {sym} idx={idx} No valid take-profit found (TP: {take_profit}), skipping signal.")
@@ -704,11 +763,35 @@ class TrendFollowingStrategy(SignalGenerator):
                 self.logger.info(f"[Skip] {sym} idx={idx} Invalid SL for SELL signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
                 continue
 
-            size = 0.0 # Placeholder, actual sizing should be done by RiskManager or later step
+            # --- Position Sizing: Use RiskManager for modular, robust sizing ---
+            risk_manager = self.risk_manager if hasattr(self, 'risk_manager') else RiskManager.get_instance()
+            account_balance = risk_manager.get_account_balance()
+            risk_per_trade = getattr(self, 'risk_per_trade', 0.01)
+            try:
+                position_size = risk_manager.calculate_position_size(
+                    account_balance=account_balance,
+                    risk_per_trade=risk_per_trade * 100.0,  # RiskManager expects percent, e.g., 1.0 for 1%
+                    entry_price=entry_price,
+                    stop_loss_price=stop_loss,
+                    symbol=sym
+                )
+            except Exception as e:
+                self.logger.warning(f"[RiskManager] Position sizing failed for {sym}: {e}")
+                position_size = 0.0
+            size = position_size
+
             confidence = 0.7 # Base confidence for TA-Lib patterns, adjust as needed
-            reason = f"Trend: {trend}, S/R, Patterns: {pattern}, Volume Confirmed: {vol_ok}"
-            if any(key for key, val in price_action.items() if val):
-                reason += f", Price Action: {[key for key, val in price_action.items() if val]}"
+            reason = f"Trend: {trend}, Patterns: {pattern}, Vol Conf: {vol_ok}"
+            if price_action["breakout_resistance_confirmed"]:
+                reason += ", BreakoutResistanceConfirmed"
+            if price_action["breakout_support_confirmed"]:
+                reason += ", BreakoutSupportConfirmed"
+            if price_action["rejection_at_resistance"]:
+                reason += ", RejectionAtResistance"
+            if price_action["rejection_at_support"]:
+                reason += ", RejectionAtSupport"
+            if is_at_pullback_sr and not (price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]):
+                 reason += ", PullbackToSR"
             
             signal_timestamp = str(df_primary.index[idx])
             self.logger.info(f"[SignalCandidate] {sym} idx={idx} direction={direction} entry={entry_price} stop={stop_loss} tp={take_profit} pattern={pattern} vol_ok={vol_ok}")
@@ -720,7 +803,8 @@ class TrendFollowingStrategy(SignalGenerator):
                 stop_loss=stop_loss,
                 pattern=pattern,
                 confidence=confidence,
-                size=size, # Will be overridden by RiskManager
+                size=size, # Now sized by RiskManager
+                position_size=size, # For compatibility with downstream consumers
                 timeframe=self.primary_timeframe,
                 reason=reason,
                 signal_timestamp=signal_timestamp,

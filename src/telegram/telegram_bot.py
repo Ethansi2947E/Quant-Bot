@@ -485,7 +485,7 @@ Details: {str(context.error)}"""
             return ReplyKeyboardMarkup(
                 keyboard,
                 resize_keyboard=True,
-                is_persistent=True
+                one_time_keyboard=True
             )
         
         # Otherwise return the main menu with categories
@@ -499,7 +499,7 @@ Details: {str(context.error)}"""
         return ReplyKeyboardMarkup(
             main_menu,
             resize_keyboard=True,
-            is_persistent=True
+            one_time_keyboard=True
         )
     
     async def show_command_keyboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE, category=None):
