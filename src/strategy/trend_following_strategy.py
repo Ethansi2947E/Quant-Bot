@@ -22,6 +22,7 @@ import talib # Added TA-Lib import
 
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
+from src.utils.patterns_luxalgo import add_luxalgo_patterns
 
 class TrendFollowingStrategy(SignalGenerator):
     """Trend Following Strategy: Pure price action (no indicators, no EMAs/ADX/ATR)."""
@@ -634,10 +635,15 @@ class TrendFollowingStrategy(SignalGenerator):
                 self.logger.debug(f"[Data] Not enough data for {sym} (need {min_bars}, got {len(df_primary) if isinstance(df_primary, pd.DataFrame) else 0})")
                 continue
 
-            open_prices = np.array(df_primary['open'].values, dtype=np.float64)
-            high_prices = np.array(df_primary['high'].values, dtype=np.float64)
-            low_prices = np.array(df_primary['low'].values, dtype=np.float64)
-            close_prices = np.array(df_primary['close'].values, dtype=np.float64)
+            # Add LuxAlgo-style pattern columns
+            df_primary = add_luxalgo_patterns(df_primary)
+            hammer = df_primary['hammer']
+            shooting_star = df_primary['shooting_star']
+            bullish_engulfing = df_primary['bullish_engulfing']
+            bearish_engulfing = df_primary['bearish_engulfing']
+            morning_star = df_primary['morning_star']
+            evening_star = df_primary['evening_star']
+            inside_bar = df_primary['inside_bar']
 
             # Higher timeframe trend filter
             ht_trend_ok = True
@@ -649,37 +655,16 @@ class TrendFollowingStrategy(SignalGenerator):
                 else:
                     trend_ht = self._get_trend_direction_long(df_secondary, window=self.lookback_period)
             
-            # Precompute vectorized patterns using TA-Lib
-            # TA-Lib functions return integer arrays (-100 for bearish, 100 for bullish, 0 for none)
-            hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
-            shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            # TA-Lib CDLENGULFING covers both Bullish and Bearish
-            engulfing_talib = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
-            morning_star_talib = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices) # Default penetration = 0.3
-            evening_star_talib = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices) # Default penetration = 0.3
-
-            # Convert TA-Lib output to boolean Series, aligned with df_primary.index
-            hammer = pd.Series(hammer_talib > 0, index=df_primary.index)
-            shooting_star = pd.Series(shooting_star_talib < 0, index=df_primary.index) # Shooting star is bearish
-            bullish_engulfing = pd.Series(engulfing_talib > 0, index=df_primary.index)
-            bearish_engulfing = pd.Series(engulfing_talib < 0, index=df_primary.index)
-            morning_star = pd.Series(morning_star_talib > 0, index=df_primary.index)
-            evening_star = pd.Series(evening_star_talib < 0, index=df_primary.index)
-            inside_bar = TrendFollowingStrategy._detect_inside_bar_vectorized(df_primary)
-
-            idx = len(df_primary) - 1
-            if idx < 0: continue # Should not happen if min_bars check passed
-
             trend = self._get_trend_direction(df_primary, window=20)
-            self.logger.debug(f"[Trend] {sym} idx={idx} trend={trend} HTF trend={trend_ht}")
+            self.logger.debug(f"[Trend] {sym} idx={len(df_primary)-1} trend={trend} HTF trend={trend_ht}")
             
             if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
                 if not ht_trend_ok or trend_ht not in ("UP", "DOWN") or trend != trend_ht:
-                    self.logger.info(f"[Skip] {sym} idx={idx} HTF trend filter: primary={trend}, secondary={trend_ht}")
+                    self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} HTF trend filter: primary={trend}, secondary={trend_ht}")
                     continue
             
             if trend not in ("UP", "DOWN"):
-                self.logger.info(f"[Skip] {sym} idx={idx} No valid trend detected.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid trend detected.")
                 continue
             
             price_action = self.check_price_acceptance_rejection(df_primary)
@@ -689,54 +674,54 @@ class TrendFollowingStrategy(SignalGenerator):
             is_confirmed_breakout = price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]
 
             if not (is_at_pullback_sr or is_confirmed_breakout):
-                self.logger.info(f"[Skip] {sym} idx={idx} Price not near S/R for pullback AND no confirmed breakout. PullbackSR: {is_at_pullback_sr}, ConfBreakout: {is_confirmed_breakout}")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Price not near S/R for pullback AND no confirmed breakout. PullbackSR: {is_at_pullback_sr}, ConfBreakout: {is_confirmed_breakout}")
                 continue
             
             detected_patterns = []
             if trend == "UP":
                 if is_at_pullback_sr and self.is_near_support(df_primary): # Pullback to support
-                    if hammer.iloc[idx]: detected_patterns.append("Hammer (TA-Lib)")
-                    if bullish_engulfing.iloc[idx]: detected_patterns.append("Bullish Engulfing (TA-Lib)")
-                    if morning_star.iloc[idx]: detected_patterns.append("Morning Star (TA-Lib)")
-                    if inside_bar.iloc[idx]: detected_patterns.append("Inside Bar (cp)")
-                    if price_action["rejection_at_support"]: detected_patterns.append("Support Rejection (Bullish)")
+                    if hammer.iloc[-1]: detected_patterns.append("Hammer (LuxAlgo)")
+                    if bullish_engulfing.iloc[-1]: detected_patterns.append("Bullish Engulfing (LuxAlgo)")
+                    if morning_star.iloc[-1]: detected_patterns.append("Morning Star (LuxAlgo)")
+                    if inside_bar.iloc[-1]: detected_patterns.append("Inside Bar (LuxAlgo)")
+                    if price_action["rejection_at_support"]: detected_patterns.append("Support Rejection (LuxAlgo)")
                 
                 if price_action["breakout_resistance_confirmed"]: # Confirmed breakout above resistance
                     detected_patterns.append("Resistance Breakout Confirmed")
                     # Potentially add breakout-specific patterns here if needed, e.g. strong close on breakout bar T
-                    if bullish_engulfing.iloc[idx]: detected_patterns.append("Bullish Engulfing on Breakout (TA-Lib)")
+                    if bullish_engulfing.iloc[-1]: detected_patterns.append("Bullish Engulfing on Breakout (LuxAlgo)")
 
 
             elif trend == "DOWN":
                 if is_at_pullback_sr and self.is_near_resistance(df_primary): # Pullback to resistance
-                    if shooting_star.iloc[idx]: detected_patterns.append("Shooting Star (TA-Lib)")
-                    if bearish_engulfing.iloc[idx]: detected_patterns.append("Bearish Engulfing (TA-Lib)")
-                    if evening_star.iloc[idx]: detected_patterns.append("Evening Star (TA-Lib)")
-                    if inside_bar.iloc[idx]: detected_patterns.append("Inside Bar (cp)")
-                    if price_action["rejection_at_resistance"]: detected_patterns.append("Resistance Rejection (Bearish)")
+                    if shooting_star.iloc[-1]: detected_patterns.append("Shooting Star (LuxAlgo)")
+                    if bearish_engulfing.iloc[-1]: detected_patterns.append("Bearish Engulfing (LuxAlgo)")
+                    if evening_star.iloc[-1]: detected_patterns.append("Evening Star (LuxAlgo)")
+                    if inside_bar.iloc[-1]: detected_patterns.append("Inside Bar (LuxAlgo)")
+                    if price_action["rejection_at_resistance"]: detected_patterns.append("Resistance Rejection (LuxAlgo)")
 
                 if price_action["breakout_support_confirmed"]: # Confirmed breakdown below support
                     detected_patterns.append("Support Breakdown Confirmed")
-                    if bearish_engulfing.iloc[idx]: detected_patterns.append("Bearish Engulfing on Breakdown (TA-Lib)")
+                    if bearish_engulfing.iloc[-1]: detected_patterns.append("Bearish Engulfing on Breakdown (LuxAlgo)")
                     
-            self.logger.debug(f"[Pattern] {sym} idx={idx} detected_patterns={detected_patterns}")
+            self.logger.debug(f"[Pattern] {sym} idx={len(df_primary)-1} detected_patterns={detected_patterns}")
             pattern_ok = bool(detected_patterns) or self.debug_disable_pattern
             if not pattern_ok:
-                self.logger.info(f"[Skip] {sym} idx={idx} No valid pattern at S/R zone.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid pattern at S/R zone.")
                 continue
             
             vol_ok = self.debug_disable_volume or self.is_valid_volume_spike(df_primary)
-            self.logger.debug(f"[VolumeCheck] {sym} idx={idx} vol_ok={vol_ok}")
+            self.logger.debug(f"[VolumeCheck] {sym} idx={len(df_primary)-1} vol_ok={vol_ok}")
             if not vol_ok:
-                self.logger.info(f"[Skip] {sym} idx={idx} Volume-wick confirmation failed.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Volume-wick confirmation failed.")
                 continue
                 
             pattern = ", ".join(detected_patterns)
             # Get signal candle data
-            signal_candle_open = df_primary['open'].iloc[idx]
-            signal_candle_high = df_primary['high'].iloc[idx]
-            signal_candle_low = df_primary['low'].iloc[idx]
-            signal_candle_close = df_primary['close'].iloc[idx] # Keep for reference, entry is candle H/L
+            signal_candle_open = df_primary['open'].iloc[-1]
+            signal_candle_high = df_primary['high'].iloc[-1]
+            signal_candle_low = df_primary['low'].iloc[-1]
+            signal_candle_close = df_primary['close'].iloc[-1] # Keep for reference, entry is candle H/L
 
             direction = "buy" if trend == "UP" else "sell"
 
@@ -752,15 +737,15 @@ class TrendFollowingStrategy(SignalGenerator):
             take_profit = self.calculate_take_profit(df_primary, direction, entry_price_override=entry_price, stop_loss_override=stop_loss)
 
             if not take_profit or take_profit == 0: # Ensure take_profit is valid
-                self.logger.info(f"[Skip] {sym} idx={idx} No valid take-profit found (TP: {take_profit}), skipping signal.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid take-profit found (TP: {take_profit}), skipping signal.")
                 continue
             
             # Ensure stop_loss leads to a positive risk amount
             if direction == "buy" and entry_price <= stop_loss:
-                self.logger.info(f"[Skip] {sym} idx={idx} Invalid SL for BUY signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Invalid SL for BUY signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
                 continue
             if direction == "sell" and entry_price >= stop_loss:
-                self.logger.info(f"[Skip] {sym} idx={idx} Invalid SL for SELL signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
+                self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Invalid SL for SELL signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
                 continue
 
             # --- Position Sizing: Use RiskManager for modular, robust sizing ---
@@ -780,7 +765,7 @@ class TrendFollowingStrategy(SignalGenerator):
                 position_size = 0.0
             size = position_size
 
-            confidence = 0.7 # Base confidence for TA-Lib patterns, adjust as needed
+            confidence = 0.7 # Base confidence for LuxAlgo patterns, adjust as needed
             reason = f"Trend: {trend}, Patterns: {pattern}, Vol Conf: {vol_ok}"
             if price_action["breakout_resistance_confirmed"]:
                 reason += ", BreakoutResistanceConfirmed"
@@ -793,8 +778,8 @@ class TrendFollowingStrategy(SignalGenerator):
             if is_at_pullback_sr and not (price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]):
                  reason += ", PullbackToSR"
             
-            signal_timestamp = str(df_primary.index[idx])
-            self.logger.info(f"[SignalCandidate] {sym} idx={idx} direction={direction} entry={entry_price} stop={stop_loss} tp={take_profit} pattern={pattern} vol_ok={vol_ok}")
+            signal_timestamp = str(df_primary.index[-1])
+            self.logger.info(f"[SignalCandidate] {sym} idx={len(df_primary)-1} direction={direction} entry={entry_price} stop={stop_loss} tp={take_profit} pattern={pattern} vol_ok={vol_ok}")
             
             signal = self._build_signal(
                 symbol=sym,

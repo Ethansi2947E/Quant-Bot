@@ -20,6 +20,7 @@ from datetime import datetime
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib # Added TA-Lib import
+from src.utils.patterns_luxalgo import add_luxalgo_patterns
 
 class PriceActionSRStrategy(SignalGenerator):
     """
@@ -302,57 +303,45 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold_85}, 70th percentile={threshold_70}, 1.5x mean={1.5*avg_vol if not np.isnan(avg_vol) else 'N/A'} - NO SPIKE")
             return False
 
-    def is_valid_volume_spike(self, candle, volume_spike: bool, df: pd.DataFrame, direction: str) -> bool:
-        # If volume spike already failed by primary _volume_spike checks, try more lenient validation
-        if not volume_spike:
-            # Enhanced fallback: check if volume is at least above average with good pattern
-            if df is not None and 'tick_volume' in df.columns:
-                current_vol = candle.get('tick_volume', 0)
-                avg_vol = df['tick_volume'].rolling(20, min_periods=5).mean().iloc[-1]
-                
-                if not np.isnan(avg_vol) and current_vol > avg_vol:
-                    # Above average volume - check for excellent pattern
-                    body = abs(candle['close'] - candle['open'])
-                    total_range = candle['high'] - candle['low']
-                    
-                    if total_range > 0:
-                        body_ratio = body / total_range
-                        # Very strict pattern requirement for low volume
-                        if body_ratio > 0.7:  # Strong body dominance
-                            self.logger.debug(f"[VolumeWick] Low volume accepted due to excellent pattern: body_ratio={body_ratio:.2f}")
-                            return True
-            
-            self.logger.debug("[VolumeWick] Volume spike failed and no pattern override available")
+    def is_valid_volume_spike(self, df: pd.DataFrame) -> bool:
+        if 'volume' not in df.columns:
+            self.logger.debug("[Volume] 'volume' column missing in DataFrame.")
             return False
-            
-        # Original logic for when volume spike IS detected (volume_spike == True)
-        # Now made directionally sensitive
-        body = abs(candle['close'] - candle['open'])
-        total_range = candle['high'] - candle['low']
+        current_volume = df['volume'].iloc[-1]
+        vol_mean = df['volume'].rolling(20).mean().iloc[-1]
+        if vol_mean == 0 or np.isnan(vol_mean):
+            self.logger.debug("[Volume] Rolling mean is zero or NaN.")
+            return False
+        # --- Simple, robust volume spike definition ---
+        is_spike = current_volume > 2 * vol_mean
+        if not is_spike:
+            self.logger.debug(f"[Volume] No spike: current={current_volume}, mean={vol_mean}")
+            return False
+        # --- Candle shape analysis after spike confirmed ---
+        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+        total_range = df['high'].iloc[-1] - df['low'].iloc[-1]
         if total_range == 0:
-            self.logger.debug("[VolumeWick] Total range is zero, cannot calculate wick ratios")
+            self.logger.debug(f"[Volume] Total range is zero, cannot compute wick ratios.")
             return False
-            
-        upper_wick = candle['high'] - max(candle['open'], candle['close'])
-        lower_wick = min(candle['open'], candle['close']) - candle['low']
-        upper_wick_ratio = upper_wick / total_range if total_range > 0 else 0
-        lower_wick_ratio = lower_wick / total_range if total_range > 0 else 0
-
-        # General check for candle proportion: sum of wicks not too large compared to body
-        combined_valid_proportion = body > 0 and ((upper_wick + lower_wick) / body < 2.0)
-        self.logger.debug(f"[VolumeWick] Stats: upper_ratio={upper_wick_ratio:.2f}, lower_ratio={lower_wick_ratio:.2f}, body={body:.5f}, combined_proportion_ok={combined_valid_proportion}")
-
-        if direction == 'buy':
-            # For a buy signal on volume spike, a small upper wick is preferred (less selling pressure from above).
-            directional_wick_ok = upper_wick_ratio < 0.5 
-            self.logger.debug(f"[VolumeWick] Buy signal check: upper_wick_ratio={upper_wick_ratio:.2f} (must be < 0.5 for directional_wick_ok). Result: {directional_wick_ok or combined_valid_proportion}")
-            return directional_wick_ok or combined_valid_proportion
-        else: # direction == 'sell'
-            # For a sell signal on volume spike, a small lower wick is preferred (less buying pressure from below).
-            directional_wick_ok = lower_wick_ratio < 0.5
-            self.logger.debug(f"[VolumeWick] Sell signal check: lower_wick_ratio={lower_wick_ratio:.2f} (must be < 0.5 for directional_wick_ok). Result: {directional_wick_ok or combined_valid_proportion}")
-            return directional_wick_ok or combined_valid_proportion
-
+        wick = (df['high'].iloc[-1] - df['low'].iloc[-1]) - body
+        wick_body_ratio = wick / body if body > 0 else 0
+        upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
+        lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
+        upper_wick_ratio = upper_wick / total_range
+        lower_wick_ratio = lower_wick / total_range
+        # --- Simple pattern: prefer small wick/body ratio for conviction ---
+        if wick_body_ratio < 0.5:
+            valid = True
+        else:
+            valid = False
+        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, is_spike={is_spike}, wick_body_ratio={wick_body_ratio:.3f}, valid={valid}")
+        # --- VSA-style enhancement (future): ---
+        # High volume + small range + close in middle: possible absorption/indecision
+        # High volume + small range + close near low (in uptrend): selling pressure
+        # Low volume + large range (breakout): weak breakout, likely to fail
+        # These can be added as advanced filters if needed.
+        return valid
+    
     def calculate_stop_loss(self, zone: float, direction: str, candle_extremity: float, buffer: float = 0.001) -> float:
         if direction == "buy":
             # SL for buy is below the lower of the zone or the candle's low
@@ -641,22 +630,6 @@ class PriceActionSRStrategy(SignalGenerator):
         return periods
 
     def is_uptrend(self, df: pd.DataFrame) -> bool:
-        # Use TA-Lib ADX for trend detection if available, fallback to original logic
-        if df is None or len(df) < self.trend_lookback:
-            return False
-        try:
-            high = np.asarray(df['high'].values, dtype=np.float64)
-            low = np.asarray(df['low'].values, dtype=np.float64)
-            close = np.asarray(df['close'].values, dtype=np.float64)
-            adx = talib.ADX(high, low, close, timeperiod=14)
-            plus_di = talib.PLUS_DI(high, low, close, timeperiod=14)
-            minus_di = talib.MINUS_DI(high, low, close, timeperiod=14)
-            # Uptrend if ADX > 20 and +DI > -DI
-            if adx[-1] > 20 and plus_di[-1] > minus_di[-1]:
-                self.logger.debug(f"[TrendCheck][TA-Lib] Uptrend detected: ADX={adx[-1]:.2f}, +DI={plus_di[-1]:.2f}, -DI={minus_di[-1]:.2f}")
-                return True
-        except Exception as e:
-            self.logger.debug(f"[TrendCheck][TA-Lib] Exception: {e}")
         # Fallback to original logic
         highs = df['high'].iloc[-self.trend_lookback:]
         lows = df['low'].iloc[-self.trend_lookback:]
@@ -665,23 +638,7 @@ class PriceActionSRStrategy(SignalGenerator):
         self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}")
         return higher_high and higher_low
 
-    def is_downtrend(self, df: pd.DataFrame) -> bool:
-        # Use TA-Lib ADX for trend detection if available, fallback to original logic
-        if df is None or len(df) < self.trend_lookback:
-            return False
-        try:
-            high = np.asarray(df['high'].values, dtype=np.float64)
-            low = np.asarray(df['low'].values, dtype=np.float64)
-            close = np.asarray(df['close'].values, dtype=np.float64)
-            adx = talib.ADX(high, low, close, timeperiod=14)
-            plus_di = talib.PLUS_DI(high, low, close, timeperiod=14)
-            minus_di = talib.MINUS_DI(high, low, close, timeperiod=14)
-            # Downtrend if ADX > 20 and -DI > +DI
-            if adx[-1] > 20 and minus_di[-1] > plus_di[-1]:
-                self.logger.debug(f"[TrendCheck][TA-Lib] Downtrend detected: ADX={adx[-1]:.2f}, +DI={plus_di[-1]:.2f}, -DI={minus_di[-1]:.2f}")
-                return True
-        except Exception as e:
-            self.logger.debug(f"[TrendCheck][TA-Lib] Exception: {e}")
+    def is_downtrend(self, df: pd.DataFrame) -> bool:        
         # Fallback to original logic
         highs = df['high'].iloc[-self.trend_lookback:]
         lows = df['low'].iloc[-self.trend_lookback:]
@@ -745,29 +702,18 @@ class PriceActionSRStrategy(SignalGenerator):
             if 'tick_volume' not in df_primary.columns:
                 df_primary['tick_volume'] = df_primary.get('volume', 1)
 
-            # Prepare data for TA-Lib
-            open_prices = np.array(df_primary['open'].values, dtype=np.float64)
-            high_prices = np.array(df_primary['high'].values, dtype=np.float64)
-            low_prices = np.array(df_primary['low'].values, dtype=np.float64)
-            close_prices = np.array(df_primary['close'].values, dtype=np.float64)
+            # Add LuxAlgo-style pattern columns
+            df_primary = add_luxalgo_patterns(df_primary)
 
-            # Calculate TA-Lib patterns
-            hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
-            shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            engulfing_talib = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
-            harami_talib = talib.CDLHARAMI(open_prices, high_prices, low_prices, close_prices)
-            morning_star_talib = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            evening_star_talib = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
-
-            # Convert TA-Lib output to boolean Series, aligned with df_primary.index
-            hammer_series = pd.Series(hammer_talib > 0, index=df_primary.index)
-            shooting_star_series = pd.Series(shooting_star_talib < 0, index=df_primary.index)
-            bullish_engulfing_series = pd.Series(engulfing_talib > 0, index=df_primary.index)
-            bearish_engulfing_series = pd.Series(engulfing_talib < 0, index=df_primary.index)
-            bullish_harami_series = pd.Series(harami_talib > 0, index=df_primary.index)
-            bearish_harami_series = pd.Series(harami_talib < 0, index=df_primary.index)
-            morning_star_series = pd.Series(morning_star_talib > 0, index=df_primary.index)
-            evening_star_series = pd.Series(evening_star_talib < 0, index=df_primary.index)
+            # Use LuxAlgo pattern columns instead of TA-Lib
+            hammer_series = df_primary['hammer']
+            shooting_star_series = df_primary['shooting_star']
+            bullish_engulfing_series = df_primary['bullish_engulfing']
+            bearish_engulfing_series = df_primary['bearish_engulfing']
+            bullish_harami_series = df_primary['bullish_harami']
+            bearish_harami_series = df_primary['bearish_harami']
+            morning_star_series = df_primary['morning_star']
+            evening_star_series = df_primary['evening_star']
 
             zones = self.get_sr_zones(df_primary)
             symbol_signals = []
@@ -808,7 +754,7 @@ class PriceActionSRStrategy(SignalGenerator):
                     wick = self._wick_rejection(candle, direction)
                     vol_spike = self._volume_spike(df_primary, process_idx)
                     # Pass direction to is_valid_volume_spike
-                    vol_wick_ok = self.is_valid_volume_spike(candle, vol_spike, df_primary, direction)
+                    vol_wick_ok = self.is_valid_volume_spike(df_primary)
                     # Granular logging for all filters
                     logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern} wick={wick} vol_spike={vol_spike} vol_wick_ok={vol_wick_ok}")
                     if not in_zone:

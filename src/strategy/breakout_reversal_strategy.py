@@ -29,6 +29,7 @@ import time
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib # Added talib import
+from src.utils.patterns_luxalgo import add_luxalgo_patterns
 
 # Strategy parameter profiles for different timeframes
 TIMEFRAME_PROFILES = {
@@ -764,6 +765,11 @@ class BreakoutReversalStrategy(SignalGenerator):
                 higher_raw = market_data[symbol].get(self.higher_timeframe)
                 higher_df = _to_dataframe(higher_raw, self.higher_timeframe)
                 higher_df = _ensure_datetime_index(higher_df, self.higher_timeframe)
+
+            # Add LuxAlgo-style pattern columns
+            primary_df = add_luxalgo_patterns(primary_df)
+            if higher_df is not None:
+                higher_df = add_luxalgo_patterns(higher_df)
             
             # Check if DataFrames are None or empty
             if primary_df is None or len(primary_df) == 0 or higher_df is None or len(higher_df) == 0:
@@ -2049,15 +2055,20 @@ class BreakoutReversalStrategy(SignalGenerator):
         atr_value = self._compute_atr(df)
         volume_threshold = self._compute_volume_threshold(df)
         
-        # Ensure TALib patterns are calculated on the DataFrame
-        # These will be Series aligned with df.index
-        open_p, high_p, low_p, close_p = df['open'], df['high'], df['low'], df['close']
-        hammer_series = pd.Series([float(x) for x in talib.CDLHAMMER(open_p, high_p, low_p, close_p)], index=df.index)
-        shooting_star_series = pd.Series([float(x) for x in talib.CDLSHOOTINGSTAR(open_p, high_p, low_p, close_p)], index=df.index)
-        engulfing_series = pd.Series([float(x) for x in talib.CDLENGULFING(open_p, high_p, low_p, close_p)], index=df.index)
-        morning_star_series = pd.Series([float(x) for x in talib.CDLMORNINGSTAR(open_p, high_p, low_p, close_p)], index=df.index)
-        evening_star_series = pd.Series([float(x) for x in talib.CDLEVENINGSTAR(open_p, high_p, low_p, close_p)], index=df.index)
-        
+        # Use LuxAlgo pattern columns
+        hammer_series = df['hammer']
+        shooting_star_series = df['shooting_star']
+        bullish_engulfing_series = df['bullish_engulfing']
+        bearish_engulfing_series = df['bearish_engulfing']
+        bullish_harami_series = df['bullish_harami']
+        bearish_harami_series = df['bearish_harami']
+        morning_star_series = df['morning_star']
+        evening_star_series = df['evening_star']
+        white_marubozu_series = df['white_marubozu']
+        black_marubozu_series = df['black_marubozu']
+        pin_bar_series = df['pin_bar']
+        inside_bar_series = df['inside_bar']
+
         start_idx = max(1, len(df) - self.candles_to_check -1) # Ensure we have at least one prior bar for setup
         end_idx = len(df) -1 # Current candle is T+1 (confirmation)
 
@@ -2135,12 +2146,12 @@ class BreakoutReversalStrategy(SignalGenerator):
                     if not is_false_break_rejection: # Prioritize false break detection
                         if expected_direction == 'buy':
                             if hammer_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Hammer"
-                            elif engulfing_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Bullish Engulfing"
+                            elif bullish_engulfing_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Bullish Engulfing"
                             elif morning_star_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Morning Star"
                             # elif harami_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Bullish Harami" 
                         else: # expected_direction == 'sell'
                             if shooting_star_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Shooting Star"
-                            elif engulfing_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Bearish Engulfing"
+                            elif bearish_engulfing_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Bearish Engulfing"
                             elif evening_star_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Evening Star"
                             # elif harami_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Bearish Harami"
                     

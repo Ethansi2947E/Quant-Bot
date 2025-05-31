@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import talib
 
 def get_trend_flags(df: pd.DataFrame, length: int = 14) -> tuple:
     """Return uptrend and downtrend boolean Series using a stochastic-like oscillator."""
@@ -195,5 +196,6 @@ def add_luxalgo_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df['morning_star'] = detect_morning_star(df, downtrend, atr)
     df['evening_star'] = detect_evening_star(df, uptrend, atr)
     df['inside_bar'] = detect_inside_bar(df)
+    df['pin_bar'] = detect_pin_bar(df)
     # Add more as needed...
     return df 

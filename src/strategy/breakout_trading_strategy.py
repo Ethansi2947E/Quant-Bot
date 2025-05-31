@@ -23,6 +23,7 @@ from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib
 from talib._ta_lib import MA_Type
+from src.utils.patterns_luxalgo import add_luxalgo_patterns
 # import custom_patterns as cp # This line was incorrectly added and will be removed
 
 
@@ -446,6 +447,9 @@ class BreakoutTradingStrategy(SignalGenerator):
                 logger.warning(f"[{self.name}/{sym}] DataFrame for '{self.primary_timeframe}' is empty. Skipping.")
                 continue
 
+            # Add LuxAlgo-style pattern columns
+            df = add_luxalgo_patterns(df)
+
             logger.debug(f"[{self.name}/{sym}] Initial DataFrame shape for {self.primary_timeframe}: {df.shape}")
 
             if 'tick_volume' not in df.columns:
@@ -481,39 +485,21 @@ class BreakoutTradingStrategy(SignalGenerator):
                 ]
                 sample_log_cols = [col for col in indicator_cols_to_log if col in df.columns]
                 logger.debug(f"[{self.name}/{sym}] Latest data with indicators: {df[sample_log_cols].iloc[-1].to_dict()}")
+                
+            # Use LuxAlgo pattern columns
+            hammer_series = df['hammer']
+            shooting_star_series = df['shooting_star']
+            bullish_engulfing_series = df['bullish_engulfing']
+            bearish_engulfing_series = df['bearish_engulfing']
+            bullish_harami_series = df['bullish_harami']
+            bearish_harami_series = df['bearish_harami']
+            morning_star_series = df['morning_star']
+            evening_star_series = df['evening_star']
+            white_marubozu_series = df['white_marubozu']
+            black_marubozu_series = df['black_marubozu']
+            pin_bar_series = df['pin_bar']
+            inside_bar_series = df['inside_bar']
 
-
-            # Candlestick patterns
-            logger.debug(f"[{self.name}/{sym}] Detecting candlestick patterns...")
-
-            # Prepare data for TA-Lib
-            open_prices = np.array(df['open'].values, dtype=np.float64)
-            high_prices = np.array(df['high'].values, dtype=np.float64)
-            low_prices = np.array(df['low'].values, dtype=np.float64)
-            close_prices = np.array(df['close'].values, dtype=np.float64)
-
-            # Calculate TA-Lib patterns (vectorized)
-            hammer_talib = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
-            shooting_star_talib = talib.CDLSHOOTINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            engulfing_talib = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
-            harami_talib = talib.CDLHARAMI(open_prices, high_prices, low_prices, close_prices)
-            morning_star_talib = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            evening_star_talib = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            # Standard TALib does not have a direct inside bar, so keep cp for that or implement manually if cp is removed
-            inside_bar = BreakoutTradingStrategy._detect_inside_bar_vectorized(df)
-
-            # Convert TA-Lib output to boolean Series, aligned with df.index
-            hammer_series = pd.Series(hammer_talib > 0, index=df.index)
-            shooting_star_series = pd.Series(shooting_star_talib < 0, index=df.index)
-            bullish_engulfing_series = pd.Series(engulfing_talib > 0, index=df.index)
-            bearish_engulfing_series = pd.Series(engulfing_talib < 0, index=df.index)
-            morning_star_series = pd.Series(morning_star_talib > 0, index=df.index)
-            evening_star_series = pd.Series(evening_star_talib < 0, index=df.index)
-
-            # Custom patterns from cp remain
-            strong_reversal_buy = BreakoutTradingStrategy._detect_strong_reversal_candle_vectorized(df, direction='bullish')
-            strong_reversal_sell = BreakoutTradingStrategy._detect_strong_reversal_candle_vectorized(df, direction='bearish')
-            
             idx = len(df) - 1 # Current bar index for decision making
 
             # Get current pattern status
@@ -521,13 +507,14 @@ class BreakoutTradingStrategy(SignalGenerator):
             current_shooting_star = shooting_star_series.iloc[idx] if idx < len(shooting_star_series) else False
             current_bullish_engulfing = bullish_engulfing_series.iloc[idx] if idx < len(bullish_engulfing_series) else False
             current_bearish_engulfing = bearish_engulfing_series.iloc[idx] if idx < len(bearish_engulfing_series) else False
-            current_inside_bar = inside_bar.iloc[idx] if idx < len(inside_bar) else False
             current_morning_star = morning_star_series.iloc[idx] if idx < len(morning_star_series) else False
             current_evening_star = evening_star_series.iloc[idx] if idx < len(evening_star_series) else False
-            current_strong_reversal_buy = strong_reversal_buy.iloc[idx] if idx < len(strong_reversal_buy) else False
-            current_strong_reversal_sell = strong_reversal_sell.iloc[idx] if idx < len(strong_reversal_sell) else False
+            current_white_marubozu = white_marubozu_series.iloc[idx] if idx < len(white_marubozu_series) else False
+            current_black_marubozu = black_marubozu_series.iloc[idx] if idx < len(black_marubozu_series) else False
+            current_pin_bar = pin_bar_series.iloc[idx] if idx < len(pin_bar_series) else False
+            current_inside_bar = inside_bar_series.iloc[idx] if idx < len(inside_bar_series) else False
 
-            logger.debug(f"[{self.name}/{sym}] Patterns at idx {idx}: Hammer={current_hammer}, SS={current_shooting_star}, BullEng={current_bullish_engulfing}, BearEng={current_bearish_engulfing}, Inside={current_inside_bar}, MS={current_morning_star}, ES={current_evening_star}, SRBuy={current_strong_reversal_buy}, SRSell={current_strong_reversal_sell}")
+            logger.debug(f"[{self.name}/{sym}] Patterns at idx {idx}: Hammer={current_hammer}, SS={current_shooting_star}, BullEng={current_bullish_engulfing}, BearEng={current_bearish_engulfing}, Inside={current_inside_bar}, MS={current_morning_star}, ES={current_evening_star}, WM={current_white_marubozu}, BM={current_black_marubozu}, PB={current_pin_bar}")
             
             # Determine entry bar and confirmation bar indices
             # Adaptive wait_for_confirmation_candle based on volatility
