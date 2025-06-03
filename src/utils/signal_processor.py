@@ -1284,6 +1284,12 @@ class SignalProcessor:
             confluence_score_pct = confluence_score * 100
             volume_score_pct = volume_score * 100
             recency_score_pct = recency_score * 100
+            # Use detailed_reasoning if present and non-empty, else fallback to reason
+            detailed_reasoning = signal.get('detailed_reasoning', [])
+            if detailed_reasoning and isinstance(detailed_reasoning, list):
+                analysis_text = "\n".join(str(r) for r in detailed_reasoning)
+            else:
+                analysis_text = signal.get('reason', 'N/A')
             trade_details = (
                 f"🔸 Strategy: {strategy_name}\n"
                 f"🔹 Symbol: {symbol}\n"
@@ -1298,7 +1304,7 @@ class SignalProcessor:
                 f"• Confluence: {confluence_score_pct:.1f}% (40% weight)\n"
                 f"• Volume: {volume_score_pct:.1f}% (10% weight)\n"
                 f"• Recency: {recency_score_pct:.1f}% (10% weight)\n\n"
-                f"📝 Analysis:\n{reason_text}"
+                f"📝 Analysis:\n{analysis_text}"
             )
         elif signal.get('score_01') is not None:
             # PriceActionSRStrategy format with score_01 and score_breakdown

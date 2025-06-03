@@ -1,14 +1,73 @@
 import numpy as np
 import pandas as pd
-import talib
 
-def get_trend_flags(df: pd.DataFrame, length: int = 14) -> tuple:
-    """Return uptrend and downtrend boolean Series using a stochastic-like oscillator."""
-    stoch = (df['close'] - df['close'].rolling(length).min()) / (df['close'].rolling(length).max() - df['close'].rolling(length).min())
-    stoch = stoch.fillna(0.5) * 100
-    uptrend = stoch > 50
-    downtrend = stoch < 50
-    return uptrend, downtrend
+# Pattern Classifications by Directional Bias
+BULLISH_PATTERNS = [
+    'hammer',
+    'bullish_engulfing',
+    'white_marubozu',
+    'bullish_harami',
+    'morning_star',
+    'pin_bar'  # Context (e.g., at support, long lower wick) makes it bullish
+]
+
+BEARISH_PATTERNS = [
+    'shooting_star',
+    'hanging_man',
+    'bearish_engulfing',
+    'black_marubozu',
+    'bearish_harami',
+    'evening_star',
+    'pin_bar'  # Context (e.g., at resistance, long upper wick) makes it bearish
+]
+
+NEUTRAL_PATTERNS = [
+    'inside_bar',
+    'inverted_hammer'  # Can be a reversal, but often needs more confirmation.
+                       # Its position as neutral implies it's a warning/setup candle.
+]
+
+# All patterns combined for easy iteration
+ALL_PATTERNS = BULLISH_PATTERNS + BEARISH_PATTERNS + NEUTRAL_PATTERNS
+
+def get_pattern_type(pattern_name: str) -> str:
+    """
+    Get the classification type of a pattern.
+    
+    Args:
+        pattern_name (str): Name of the pattern
+        
+    Returns:
+        str: 'bullish', 'bearish', 'neutral', or 'unknown'
+    """
+    if pattern_name in BULLISH_PATTERNS:
+        return 'bullish'
+    elif pattern_name in BEARISH_PATTERNS:
+        return 'bearish'
+    elif pattern_name in NEUTRAL_PATTERNS:
+        return 'neutral'
+    else:
+        return 'unknown'
+
+def filter_patterns_by_bias(detected_patterns: list, bias: str) -> list:
+    """
+    Filter detected patterns by their directional bias.
+    
+    Args:
+        detected_patterns (list): List of detected pattern names
+        bias (str): 'bullish', 'bearish', or 'neutral'
+        
+    Returns:
+        list: Filtered patterns matching the bias
+    """
+    if bias.lower() == 'bullish':
+        return [p for p in detected_patterns if p in BULLISH_PATTERNS]
+    elif bias.lower() == 'bearish':
+        return [p for p in detected_patterns if p in BEARISH_PATTERNS]
+    elif bias.lower() == 'neutral':
+        return [p for p in detected_patterns if p in NEUTRAL_PATTERNS]
+    else:
+        return detected_patterns
 
 def get_atr(df: pd.DataFrame, period: int = 20) -> pd.Series:
     """Return ATR/2 as in the LuxAlgo script."""
@@ -21,83 +80,83 @@ def get_atr(df: pd.DataFrame, period: int = 20) -> pd.Series:
     atr = tr.rolling(period).mean() / 2
     return atr
 
-def detect_hammer(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_hammer(df: pd.DataFrame) -> pd.Series:
     o, c, h, l = df['open'], df['close'], df['high'], df['low']
     d = (c - o).abs()
-    return (
-        downtrend &
+    condition = (
         ((np.minimum(o, c) - l) > 2 * d) &
         ((h - np.maximum(c, o)) < d / 4)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_inverted_hammer(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_inverted_hammer(df: pd.DataFrame) -> pd.Series:
     o, c, h, l = df['open'], df['close'], df['high'], df['low']
     d = (c - o).abs()
-    return (
-        downtrend &
+    condition = (
         ((h - np.maximum(o, c)) > 2 * d) &
         ((np.minimum(c, o) - l) < d / 4)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_shooting_star(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_shooting_star(df: pd.DataFrame) -> pd.Series:
     o, c, h, l = df['open'], df['close'], df['high'], df['low']
     d = (c - o).abs()
-    return (
-        uptrend &
+    condition = (
         ((h - np.maximum(o, c)) > 2 * d) &
         ((np.minimum(c, o) - l) < d / 4)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_hanging_man(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_hanging_man(df: pd.DataFrame) -> pd.Series:
     o, c, h, l = df['open'], df['close'], df['high'], df['low']
     d = (c - o).abs()
-    return (
-        uptrend &
+    condition = (
         ((np.minimum(o, c) - l) > 2 * d) &
         ((h - np.maximum(c, o)) < d / 4)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_bullish_engulfing(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_bullish_engulfing(df: pd.DataFrame, atr: pd.Series) -> pd.Series:
     c, o = df['close'], df['open']
     d = (c - o).abs()
-    return (
-        downtrend &
+    condition = (
         (c > o) &
         (c.shift(1) < o.shift(1)) &
         (c > o.shift(1)) &
         (d > atr)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_bearish_engulfing(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_bearish_engulfing(df: pd.DataFrame, atr: pd.Series) -> pd.Series:
     c, o = df['close'], df['open']
     d = (c - o).abs()
-    return (
-        uptrend &
+    condition = (
         (c < o) &
         (c.shift(1) > o.shift(1)) &
         (c < o.shift(1)) &
         (d > atr)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_white_marubozu(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_white_marubozu(df: pd.DataFrame, atr: pd.Series) -> pd.Series:
     c, o, h, l = df['close'], df['open'], df['high'], df['low']
     d = (c - o).abs()
-    return (
+    condition = (
         (c > o) &
         ((h - np.maximum(o, c) + np.minimum(o, c) - l) < d / 10) &
-        (d > atr) &
-        downtrend.shift(1)
+        (d > atr)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_black_marubozu(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_black_marubozu(df: pd.DataFrame, atr: pd.Series) -> pd.Series:
     c, o, h, l = df['close'], df['open'], df['high'], df['low']
     d = (c - o).abs()
-    return (
+    condition = (
         (c < o) &
         ((h - np.maximum(o, c) + np.minimum(o, c) - l) < d / 10) &
-        (d > atr) &
-        uptrend.shift(1)
+        (d > atr)
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
 # Add any additional patterns from price_action_sr_strategy.py that are not in the LuxAlgo script, using similar logic.
 # For example, if you have a pin bar or inside bar, add them here with vectorized logic.
@@ -111,91 +170,89 @@ def detect_pin_bar(df: pd.DataFrame) -> pd.Series:
     total_range = h - l
     min_wick_ratio = 1.5
     max_body_ratio = 0.7
-    bullish = (lower_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
-    bearish = (upper_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
-    return pd.Series(bullish | bearish, index=df.index)
+    # Ensure total_range is not zero to avoid division by zero or NaN issues
+    valid_range = total_range > 0
+    bullish = valid_range & (lower_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
+    bearish = valid_range & (upper_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
+    # Ensure that the result is a boolean series even if NaNs are produced by conditions
+    return pd.Series(bullish | bearish, index=df.index).fillna(False)
 
-# Add more as needed...
-
-def detect_bullish_harami(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_bullish_harami(df: pd.DataFrame) -> pd.Series:
     # Bullish Harami: Downtrend, previous candle is long bearish, current is small bullish inside previous body
     c, o = df['close'], df['open']
     d = (c - o).abs()
     c1, o1 = c.shift(1), o.shift(1)
     d1 = (c1 - o1).abs()
-    return (
-        downtrend &
+    condition = (
         (c1 < o1) &  # Previous candle bearish
-        (d1 > atr) &  # Previous candle long
         (c > o) &  # Current candle bullish
         (c < o1) & (o > c1) &  # Current body inside previous body
         (d < d1)  # Current body smaller
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_bearish_harami(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_bearish_harami(df: pd.DataFrame) -> pd.Series:
     # Bearish Harami: Uptrend, previous candle is long bullish, current is small bearish inside previous body
     c, o = df['close'], df['open']
     d = (c - o).abs()
     c1, o1 = c.shift(1), o.shift(1)
     d1 = (c1 - o1).abs()
-    return (
-        uptrend &
+    condition = (
         (c1 > o1) &  # Previous candle bullish
-        (d1 > atr) &  # Previous candle long
         (c < o) &  # Current candle bearish
         (c > o1) & (o < c1) &  # Current body inside previous body
         (d < d1)  # Current body smaller
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_morning_star(df: pd.DataFrame, downtrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_morning_star(df: pd.DataFrame) -> pd.Series:
     # Morning Star: Downtrend, three candles: long bearish, small body (gap down), long bullish closing into first
     c, o = df['close'], df['open']
     d = (c - o).abs()
     c1, o1, d1 = c.shift(1), o.shift(1), (c.shift(1) - o.shift(1)).abs()
     c2, o2, d2 = c.shift(2), o.shift(2), (c.shift(2) - o.shift(2)).abs()
-    return (
-        downtrend.shift(2) &
-        (c2 < o2) & (d2 > atr.shift(2)) &  # First candle: long bearish
+    condition = (
+        (c2 < o2) &  # First candle: long bearish
         (d1 < d2) &  # Second candle: small body
-        (c > o) & (d > atr) &  # Third candle: long bullish
+        (c > o) &  # Third candle: long bullish
         (c > ((o2 + c2) / 2))  # Third closes into first candle's body
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
-def detect_evening_star(df: pd.DataFrame, uptrend: pd.Series, atr: pd.Series) -> pd.Series:
+def detect_evening_star(df: pd.DataFrame) -> pd.Series:
     # Evening Star: Uptrend, three candles: long bullish, small body (gap up), long bearish closing into first
     c, o = df['close'], df['open']
     d = (c - o).abs()
     c1, o1, d1 = c.shift(1), o.shift(1), (c.shift(1) - o.shift(1)).abs()
     c2, o2, d2 = c.shift(2), o.shift(2), (c.shift(2) - o.shift(2)).abs()
-    return (
-        uptrend.shift(2) &
-        (c2 > o2) & (d2 > atr.shift(2)) &  # First candle: long bullish
+    condition = (
+        (c2 > o2) &  # First candle: long bullish
         (d1 < d2) &  # Second candle: small body
-        (c < o) & (d > atr) &  # Third candle: long bearish
+        (c < o) &  # Third candle: long bearish
         (c < ((o2 + c2) / 2))  # Third closes into first candle's body
     )
+    return pd.Series(condition, index=df.index).fillna(False)
 
 def detect_inside_bar(df: pd.DataFrame) -> pd.Series:
     # Inside Bar: Current high < previous high AND current low > previous low
-    return (df['high'] < df['high'].shift(1)) & (df['low'] > df['low'].shift(1))
+    condition = (df['high'] < df['high'].shift(1)) & (df['low'] > df['low'].shift(1))
+    return pd.Series(condition, index=df.index).fillna(False)
 
 def add_luxalgo_patterns(df: pd.DataFrame) -> pd.DataFrame:
     """Add all LuxAlgo-style pattern columns to the DataFrame."""
     atr = get_atr(df)
-    uptrend, downtrend = get_trend_flags(df)
-    df['hammer'] = detect_hammer(df, downtrend, atr)
-    df['inverted_hammer'] = detect_inverted_hammer(df, downtrend, atr)
-    df['shooting_star'] = detect_shooting_star(df, uptrend, atr)
-    df['hanging_man'] = detect_hanging_man(df, uptrend, atr)
-    df['bullish_engulfing'] = detect_bullish_engulfing(df, downtrend, atr)
-    df['bearish_engulfing'] = detect_bearish_engulfing(df, uptrend, atr)
-    df['white_marubozu'] = detect_white_marubozu(df, downtrend, atr)
-    df['black_marubozu'] = detect_black_marubozu(df, uptrend, atr)
-    df['bullish_harami'] = detect_bullish_harami(df, downtrend, atr)
-    df['bearish_harami'] = detect_bearish_harami(df, uptrend, atr)
-    df['morning_star'] = detect_morning_star(df, downtrend, atr)
-    df['evening_star'] = detect_evening_star(df, uptrend, atr)
+    df['hammer'] = detect_hammer(df)
+    df['inverted_hammer'] = detect_inverted_hammer(df)
+    df['shooting_star'] = detect_shooting_star(df)
+    df['hanging_man'] = detect_hanging_man(df)
+    df['bullish_engulfing'] = detect_bullish_engulfing(df, atr)
+    df['bearish_engulfing'] = detect_bearish_engulfing(df, atr)
+    df['white_marubozu'] = detect_white_marubozu(df, atr)
+    df['black_marubozu'] = detect_black_marubozu(df, atr)
+    df['bullish_harami'] = detect_bullish_harami(df)
+    df['bearish_harami'] = detect_bearish_harami(df)
+    df['morning_star'] = detect_morning_star(df)
+    df['evening_star'] = detect_evening_star(df)
     df['inside_bar'] = detect_inside_bar(df)
     df['pin_bar'] = detect_pin_bar(df)
-    # Add more as needed...
     return df 

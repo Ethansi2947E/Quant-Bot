@@ -14,7 +14,132 @@ from loguru import logger
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+import backtrader as bt
+import asyncio # For running async strategy methods
 from src.mt5_handler import MT5Handler
+
+class BacktraderStrategyAdapter(bt.Strategy):
+    params = (
+        ('original_strategy', None),
+        ('data_feed_map', None), # Maps data feed index to (symbol, tf, original_df_ref)
+        ('strategy_kwargs', None), # kwargs for generate_signals
+    )
+
+    def __init__(self):
+        self.original_strategy = self.p.original_strategy
+        self.trade_history = []
+        # Create a new event loop for this strategy instance if original_strategy.generate_signals is async
+        if asyncio.iscoroutinefunction(self.original_strategy.generate_signals):
+            self.loop = asyncio.new_event_loop()
+        else:
+            self.loop = None
+
+    def log(self, txt, dt=None):
+        dt = dt or self.datas[0].datetime.date(0)
+        logger.info(f'{dt.isoformat()} {txt}')
+
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f'BUY EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
+            else: # Sell
+                self.log(f'SELL EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log(f'Order Canceled/Margin/Rejected: {order.Status[order.status]}')
+
+    def notify_trade(self, trade):
+        if not trade.isclosed:
+            return
+        self.log(f'OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}')
+        self.trade_history.append({
+            'symbol': trade.data._name.split('_')[0], # Assuming name is "SYMBOL_TF"
+            'direction': 'buy' if trade.history[0].event.order.isbuy() else 'sell',
+            'entry_price': trade.price,
+            'exit_price': trade.history[-1].event.price, # Last event price should be exit
+            'size': trade.size,
+            'pnl': trade.pnl,
+            'pnl_comm': trade.pnlcomm,
+            'open_dt': bt.num2date(trade.history[0].status.dt).isoformat(),
+            'close_dt': bt.num2date(trade.history[-1].status.dt).isoformat(),
+        })
+
+    def next(self):
+        market_data = {}
+        current_max_dt = None
+
+        # Determine the current maximum datetime across all feeds for this step
+        for data_feed in self.datas:
+            try:
+                # Check if data_feed.datetime is valid and has data
+                if len(data_feed.datetime) > 0 :
+                    dt_obj = data_feed.datetime.datetime(0)
+                    if current_max_dt is None or dt_obj > current_max_dt:
+                        current_max_dt = dt_obj
+                else: # No data yet for this feed
+                    return 
+            except IndexError: # datetime buffer may not be populated yet
+                return
+
+        if current_max_dt is None: # Should not happen if above checks pass
+            return
+
+        # Construct market_data for the original strategy
+        for i, data_feed in enumerate(self.datas):
+            symbol, tf, original_df_ref = self.p.data_feed_map[i]
+            
+            # Slice the original DataFrame up to the current_max_dt
+            # This ensures all dataframes in market_data are aligned to the same "current time"
+            df_slice = original_df_ref[original_df_ref.index <= current_max_dt].copy()
+
+            if symbol not in market_data:
+                market_data[symbol] = {}
+            market_data[symbol][tf] = df_slice
+
+        # Call the original strategy's signal generation
+        strategy_kwargs = self.p.strategy_kwargs or {}
+        if self.loop: # If original strategy is async
+            signals = self.loop.run_until_complete(
+                self.original_strategy.generate_signals(market_data=market_data, **strategy_kwargs)
+            )
+        else: # If original strategy is sync
+            signals = self.original_strategy.generate_signals(market_data=market_data, **strategy_kwargs)
+
+        # Process signals
+        for signal in signals:
+            symbol_signal = signal.get("symbol")
+            direction = signal.get("direction")
+            entry_price = signal.get("entry_price") # May not be used by market order
+            stop_loss = signal.get("stop_loss")
+            take_profit = signal.get("take_profit")
+            size = signal.get("size", 1.0) # Default size if not specified
+
+            # Find the correct data feed for the signal's symbol (assuming primary timeframe for orders)
+            target_data_feed = None
+            for i, data_feed_obj in enumerate(self.datas):
+                s, _, _ = self.p.data_feed_map[i]
+                # TODO: This assumes orders are placed on the first data feed for that symbol.
+                # More robust mapping might be needed if strategies generate signals for specific timeframes.
+                if s == symbol_signal:
+                    target_data_feed = data_feed_obj
+                    break
+            
+            if target_data_feed is None:
+                self.log(f"Could not find data feed for symbol {symbol_signal} in signal. Skipping.")
+                continue
+
+            if direction == "buy":
+                self.buy(data=target_data_feed, size=size, exectype=bt.Order.Market, transmit=True, sl=stop_loss, tp=take_profit)
+                self.log(f"BUY ORDER: {symbol_signal}, Size: {size}, SL: {stop_loss}, TP: {take_profit}")
+            elif direction == "sell":
+                self.sell(data=target_data_feed, size=size, exectype=bt.Order.Market, transmit=True, sl=stop_loss, tp=take_profit)
+                self.log(f"SELL ORDER: {symbol_signal}, Size: {size}, SL: {stop_loss}, TP: {take_profit}")
+
+    def stop(self):
+        if self.loop:
+            self.loop.close()
+        self.log('Strategy STOP called. Final Portfolio Value: %.2f' % self.broker.getvalue())
 
 class Backtester:
     """
@@ -62,11 +187,13 @@ class Backtester:
         self.trade_log = []
         self.equity_curve = []
         self.performance = None
+        self.cerebro = None # Will hold the backtrader Cerebro instance
+        self.run_results = None # To store results from cerebro.run()
         # Unified export config
         self.export_config = export_config or self.config.get('export_config', {})
         # TODO: Add more attributes as needed (risk manager, performance tracker, etc.)
 
-    async def run(self):
+    def run(self):
         """
         Main backtesting loop. Simulates bar-by-bar trading for all symbols.
         Loads data, aligns by datetime, iterates through each bar, and simulates trades.
@@ -74,185 +201,91 @@ class Backtester:
         
         Note: If profiling is enabled, parallelization is automatically disabled by the strategy.
         """
-        # Load data
-        data = self.data_loader(self.symbols, self.timeframes)
-        # Check all data is present and non-empty before proceeding
-        missing = []
-        for symbol in self.symbols:
-            for tf in self.timeframes:
-                if symbol not in data or tf not in data[symbol] or data[symbol][tf] is None or data[symbol][tf].empty:
-                    missing.append(f"{symbol}/{tf}")
-        if missing:
-            logger.error(f"Missing or empty data for: {', '.join(missing)}. Aborting backtest.")
-            return
-        # Collect all unique datetimes across all symbols/timeframes
-        all_datetimes = set()
-        for symbol in self.symbols:
-            for tf in self.timeframes:
-                df = data[symbol][tf]
-                if not df.empty:
-                    all_datetimes.update(df.index)
-        # Sort all datetimes
-        all_datetimes = sorted(all_datetimes)
-        if not all_datetimes:
-            logger.error("No data available for backtest.")
+        self.cerebro = bt.Cerebro()
+
+        # Load data using the provided data_loader
+        loaded_data = self.data_loader(self.symbols, self.timeframes)
+        
+        data_feed_map = {} # Maps cerebro data index to (symbol, tf, original_df_ref)
+        data_idx_counter = 0
+
+        for symbol_name in self.symbols:
+            if symbol_name not in loaded_data:
+                logger.warning(f"No data loaded for symbol: {symbol_name}")
+                continue
+            for tf_name in self.timeframes: # Assuming self.timeframes contains all TFs needed
+                if tf_name not in loaded_data[symbol_name]:
+                    logger.warning(f"No data loaded for {symbol_name} timeframe: {tf_name}")
+                    continue
+                
+                df = loaded_data[symbol_name][tf_name]
+                if df is not None and not df.empty:
+                    # Ensure df.index is datetime
+                    if not isinstance(df.index, pd.DatetimeIndex):
+                        df.index = pd.to_datetime(df.index)
+                    
+                    # Ensure standard column names for backtrader
+                    # open, high, low, close, volume, openinterest
+                    required_cols = {'open', 'high', 'low', 'close', 'volume'}
+                    if not required_cols.issubset(df.columns):
+                        logger.error(f"DataFrame for {symbol_name}/{tf_name} is missing required columns. Has: {df.columns}. Needs: {required_cols}")
+                    continue
+                        
+                    if 'openinterest' not in df.columns:
+                        df['openinterest'] = 0
+                    
+                    # bt.feeds.PandasData expects datetime index to be named 'datetime' if not already
+                    df.index.name = 'datetime'
+
+                    data_feed = bt.feeds.PandasData(dataname=df) # type: ignore
+                    self.cerebro.adddata(data_feed, name=f"{symbol_name}_{tf_name}")
+                    data_feed_map[data_idx_counter] = (symbol_name, tf_name, df) # Store original df for adapter
+                    data_idx_counter += 1
+                else:
+                    logger.warning(f"Empty DataFrame for {symbol_name}/{tf_name}")
+
+        if not data_feed_map:
+            logger.error("No data feeds added to Cerebro. Aborting backtest.")
             return
 
-        # --- Precompute index pointers for each symbol/timeframe ---
-        # For each symbol/timeframe, build a list of pointers to the last available bar for each dt in all_datetimes
-        pointers = {symbol: {tf: [] for tf in self.timeframes} for symbol in self.symbols}
-        for symbol in self.symbols:
-            for tf in self.timeframes:
-                df = data[symbol][tf]
-                df_idx = 0
-                df_indices = df.index.tolist()
-                for dt in all_datetimes:
-                    # Advance df_idx until df_indices[df_idx] > dt
-                    while df_idx < len(df_indices) and df_indices[df_idx] <= dt:
-                        df_idx += 1
-                    pointers[symbol][tf].append(df_idx)  # pointer is the number of rows <= dt
-
-        # Initialize equity and open positions
-        initial_balance = self.config.get("initial_balance", 10000)
-        equity = initial_balance
-        open_positions = []  # Each position: dict with symbol, direction, entry_price, size, entry_time, stop_loss, take_profit
-        self.equity_curve = []
-        self.trade_log = []
-        # Main simulation loop
-        for i, dt in enumerate(all_datetimes):
-            # Build market_data up to current bar for each symbol/timeframe using precomputed pointers
-            market_data = {}
-            for symbol in self.symbols:
-                market_data[symbol] = {}
-                for tf in self.timeframes:
-                    df = data[symbol][tf]
-                    ptr = pointers[symbol][tf][i]
-                    if ptr > 0:
-                        market_data[symbol][tf] = df.iloc[:ptr].copy()
-            # Generate signals for this bar
-            try:
-                if hasattr(self.strategy, 'generate_signals'):
-                    gen = self.strategy.generate_signals
-                    if getattr(gen, "__code__", None) and getattr(gen, "__code__").co_flags & 0x80:
-                        # Async function
-                        signals = await gen(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
-                    else:
-                        # Sync function
-                        signals = gen(market_data=market_data, skip_plots=True, debug_visualize=False, profile=self.config.get('profile', False))
-                else:
-                    signals = []
-            except Exception as e:
-                logger.warning(f"Error generating signals at {dt}: {e}")
-                signals = []
-            # Simulate fills: market order at next bar open (if possible)
-            for signal in signals:
-                symbol = signal.get("symbol")
-                direction = signal.get("direction")
-                entry_price = signal.get("entry_price")
-                stop_loss = signal.get("stop_loss")
-                take_profit = signal.get("take_profit")
-                # Use risk manager for position sizing if available
-                if self.risk_manager is not None:
-                    size = self.risk_manager.calculate_position_size(
-                        account_balance=equity,
-                        risk_per_trade=self.config.get("risk_per_trade", 1.0),
-                        entry_price=entry_price,
-                        stop_loss_price=stop_loss,
-                        symbol=symbol
-                    )
-                else:
-                    size = signal.get("size", 1.0)  # Default size 1.0
-                tf = signal.get("timeframe", self.timeframes[0])
-                df = data[symbol][tf]
-                idx = df.index.get_loc(dt) if dt in df.index else None
-                if idx is not None and idx + 1 < len(df):
-                    next_open = df.iloc[idx + 1]["open"]
-                    entry_time = df.index[idx + 1]
-                    open_positions.append({
-                        "symbol": symbol,
-                        "direction": direction,
-                        "entry_price": next_open,
-                        "size": size,
-                        "entry_time": entry_time,
-                        "stop_loss": stop_loss,
-                        "take_profit": take_profit,
-                        "open": True,
-                        "signal_time": dt
-                    })
-            # Update open positions: check for exits (stop loss, take profit, or end of data)
-            for pos in open_positions:
-                if not pos["open"]:
-                    continue
-                symbol = pos["symbol"]
-                tf = self.timeframes[0]  # Use primary timeframe for exit
-                df = data[symbol][tf]
-                if dt not in df.index:
-                    continue
-                idx = df.index.get_loc(dt)
-                if idx < 0:
-                    continue
-                bar = df.iloc[idx]
-                exit_price = None
-                exit_reason = None
-                if pos["direction"] == "buy":
-                    if pos["stop_loss"] is not None and bar["low"] <= pos["stop_loss"]:
-                        exit_price = pos["stop_loss"]
-                        exit_reason = "stop_loss"
-                    elif pos["take_profit"] is not None and bar["high"] >= pos["take_profit"]:
-                        exit_price = pos["take_profit"]
-                        exit_reason = "take_profit"
-                elif pos["direction"] == "sell":
-                    if pos["stop_loss"] is not None and bar["high"] >= pos["stop_loss"]:
-                        exit_price = pos["stop_loss"]
-                        exit_reason = "stop_loss"
-                    elif pos["take_profit"] is not None and bar["low"] <= pos["take_profit"]:
-                        exit_price = pos["take_profit"]
-                        exit_reason = "take_profit"
-                if i == len(all_datetimes) - 1 and exit_price is None:
-                    exit_price = bar["close"]
-                    exit_reason = "end"
-                if exit_price is not None:
-                    if pos["direction"] == "buy":
-                        pnl = (exit_price - pos["entry_price"]) * pos["size"]
-                    else:
-                        pnl = (pos["entry_price"] - exit_price) * pos["size"]
-                    equity += pnl
-                    pos["open"] = False
-                    pos["exit_price"] = exit_price
-                    pos["exit_time"] = dt
-                    pos["exit_reason"] = exit_reason
-                    pos["pnl"] = pnl
-                    self.trade_log.append({
-                        "symbol": pos["symbol"],
-                        "direction": pos["direction"],
-                        "entry_price": pos["entry_price"],
-                        "size": pos["size"],
-                        "entry_time": pos["entry_time"],
-                        "stop_loss": pos["stop_loss"],
-                        "take_profit": pos["take_profit"],
-                        "exit_price": exit_price,
-                        "exit_time": dt,
-                        "exit_reason": exit_reason,
-                        "pnl": pnl,
-                        "signal_time": pos.get("signal_time", None)
-                    })
-            # Remove closed positions
-            open_positions = [p for p in open_positions if p["open"]]
-            # Record equity
-            self.equity_curve.append({"datetime": dt, "equity": equity})
-        # Store results
-        self.results = {
-            "final_equity": equity,
-            "trade_log": self.trade_log,
-            "equity_curve": self.equity_curve
+        # Add strategy adapter
+        strategy_kwargs_for_adapter = {
+            'skip_plots': True, # Example: pass relevant kwargs
+            'debug_visualize': False,
+            'profile': self.config.get('profile', False)
         }
-        # If performance tracker is provided, update it
-        if self.performance_tracker is not None:
-            try:
-                self.performance = await self.performance_tracker.update_performance_metrics()
-            except Exception as e:
-                logger.warning(f"Error updating performance tracker: {e}")
-        logger.info(f"Backtest complete. Final equity: {equity}")
+        self.cerebro.addstrategy(BacktraderStrategyAdapter, 
+                                 original_strategy=self.strategy, 
+                                 data_feed_map=data_feed_map,
+                                 strategy_kwargs=strategy_kwargs_for_adapter)
+
+        initial_balance = self.config.get("initial_balance", 10000)
+        self.cerebro.broker.setcash(initial_balance)
+        # TODO: Add commission, slippage if needed
+        # self.cerebro.broker.setcommission(commission=0.001) 
+
+        # Add analyzers
+        self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
+        self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Days) # type: ignore # Adjust timeframe as needed
+        self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+        self.cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')
+
+        logger.info(f"Starting backtrader Cerebro engine with initial balance: {initial_balance}")
+        self.run_results = self.cerebro.run()
+        logger.info(f"Backtrader Cerebro engine finished. Final portfolio value: {self.cerebro.broker.getvalue():.2f}")
+
+        # Store results from analyzers
+        if self.run_results and self.run_results[0]:
+            strategy_instance = self.run_results[0]
+            self.results = {
+                "final_equity": self.cerebro.broker.getvalue(),
+                "trade_analyzer": strategy_instance.analyzers.tradeanalyzer.get_analysis() if hasattr(strategy_instance.analyzers, 'tradeanalyzer') else None,
+                "sharpe_ratio": strategy_instance.analyzers.sharpe.get_analysis() if hasattr(strategy_instance.analyzers, 'sharpe') else None,
+                "drawdown": strategy_instance.analyzers.drawdown.get_analysis() if hasattr(strategy_instance.analyzers, 'drawdown') else None,
+                "sqn": strategy_instance.analyzers.sqn.get_analysis() if hasattr(strategy_instance.analyzers, 'sqn') else None,
+                "trade_log": strategy_instance.trade_history if hasattr(strategy_instance, 'trade_history') else []
+            }
+            self.trade_log = self.results["trade_log"]
 
     def report(self):
         """
@@ -261,22 +294,24 @@ class Backtester:
         Exports trade log/results as CSV/JSON/Excel/Markdown/HTML if configured.
         Computes advanced metrics natively if no PerformanceTracker is provided.
         """
-        # Check if results are available
-        if not self.results:
+        if not self.cerebro or not self.run_results or not self.results:
             logger.warning("No results to report. Run the backtest first.")
             return
+
         initial_balance = self.config.get("initial_balance", 10000)
         final_equity = self.results["final_equity"]
-        trade_log = pd.DataFrame(self.results["trade_log"])
-        equity_curve = pd.DataFrame(self.results["equity_curve"])
-        # Defensive check for 'pnl' column
-        if "pnl" not in trade_log.columns:
-            print("WARNING: No 'pnl' column in trade log. Detailed analytics skipped.")
-            print(f"Trade Log (all {len(trade_log)} rows):")
-            print(trade_log.to_string(index=False))
-            return
+        
+        trade_analysis = self.results.get("trade_analyzer", {})
+        sharpe_analysis = self.results.get("sharpe_ratio", {})
+        drawdown_analysis = self.results.get("drawdown", {})
+        sqn_analysis = self.results.get("sqn", {})
+        
+        # Use trade_log from strategy instance if available
+        trade_log_list = self.results.get("trade_log", [])
+        trade_log_df = pd.DataFrame(trade_log_list)
+
         # Summary statistics
-        total_trades = len(trade_log)
+        total_trades = len(trade_log_df)
         win_trades = 0
         loss_trades = 0
         profit_trades = []
@@ -287,28 +322,25 @@ class Backtester:
         expectancy = None
         sharpe_ratio = None
         max_drawdown = None
-        returns = []
-        # Calculate PnL, win/loss, profit factor, expectancy, Sharpe
-        if "pnl" in trade_log.columns and not trade_log.empty:
-            win_trades = (trade_log["pnl"] > 0).sum()
-            loss_trades = (trade_log["pnl"] < 0).sum()
-            profit_trades = trade_log[trade_log["pnl"] > 0]["pnl"].values
-            loss_trades_list = trade_log[trade_log["pnl"] < 0]["pnl"].values
-            win_rate = win_trades / total_trades if total_trades > 0 else None
-            avg_pnl = trade_log["pnl"].mean()
-            gross_profit = np.sum(np.array(profit_trades)) if len(profit_trades) > 0 else 0
-            gross_loss = -np.sum(np.array(loss_trades_list)) if len(loss_trades_list) > 0 else 0
-            profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
-            expectancy = trade_log["pnl"].mean() if total_trades > 0 else None
-        # Calculate equity curve returns and Sharpe ratio
-        if not equity_curve.empty:
-            equity_curve["cummax"] = equity_curve["equity"].cummax()
-            equity_curve["drawdown"] = equity_curve["equity"] - equity_curve["cummax"]
-            max_drawdown = equity_curve["drawdown"].min()
-            # Calculate returns for Sharpe (simple diff, not log)
-            returns = equity_curve["equity"].diff().dropna()
-            if len(returns) > 1 and returns.std() > 0:
-                sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252)  # 252 trading days
+
+        if trade_analysis and 'total' in trade_analysis and trade_analysis['total']['total'] > 0:
+            total_trades = trade_analysis['total']['total']
+            win_trades = trade_analysis['won']['total']
+            loss_trades = trade_analysis['lost']['total']
+            win_rate = trade_analysis['won']['total'] / trade_analysis['total']['total'] if trade_analysis['total']['total'] > 0 else 0
+            avg_pnl = trade_analysis['pnl']['net']['average']
+            
+            gross_profit = trade_analysis['pnl']['gross']['total']
+            gross_loss = abs(trade_analysis['pnl']['gross']['total'] - trade_analysis['pnl']['net']['total']) # Approximate
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+            
+            expectancy = avg_pnl # Simplified
+
+        if drawdown_analysis and 'max' in drawdown_analysis:
+            max_drawdown = drawdown_analysis['max']['drawdown']
+        if sharpe_analysis and 'sharperatio' in sharpe_analysis:
+            sharpe_ratio = sharpe_analysis['sharperatio']
+
         # Print summary
         print("\n===== Backtest Summary =====")
         print(f"Initial Equity: {initial_balance}")
@@ -326,14 +358,14 @@ class Backtester:
             print(f"Sharpe Ratio:   {sharpe_ratio:.2f}")
         if max_drawdown is not None:
             print(f"Max Drawdown:   {max_drawdown:.2f}")
-        # If performance tracker is available, print advanced metrics
-        if self.performance is not None:
-            print("\n--- Advanced Performance Metrics (PerformanceTracker) ---")
-            for k, v in self.performance.items():
-                print(f"{k}: {v}")
+        if sqn_analysis and 'sqn' in sqn_analysis:
+            print(f"SQN:            {sqn_analysis['sqn']:.2f}")
+        
         print("===========================\n")
-        # --- DETAILED ANALYTICS ---
-        if not trade_log.empty:
+
+        # --- DETAILED ANALYTICS (from trade_log_df if available) ---
+        if not trade_log_df.empty and 'pnl' in trade_log_df.columns:
+            trade_log = trade_log_df # Use the DataFrame for easier analysis
             print("Detailed Trade Analytics:")
             # Direction breakdown
             if "direction" in trade_log.columns:
@@ -362,9 +394,9 @@ class Backtester:
             # Risk/Reward analytics
             if "stop_loss" in trade_log.columns and "take_profit" in trade_log.columns and "entry_price" in trade_log.columns:
                 rr_ratios = np.abs((trade_log["take_profit"] - trade_log["entry_price"]) / (trade_log["entry_price"] - trade_log["stop_loss"]))
-                print(f"  Avg Risk/Reward Ratio: {rr_ratios.mean():.2f}")
+                print(f"  Avg Risk/Reward Ratio (from signals): {rr_ratios.mean():.2f}") # This is based on signal's SL/TP, not actual fills
             # TP/SL hit rates
-            if "exit_reason" in trade_log.columns:
+            if 'exit_reason' in trade_log.columns: # This column might not exist with backtrader's log
                 tp_hits = (trade_log["exit_reason"] == "take_profit").sum()
                 sl_hits = (trade_log["exit_reason"] == "stop_loss").sum()
                 print(f"  TP Hit Rate: {tp_hits / total_trades:.2%}")
@@ -375,23 +407,6 @@ class Backtester:
                 avg_loss = trade_log[trade_log["pnl"] < 0]["pnl"].mean() if loss_trades > 0 else 0
                 expectancy = (win_rate * avg_win) + ((1 - win_rate) * avg_loss)
                 print(f"  Expectancy per Trade: {expectancy:.2f}")
-            # Equity/Drawdown analytics
-            if not equity_curve.empty:
-                max_equity = equity_curve["equity"].max()
-                min_equity = equity_curve["equity"].min()
-                max_equity_time = equity_curve.loc[equity_curve["equity"].idxmax(), "datetime"]
-                min_equity_time = equity_curve.loc[equity_curve["equity"].idxmin(), "datetime"]
-                print(f"  Max Equity: {max_equity:.2f} at {max_equity_time}")
-                print(f"  Min Equity: {min_equity:.2f} at {min_equity_time}")
-                # Drawdown duration
-                drawdown_periods = equity_curve["drawdown"] < 0
-                if drawdown_periods.any():
-                    dd_starts = equity_curve["drawdown"][drawdown_periods].index.to_list()
-                    print(f"  Drawdown Periods: {len(dd_starts)}")
-                # Recovery factor
-                net_profit = final_equity - initial_balance
-                recovery_factor = net_profit / abs(max_drawdown) if max_drawdown else np.nan
-                print(f"  Recovery Factor: {recovery_factor:.2f}")
             # Time-based analytics
             if "exit_time" in trade_log.columns and "pnl" in trade_log.columns:
                 trade_log["exit_time"] = pd.to_datetime(trade_log["exit_time"])
@@ -404,67 +419,26 @@ class Backtester:
                 print(f"  Best Day: {daily_returns.idxmax()} ({daily_returns.max():.2f})")
                 print(f"  Worst Day: {daily_returns.idxmin()} ({daily_returns.min():.2f})")
             print("---------------------------\n")
-            # --- Visualizations ---
-            # Histogram of trade PnL
-            plt.figure(figsize=(8, 4))
-            plt.hist(trade_log["pnl"], bins=30, color="skyblue", edgecolor="black")
-            plt.title("Histogram of Trade PnL")
-            plt.xlabel("PnL")
-            plt.ylabel("Frequency")
-            plt.grid(True)
-            # Save plot
-            plot_dir = os.path.dirname(self.export_config.get('csv', ''))
-            if plot_dir:
-                hist_path = os.path.join(plot_dir, 'hist_pnl.png')
-                plt.savefig(hist_path)
-                print(f"Histogram of PnL saved to {hist_path}")
-            plt.show()
-            plt.close()
-            # Cumulative PnL by trade
-            plt.figure(figsize=(10, 4))
-            plt.plot(trade_log["pnl"].cumsum(), label="Cumulative PnL")
-            plt.title("Cumulative PnL by Trade")
-            plt.xlabel("Trade Number")
-            plt.ylabel("Cumulative PnL")
-            plt.legend()
-            plt.grid(True)
-            # Save plot
-            if plot_dir:
-                cum_path = os.path.join(plot_dir, 'cumulative_pnl.png')
-                plt.savefig(cum_path)
-                print(f"Cumulative PnL plot saved to {cum_path}")
-            plt.show()
-            plt.close()
-            # Monthly returns bar chart
-            if "month" in trade_log.columns:
-                monthly_returns = trade_log.groupby("month")["pnl"].sum()
-                plt.figure(figsize=(10, 4))
-                monthly_returns.plot(kind="bar", color="orange")
-                plt.title("Monthly Returns")
-                plt.xlabel("Month")
-                plt.ylabel("Total PnL")
-                plt.grid(True)
-                # Save plot
-                if plot_dir:
-                    month_path = os.path.join(plot_dir, 'monthly_returns.png')
-                    plt.savefig(month_path)
-                    print(f"Monthly returns plot saved to {month_path}")
-                plt.show()
-                plt.close()
+        else:
+            logger.info("Trade log is empty or missing 'pnl' column. Skipping detailed analytics.")
+
         # Output trade log
-        print(f"Trade Log (all {len(trade_log)} rows):")
-        print(trade_log.to_string(index=False))
+        print(f"Trade Log (all {len(trade_log_df)} rows):")
+        print(trade_log_df.to_string(index=False))
+
         # --- Unified Export Logic ---
         export_cfg = self.export_config
+        trade_log_to_export = trade_log_df # Use the DataFrame from strategy's trade_history
+
         # CSV Export
         csv_path = export_cfg.get('csv') or self.config.get('trade_log_path')
         if csv_path:
-            trade_log.to_csv(csv_path, index=False)
+            trade_log_to_export.to_csv(csv_path, index=False)
             print(f"Trade log saved to {csv_path}")
         # JSON Export
         json_path = export_cfg.get('json') or self.config.get('trade_log_json_path')
         if json_path:
-            json_safe_trade_log = trade_log.copy()
+            json_safe_trade_log = trade_log_to_export.copy()
             if "month" in json_safe_trade_log.columns:
                 json_safe_trade_log = json_safe_trade_log.drop(columns=["month"])
             if "day" in json_safe_trade_log.columns:
@@ -474,7 +448,7 @@ class Backtester:
         # Excel Export
         excel_path = export_cfg.get('excel')
         if excel_path:
-            trade_log.to_excel(excel_path, index=False)
+            trade_log_to_export.to_excel(excel_path, index=False)
             print(f"Trade log saved to {excel_path}")
         # Unified machine-readable JSON report
         report_json_path = export_cfg.get('report_json')
@@ -492,8 +466,8 @@ class Backtester:
                     'sharpe_ratio': sharpe_ratio,
                     'config': self.config,
                 },
-                'trade_log': trade_log.to_dict(orient='records'),
-                'equity_curve': equity_curve.to_dict(orient='records'),
+                'trade_log': trade_log_to_export.to_dict(orient='records'),
+                # 'equity_curve': equity_curve.to_dict(orient='records'), # Equity curve from cerebro plot
             }
             with open(report_json_path, "w") as f:
                 json.dump(report_obj, f, default=str, indent=2)
@@ -515,38 +489,28 @@ class Backtester:
                 if sharpe_ratio is not None:
                     f.write(f"**Sharpe Ratio:** {sharpe_ratio:.2f}\n\n")
                 f.write(f"\n## Trade Log\n\n")
-                f.write(trade_log.to_markdown(index=False))
+                f.write(trade_log_to_export.to_markdown(index=False))
             print(f"Markdown report saved to {md_path}")
         # HTML Export (stub)
         html_path = export_cfg.get('html')
         if html_path:
-            # TODO: Implement HTML export (table, summary, charts)
             with open(html_path, "w") as f:
-                f.write("<h1>Backtest Report (HTML export coming soon)</h1>")
+                f.write("<h1>Backtest Report</h1>")
+                f.write(f"<p>Initial Equity: {initial_balance}</p>")
+                f.write(f"<p>Final Equity: {final_equity}</p>")
+                # Add more stats if available
+                f.write("<h2>Trade Log</h2>")
+                f.write(trade_log_to_export.to_html(index=False))
+                # Placeholder for plot image if saved
+                f.write("<h2>Equity Curve & Drawdown</h2><p>(Plot saved separately if configured)</p>")
             print(f"HTML report stub saved to {html_path}")
-        # TODO: For future: support database export (SQL, NoSQL, etc.)
-        # Plot equity curve and drawdown
-        if not equity_curve.empty:
-            fig, ax1 = plt.subplots(figsize=(12, 6))
-            ax1.plot(equity_curve["datetime"], equity_curve["equity"], label="Equity Curve", color="blue")
-            ax1.set_xlabel("Datetime")
-            ax1.set_ylabel("Equity", color="blue")
-            ax1.tick_params(axis="y", labelcolor="blue")
-            ax2 = ax1.twinx()
-            ax2.plot(equity_curve["datetime"], equity_curve["drawdown"], label="Drawdown", color="red", alpha=0.5)
-            ax2.set_ylabel("Drawdown", color="red")
-            ax2.tick_params(axis="y", labelcolor="red")
-            plt.title("Equity Curve and Drawdown")
-            fig.tight_layout()
-            plt.grid(True)
-            # Save plot
-            if plot_dir:
-                eq_path = os.path.join(plot_dir, 'equity_curve.png')
-                plt.savefig(eq_path)
-                print(f"Equity curve plot saved to {eq_path}")
-            plt.show()
-            plt.close()
-        if "symbol" in trade_log.columns and "pnl" in trade_log.columns:
+
+        # Use cerebro.plot()
+        plot_path = self.export_config.get('plot_path', None) # Example: 'src/backtest/results/.../plot.png'
+        self.cerebro.plot(style='candlestick', barup='green', bardown='red', savefig=bool(plot_path), figfilename=plot_path)
+        if plot_path: logger.info(f"Backtrader plot saved to {plot_path}")
+
+        if not trade_log_df.empty and "symbol" in trade_log_df.columns and "pnl" in trade_log_df.columns:
             print("\nPair Performance Breakdown:")
             pair_stats = trade_log.groupby("symbol").agg(
                 total_trades=("pnl", "count"),
@@ -559,10 +523,6 @@ class Backtester:
             print(pair_stats.to_string(float_format=lambda x: f"{x:.2f}"))
             print(f"\nBest Performing Pair: {pair_stats.index[0]} (Total PnL: {pair_stats.iloc[0]['total_pnl']:.2f})")
             print(f"Worst Performing Pair: {pair_stats.index[-1]} (Total PnL: {pair_stats.iloc[-1]['total_pnl']:.2f})")
-        # --- Profiling mode warning ---
-        if self.config.get('profile', False):
-            logger.warning("Profiling mode enabled: parallelization is disabled. Results may differ from production performance.")
-        # TODO: For future: support parallelized signal generation (with caveats for profiling mode)
 
     @staticmethod
     def load_csv_data(directory: str, symbols: List[str], timeframes: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
@@ -616,16 +576,35 @@ class Backtester:
         return data
 
     @staticmethod
-    def load_or_fetch_ohlcv_data(directory: str, mt5_handler, symbols: list, timeframes: list, start_date=None, end_date=None, num_bars: int = 1000) -> dict:
+    def load_or_fetch_ohlcv_data(directory: str, 
+                                 mt5_handler_instance: Optional[MT5Handler], 
+                                 symbols: list, 
+                                 timeframes: list, 
+                                 start_date=None, 
+                                 end_date=None, 
+                                 num_bars: int = 1000,
+                                 allow_external_fetch: bool = True) -> dict:
         """
-        Load OHLCV data from CSV if available, otherwise fetch from MT5, save as CSV, and use it. Use date range if provided.
-        Data is stored in: {directory}/{year}/{symbol}/{timeframe}.csv
+        Load OHLCV data from CSV if available, otherwise fetch from MT5 (if allowed), save as CSV, and use it.
+        Args:
+            directory: Path to the folder containing CSV files (structured by year/symbol/timeframe)
+            mt5_handler_instance: An optional, pre-initialized MT5Handler instance.
+            symbols: List of symbols
+            timeframes: List of timeframes
+            start_date: Optional start date for fetching/filtering data.
+            end_date: Optional end date for fetching/filtering data.
+            num_bars: Number of bars to fetch if fetching by count (not date range).
+            allow_external_fetch: If False, will not attempt to fetch from MT5 if local data is missing.
+        Returns:
+            Nested dict: {symbol: {timeframe: DataFrame}}
         """
         import os
-        import pandas as pd
+        # Pandas is already imported at the module level
+        # import pandas as pd 
         data = {}
         # Determine year folder from start_date
-        year_str = str(start_date.year) if start_date else 'unknown_year'
+        year_str = str(start_date.year) if start_date else 'unknown_year' # Ensure year_str is robust
+
         for symbol in symbols:
             data[symbol] = {}
             for tf in timeframes:
@@ -633,93 +612,137 @@ class Backtester:
                 symbol_dir = os.path.join(directory, year_str, symbol)
                 os.makedirs(symbol_dir, exist_ok=True)
                 filename = os.path.join(symbol_dir, f"{tf}.csv")
+                
                 needs_refetch = False
                 df = None
+
                 if os.path.exists(filename):
                     try:
                         df = pd.read_csv(filename, parse_dates=["datetime"])
                         if "datetime" not in df.columns:
-                            print(f"WARNING: {filename} missing 'datetime' column. Will re-fetch from MT5.")
+                            logger.warning(f"{filename} missing 'datetime' column. Marking for re-fetch.")
                             needs_refetch = True
+                            df = None # Ensure df is None if problematic
                         elif df.empty:
-                            print(f"WARNING: {filename} is empty. Will re-fetch from MT5.")
+                            logger.warning(f"{filename} is empty. Marking for re-fetch.")
                             needs_refetch = True
                         else:
                             df.set_index("datetime", inplace=True)
+                            original_rows = len(df)
+                            # Filter by date range if provided, AFTER loading from cache
                             if start_date and end_date:
-                                # Filter to requested date range *before* accepting cache
-                                df = df[(df.index >= start_date) & (df.index <= end_date)]
-                                if df.empty:
-                                    print(f"WARNING: {filename} has no data in requested range. Will re-fetch from MT5.")
-                                    needs_refetch = True
+                                df = df[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))]
+                                if df.empty and original_rows > 0 : # Was not empty before date filtering
+                                    logger.warning(f"{filename} has no data in requested range ({start_date} to {end_date}). Marking for re-fetch.")
+                                    needs_refetch = True # If filtering makes it empty, and it wasn't originally, consider re-fetching
                                     df = None
-                            if not needs_refetch and df is not None:
-                                # --- Basic sanitisation: drop rows where any OHLC column is 0/NaN ---
+                            
+                            if not needs_refetch and df is not None and not df.empty:
+                                # Basic sanitisation: drop rows where any OHLC column is 0/NaN
                                 required_cols = ['open', 'high', 'low', 'close']
                                 if all(col in df.columns for col in required_cols):
                                     df[required_cols] = df[required_cols].apply(pd.to_numeric, errors='coerce')
-                                    before_rows = len(df)
+                                    before_sanitize_rows = len(df)
                                     df = df.dropna(subset=required_cols)
                                     df = df[(df[required_cols] != 0).all(axis=1)]
-                                    after_rows = len(df)
-                                    if after_rows == 0:
-                                        print(f"WARNING: {filename} contained only zero/NaN rows after sanitisation – will re-fetch.")
+                                    after_sanitize_rows = len(df)
+                                    if after_sanitize_rows == 0 and before_sanitize_rows > 0:
+                                        logger.warning(f"{filename} contained only zero/NaN OHLC rows after sanitisation. Marking for re-fetch.")
                                         needs_refetch = True
                                         df = None
-                                    elif after_rows < before_rows:
-                                        print(f"Sanitised {filename}: removed {before_rows - after_rows} bad rows (now {after_rows}).")
+                                    elif after_sanitize_rows < before_sanitize_rows:
+                                        logger.info(f"Sanitised {filename}: removed {before_sanitize_rows - after_sanitize_rows} bad rows (now {after_sanitize_rows}).")
                                 else:
-                                    print(f"WARNING: {filename} missing OHLC columns – will re-fetch.")
+                                    logger.warning(f"{filename} missing critical OHLC columns. Marking for re-fetch.")
                                     needs_refetch = True
                                     df = None
-                                if not needs_refetch and df is not None:
+                                
+                                if not needs_refetch and df is not None and not df.empty:
                                     data[symbol][tf] = df
-                                    print(f"Loaded {len(df)} rows for {symbol} {tf} from {filename}")
+                                    logger.info(f"Loaded {len(df)} rows for {symbol} {tf} from {filename} (Date range: {df.index.min()} to {df.index.max() if not df.empty else 'N/A'})")
+                                elif df is None or df.empty: # If sanitization or date filter emptied it, ensure needs_refetch is true
+                                    needs_refetch = True
+
+
                     except Exception as e:
-                        print(f"WARNING: Failed to load {filename}: {e}. Will re-fetch from MT5.")
+                        logger.warning(f"Failed to load or process {filename}: {e}. Marking for re-fetch.")
                         needs_refetch = True
+                        df = None 
                 else:
+                    logger.info(f"Local file {filename} not found. Marking for potential fetch.")
                     needs_refetch = True
+                
                 if needs_refetch:
-                    # Lazy MT5Handler creation
-                    if mt5_handler is None:
-                        mt5_handler = MT5Handler.get_instance()
+                    if not allow_external_fetch:
+                        logger.warning(f"Data for {symbol} {tf} needs refetch, but external fetching is disabled. No data loaded.")
+                        data[symbol][tf] = pd.DataFrame()
+                        continue # To the next timeframe or symbol
+
+                    logger.info(f"Attempting to fetch data for {symbol} {tf} from external source.")
+                    current_mt5_handler = mt5_handler_instance
+                    if current_mt5_handler is None:
+                        logger.info("MT5Handler instance not provided, attempting to initialize one for fetching.")
+                        try:
+                            current_mt5_handler = MT5Handler.get_instance()
+                        except Exception as e: # Catch errors during MT5Handler.get_instance()
+                            logger.error(f"Failed to initialize MT5Handler: {e}. Cannot fetch data for {symbol} {tf}.")
+                            data[symbol][tf] = pd.DataFrame()
+                            continue 
+                    
+                    if current_mt5_handler is None or not current_mt5_handler.initialized: # Use .initialized property
+                        logger.warning(f"MT5 handler not available or not initialized. Cannot fetch {symbol} {tf}.")
+                        data[symbol][tf] = pd.DataFrame()
+                        continue
+
                     try:
+                        fetched_df = None
                         if start_date and end_date:
-                            df = mt5_handler.get_historical_data(symbol, tf, start_date, end_date)
+                            fetched_df = current_mt5_handler.get_historical_data(symbol, tf, pd.to_datetime(start_date), pd.to_datetime(end_date))
                         else:
-                            df = mt5_handler.get_market_data(symbol, tf, num_bars)
-                        if df is not None and not df.empty:
-                            # Ensure 'datetime' is a column for saving
-                            if 'datetime' not in df.columns:
-                                if df.index.name == "datetime":
-                                    df = df.reset_index()
-                                elif 'time' in df.columns:
-                                    df = df.rename(columns={'time': 'datetime'})
-                                elif df.index.name == "time":
-                                    df = df.reset_index().rename(columns={'time': 'datetime'})
-                                else:
-                                    # fallback: try to create a datetime column from index
-                                    df['datetime'] = df.index
-                            df.to_csv(filename, index=False)
-                            df.set_index("datetime", inplace=True)
+                            fetched_df = current_mt5_handler.get_market_data(symbol, tf, num_bars)
+                        
+                        if fetched_df is not None and not fetched_df.empty:
+                            # Ensure 'datetime' is a column for saving and indexing
+                            if 'datetime' not in fetched_df.columns:
+                                if fetched_df.index.name == "datetime" or fetched_df.index.name == "time":
+                                    fetched_df = fetched_df.reset_index().rename(columns={fetched_df.index.name: 'datetime'})
+                                else: # Fallback: try to create a datetime column from index if name is None or other
+                                    logger.warning(f"Index for {symbol} {tf} fetched data is not named 'datetime' or 'time'. Using index as is for 'datetime' column.")
+                                    fetched_df['datetime'] = fetched_df.index 
+                            
+                            # Convert datetime column to pandas datetime objects if not already
+                            fetched_df['datetime'] = pd.to_datetime(fetched_df['datetime'])
+
+                            # Save to CSV with 'datetime' as a column
+                            fetched_df.to_csv(filename, index=False) 
+                            
+                            # Set index for in-memory df
+                            fetched_df.set_index("datetime", inplace=True)
+
                             # Final sanitisation identical to cache path
                             required_cols = ['open', 'high', 'low', 'close']
-                            if all(col in df.columns for col in required_cols):
-                                df[required_cols] = df[required_cols].apply(pd.to_numeric, errors='coerce')
-                                before_rows = len(df)
-                                df = df.dropna(subset=required_cols)
-                                df = df[(df[required_cols] != 0).all(axis=1)]
-                                if len(df) < before_rows:
-                                    print(f"Sanitised freshly fetched {symbol} {tf}: removed {before_rows - len(df)} bad rows (now {len(df)}).")
-                            data[symbol][tf] = df
-                            print(f"Fetched and saved {len(df)} bars for {symbol} {tf} to {filename}")
+                            if all(col in fetched_df.columns for col in required_cols):
+                                fetched_df[required_cols] = fetched_df[required_cols].apply(pd.to_numeric, errors='coerce')
+                                before_sanitize_rows = len(fetched_df)
+                                fetched_df = fetched_df.dropna(subset=required_cols)
+                                fetched_df = fetched_df[(fetched_df[required_cols] != 0).all(axis=1)]
+                                if len(fetched_df) < before_sanitize_rows:
+                                    logger.info(f"Sanitised freshly fetched {symbol} {tf}: removed {before_sanitize_rows - len(fetched_df)} bad rows (now {len(fetched_df)}).")
+                            
+                            if fetched_df.empty:
+                                logger.warning(f"Fetched data for {symbol} {tf} became empty after sanitization. No data loaded.")
+                                data[symbol][tf] = pd.DataFrame()
                         else:
-                            print(f"WARNING: No data returned for {symbol} {tf} from MT5")
+                            logger.warning(f"Fetched data for {symbol} {tf} was None or empty after sanitization. No data loaded.")
                             data[symbol][tf] = pd.DataFrame()
                     except Exception as e:
-                        print(f"WARNING: Failed to fetch {symbol} {tf} from MT5: {e}")
+                        logger.error(f"Failed to fetch or process {symbol} {tf} from MT5: {e}")
                         data[symbol][tf] = pd.DataFrame()
+                elif df is not None: # If not needs_refetch and df was loaded successfully
+                    data[symbol][tf] = df
+                else: # Should not happen if logic is correct, but as a fallback
+                    logger.warning(f"Data for {symbol} {tf} could not be loaded or fetched. Assigning empty DataFrame.")
+                    data[symbol][tf] = pd.DataFrame()
         return data
 
     # TODO: Add more helper methods as needed (trade simulation, position management, etc.)
@@ -763,24 +786,52 @@ def load_strategy(strategy_name: str, params: dict = {}):
 def select_data_loader(mode: str, **kwargs):
     start_date = kwargs.get('start_date')
     end_date = kwargs.get('end_date')
+    config = kwargs.get('config', {}) # Get config, default to empty dict
+    allow_external_fetch = config.get('allow_external_fetch', True) # Default to True if not in config
+
     if mode == 'csv':
         directory = kwargs.get('directory')
         if not directory:
             raise ValueError("CSV data loader requires 'directory' argument.")
+        # CSV loader doesn't fetch externally, so allow_external_fetch is less relevant here
+        # but we keep the signature consistent for the lambda if it were to be used by load_or_fetch.
         return lambda symbols, timeframes: Backtester.load_csv_data(directory, symbols, timeframes)
     elif mode == 'mt5':
         mt5_handler = kwargs.get('mt5_handler')
         num_bars = kwargs.get('num_bars', 1000)
         if not mt5_handler:
-            raise ValueError("MT5 data loader requires 'mt5_handler' argument.")
+             # If direct MT5 mode is chosen but no handler, this implies an issue or intentional offline use for this mode too.
+            if not allow_external_fetch:
+                logger.warning("MT5 mode selected, but external fetching is disabled and no MT5 handler provided. Will return empty data.")
+                return lambda symbols, timeframes: {s: {tf: pd.DataFrame() for tf in timeframes} for s in symbols}
+            else:
+                # Try to get an instance if allow_external_fetch is True
+                logger.info("MT5 handler not provided for 'mt5' mode, attempting to get a new instance.")
+                try:
+                    mt5_handler = MT5Handler.get_instance()
+                    if not mt5_handler.initialized:
+                        raise ConnectionError("MT5 handler could not be initialized.")
+                except Exception as e:
+                    logger.error(f"Failed to initialize MT5Handler for 'mt5' mode: {e}. Returning empty data structure.")
+                    return lambda symbols, timeframes: {s: {tf: pd.DataFrame() for tf in timeframes} for s in symbols}
+
         return lambda symbols, timeframes: Backtester.load_mt5_data(mt5_handler, symbols, timeframes, start_date=start_date, end_date=end_date, num_bars=num_bars)
     elif mode == 'cache':
         directory = kwargs.get('directory')
-        mt5_handler = kwargs.get('mt5_handler')
+        mt5_handler = kwargs.get('mt5_handler') # This can be None, load_or_fetch will handle it
         num_bars = kwargs.get('num_bars', 1000)
         if not directory:
             raise ValueError("Cache data loader requires 'directory' argument.")
-        return lambda symbols, timeframes: Backtester.load_or_fetch_ohlcv_data(directory, mt5_handler, symbols, timeframes, start_date=start_date, end_date=end_date, num_bars=num_bars)
+        return lambda symbols, timeframes: Backtester.load_or_fetch_ohlcv_data(
+            directory, 
+            mt5_handler, 
+            symbols, 
+            timeframes, 
+            start_date=start_date, 
+            end_date=end_date, 
+            num_bars=num_bars, 
+            allow_external_fetch=allow_external_fetch
+        )
     else:
         raise ValueError(f"Unknown data loader mode: {mode}")
 
@@ -819,7 +870,7 @@ async def batch_backtest(configs: list):
             export_config=cfg.get('export_config', {})
         )
         # Run backtest
-        await backtester.run()
+        backtester.run()
         # Collect results
         res = {
             'strategy': cfg['strategy_name'],

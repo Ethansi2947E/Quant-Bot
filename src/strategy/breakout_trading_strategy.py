@@ -23,7 +23,7 @@ from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib
 from talib._ta_lib import MA_Type
-from src.utils.patterns_luxalgo import add_luxalgo_patterns
+from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, BEARISH_PATTERNS, NEUTRAL_PATTERNS, ALL_PATTERNS, filter_patterns_by_bias, get_pattern_type
 # import custom_patterns as cp # This line was incorrectly added and will be removed
 
 
@@ -127,36 +127,6 @@ class BreakoutTradingStrategy(SignalGenerator):
     """
     Breakout Trading Strategy: Identifies consolidation and trades breakouts.
     """
-    @staticmethod
-    def _detect_inside_bar_vectorized(df: pd.DataFrame) -> pd.Series:
-        if len(df) < 2:
-            return pd.Series([False] * len(df), index=df.index)
-        # Current high < previous high AND current low > previous low
-        inside_bar = (df['high'] < df['high'].shift(1)) & (df['low'] > df['low'].shift(1))
-        return inside_bar.fillna(False)
-
-    @staticmethod
-    def _detect_strong_reversal_candle_vectorized(df: pd.DataFrame, direction: str) -> pd.Series:
-        body = df['close'] - df['open']
-        range_val = df['high'] - df['low']
-        # Replace 0 with NaN to avoid division by zero, will result in False after fillna
-        range_val = range_val.replace(0, np.nan)
-
-        if direction == 'bullish':
-            is_bullish_candle = body > 0
-            # Closes in upper 30% of its own range
-            strong_close = df['close'] > (df['high'] - 0.3 * range_val)
-            # Body is at least 40% of its own range
-            significant_body = body > (0.4 * range_val)
-            return (is_bullish_candle & strong_close & significant_body).fillna(False)
-        elif direction == 'bearish':
-            is_bearish_candle = body < 0
-            # Closes in lower 30% of its own range
-            strong_close = df['close'] < (df['low'] + 0.3 * range_val)
-            # Body (absolute) is at least 40% of its own range
-            significant_body = abs(body) > (0.4 * range_val)
-            return (is_bearish_candle & strong_close & significant_body).fillna(False)
-        return pd.Series([False] * len(df), index=df.index).fillna(False)
 
     def __init__(
         self,
@@ -610,12 +580,8 @@ class BreakoutTradingStrategy(SignalGenerator):
             # More robust volume check - comparing candle volume to its own rolling MA
             volume_ma_value = df[volume_ma_col].iloc[confirmation_bar_idx] if volume_ma_col in df.columns and not pd.isna(df[volume_ma_col].iloc[confirmation_bar_idx]) else 0
 
-            # Tiered volume confirmation based on market type (e.g., crypto vs forex)
-            # Assuming sym is a string like "BTCUSD" or "EURUSD"
-            is_crypto_or_fx_major = any(p in sym.upper() for p in ["BTC", "ETH", "XAU", "EURUSD", "GBPUSD", "USDJPY"])
-
             # Stricter for less volatile, more lenient for crypto/fx
-            base_volume_mult = 1.1 if is_crypto_or_fx_major else self.volume_confirmation_multiplier 
+            base_volume_mult = self.volume_confirmation_multiplier 
             
             # Further adjust based on volatility ratio
             if volatility_ratio_entry > 0.02: # High vol
@@ -913,13 +879,10 @@ class BreakoutTradingStrategy(SignalGenerator):
         if len(df) < 3: # Need at least 3 bars for breakout, retest, and confirmation
             self.logger.debug(f"[{symbol}] Not enough data for retest detection (need 3, got {len(df)}).")
             return False
-            
-        # Define the breakout candle as the one that closed beyond the level decisively
-        # This is a simplification; actual breakout candle might be further back
-        # For this retest logic, we typically look at candles *after* a breakout signal has been established.
         
-        # Let's assume the current candle (df.iloc[-1]) is the one we are checking for retest *confirmation*
-        # and the breakout happened on df.iloc[-2] or df.iloc[-3]
+        # Ensure LuxAlgo patterns are present
+        if not all(col in df.columns for col in ['hammer', 'bullish_engulfing']):
+            df = add_luxalgo_patterns(df)
         
         retest_candle = df.iloc[-1] # The candle that potentially confirms rejection after retest
         touch_candle = df.iloc[-2]  # The candle that potentially touched the level
@@ -927,99 +890,54 @@ class BreakoutTradingStrategy(SignalGenerator):
         is_rejection = False
 
         if direction == "BUY": # Breakout was upwards, looking for retest of level as support
-            # Check if touch_candle came close to the breakout_level (now support)
-            # price_touched_level = (
-            #     touch_candle['low'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0) and
-            #     touch_candle['low'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0)
-            # )
-            
             self.logger.debug(f"[{symbol}] BUY Retest - Touch_Low: {touch_candle['low']:.5f}, Level: {breakout_level:.5f}, Threshold_Low: {breakout_level * (1 - self.retest_threshold_pct / 100.0):.5f}, Threshold_High: {breakout_level * (1 + self.retest_threshold_pct / 100.0):.5f}")
 
             if (touch_candle['low'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0) and
                 touch_candle['low'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0)):
                 self.logger.debug(f"[{symbol}] BUY Retest - Price touched level. Checking for rejection on retest_candle.")
                 # Check for bullish rejection (e.g., Hammer, Bullish Engulfing, strong close up) on retest_candle
-                # Using a simplified rejection: closes in upper half and is bullish
-                is_bullish_rejection_candle = (retest_candle['close'] > retest_candle['open'] and
-                                             retest_candle['close'] > (retest_candle['high'] + retest_candle['low']) / 2)
-                
-                # TA-Lib for retest confirmation patterns (BUY side)
-                is_hammer_val = False
-                df_1bar_buy = df.iloc[-1:]
-                if not df_1bar_buy.empty:
-                    hammer_result = talib.CDLHAMMER(
-                        np.array(df_1bar_buy['open'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['high'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['low'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['close'].values, dtype=np.float64)
-                    )
-                    if len(hammer_result) > 0:
-                        is_hammer_val = hammer_result[-1] > 0
-
+                is_bullish_rejection_candle = (
+                    retest_candle['close'] > retest_candle['open'] and
+                    retest_candle['close'] > (retest_candle['high'] + retest_candle['low']) / 2
+                )
+                is_hammer_val = bool(retest_candle.get('hammer', False))
                 is_bullish_engulfing_val = False
-                df_2bar_buy = df.iloc[-2:]
-                if len(df_2bar_buy) >= 2:
-                    engulfing_result = talib.CDLENGULFING(
-                        np.array(df_2bar_buy['open'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['high'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['low'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['close'].values, dtype=np.float64)
-                    )
-                    if len(engulfing_result) > 0:
-                        is_bullish_engulfing_val = engulfing_result[-1] > 0
-
+                if len(df) >= 2:
+                    is_bullish_engulfing_val = bool(df['bullish_engulfing'].iloc[-1])
                 if is_bullish_rejection_candle or is_hammer_val or is_bullish_engulfing_val:
                     is_rejection = True
                     self.logger.info(f"[{symbol}] Confirmed BUY retest and rejection at {breakout_level:.5f}. "
                                      f"Rejection: {is_bullish_rejection_candle}, Hammer: {is_hammer_val}, Engulfing: {is_bullish_engulfing_val}")
 
         elif direction == "SELL": # Breakout was downwards, looking for retest of level as resistance
-            # price_touched_level = (
-            #     touch_candle['high'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0) and
-            #     touch_candle['high'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0)
-            # )
-
-            self.logger.debug(f"[{symbol}] SELL Retest - Touch_Low: {touch_candle['low']:.5f}, Level: {breakout_level:.5f}, Threshold_Low: {breakout_level * (1 - self.retest_threshold_pct / 100.0):.5f}, Threshold_High: {breakout_level * (1 + self.retest_threshold_pct / 100.0):.5f}")
-            
-            if (touch_candle['low'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0) and
-                touch_candle['low'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0)):
+            self.logger.debug(f"[{symbol}] SELL Retest - Touch_High: {touch_candle['high']:.5f}, Level: {breakout_level:.5f}, Threshold_Low: {breakout_level * (1 - self.retest_threshold_pct / 100.0):.5f}, Threshold_High: {breakout_level * (1 + self.retest_threshold_pct / 100.0):.5f}")
+            if (touch_candle['high'] >= breakout_level * (1 - self.retest_threshold_pct / 100.0) and
+                touch_candle['high'] <= breakout_level * (1 + self.retest_threshold_pct / 100.0)):
                 self.logger.debug(f"[{symbol}] SELL Retest - Price touched level. Checking for rejection on retest_candle.")
-                is_bullish_rejection_candle = (retest_candle['close'] > retest_candle['open'] and
-                                             retest_candle['close'] > (retest_candle['high'] + retest_candle['low']) / 2)
-                
-                is_hammer_val = False
-                df_1bar_buy = df.iloc[-1:]
-                if not df_1bar_buy.empty:
-                    hammer_result = talib.CDLHAMMER(
-                        np.array(df_1bar_buy['open'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['high'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['low'].values, dtype=np.float64),
-                        np.array(df_1bar_buy['close'].values, dtype=np.float64)
-                    )
-                    if len(hammer_result) > 0:
-                        is_hammer_val = hammer_result[-1] > 0
+                # Check for bearish rejection (e.g., Shooting Star, Bearish Engulfing, strong close down) on retest_candle
+                is_bearish_rejection_candle = (
+                    retest_candle['close'] < retest_candle['open'] and
+                    retest_candle['close'] < (retest_candle['high'] + retest_candle['low']) / 2
+                )
+                is_shooting_star_val = bool(retest_candle.get('shooting_star', False))
+                is_bearish_engulfing_val = False
+                if len(df) >= 2: # Ensure there's a previous candle for engulfing pattern
+                    # Check for bearish_engulfing pattern on the retest_candle
+                    # Assuming 'bearish_engulfing' column is from add_luxalgo_patterns or similar
+                    if 'bearish_engulfing' in df.columns:
+                        is_bearish_engulfing_val = bool(df['bearish_engulfing'].iloc[-1]) 
+                    else:
+                        # Fallback or log if column is missing, though it should be added by add_luxalgo_patterns
+                        self.logger.warning(f"[{symbol}] 'bearish_engulfing' column not found in DataFrame for retest check.")
 
-                is_bullish_engulfing_val = False
-                df_2bar_buy = df.iloc[-2:]
-                if len(df_2bar_buy) >= 2:
-                    engulfing_result = talib.CDLENGULFING(
-                        np.array(df_2bar_buy['open'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['high'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['low'].values, dtype=np.float64),
-                        np.array(df_2bar_buy['close'].values, dtype=np.float64)
-                    )
-                    if len(engulfing_result) > 0:
-                        is_bullish_engulfing_val = engulfing_result[-1] > 0
-                
-                if is_bullish_rejection_candle or is_hammer_val or is_bullish_engulfing_val:
+
+                if is_bearish_rejection_candle or is_shooting_star_val or is_bearish_engulfing_val:
                     is_rejection = True
-                    self.logger.info(f"[{symbol}] Confirmed BUY retest and rejection at {breakout_level:.5f}. "
-                                     f"Rejection: {is_bullish_rejection_candle}, Hammer: {is_hammer_val}, Engulfing: {is_bullish_engulfing_val}")
-        
+                    self.logger.info(f"[{symbol}] Confirmed SELL retest and rejection at {breakout_level:.5f}. "
+                                     f"Rejection: {is_bearish_rejection_candle}, ShootingStar: {is_shooting_star_val}, Engulfing: {is_bearish_engulfing_val}")
         if not is_rejection:
             if direction == "BUY":
                  self.logger.debug(f"[{symbol}] Retest condition not met or no clear rejection. Touch_Low: {touch_candle['low']:.5f}, Level: {breakout_level:.5f}")
             elif direction == "SELL":
                  self.logger.debug(f"[{symbol}] Retest condition not met or no clear rejection. Touch_High: {touch_candle['high']:.5f}, Level: {breakout_level:.5f}")
-            
         return is_rejection

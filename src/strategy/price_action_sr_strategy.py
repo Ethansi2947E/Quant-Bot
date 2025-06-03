@@ -20,7 +20,7 @@ from datetime import datetime
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 import talib # Added TA-Lib import
-from src.utils.patterns_luxalgo import add_luxalgo_patterns
+from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, BEARISH_PATTERNS, NEUTRAL_PATTERNS, ALL_PATTERNS, filter_patterns_by_bias
 
 class PriceActionSRStrategy(SignalGenerator):
     """
@@ -213,7 +213,7 @@ class PriceActionSRStrategy(SignalGenerator):
             return np.abs(price - zone) <= zone * tol
         return abs(price - zone) <= zone * tol
 
-    def get_sr_zones(self, df: pd.DataFrame) -> Dict[str, List[float]]:
+    def get_sr_zones(self, df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
         """
         Compute and return the top N support and resistance zones.
         Dynamically adjust max_zones based on volatility and use ATR-based tolerance for clustering.
@@ -221,26 +221,37 @@ class PriceActionSRStrategy(SignalGenerator):
         Args:
             df (pd.DataFrame): Price data with 'high' and 'low' columns
         Returns:
-            Dict[str, List[float]]: {'support': [..], 'resistance': [..]}
+            Dict[str, List[Dict[str, Any]]]: {'support': [{'level': price, 'strength': count}, ...], 'resistance': [...]
         """
         highs = self._find_pivot_highs(df)
         lows = self._find_pivot_lows(df)
-        res_zones = self._cluster_levels(highs, df=df)
-        sup_zones = self._cluster_levels(lows, df=df)
+        res_zones_prices = self._cluster_levels(highs, df=df)
+        sup_zones_prices = self._cluster_levels(lows, df=df)
+
         # Vectorized count touches for each zone
-        def count_touches(prices, zones):
+        def count_touches(prices, zones_prices):
+            if not prices or not zones_prices: # Add check for empty lists
+                return [0] * len(zones_prices)
             prices_arr = np.array(prices)
-            return [self._is_in_zone(prices_arr, z).sum() for z in zones]
-        res_counts = count_touches(highs, res_zones)
-        sup_counts = count_touches(lows, sup_zones)
+            return [self._is_in_zone(prices_arr, z_price).sum() for z_price in zones_prices]
+        res_counts = count_touches(highs, res_zones_prices)
+        sup_counts = count_touches(lows, sup_zones_prices)
+
         # Dynamic max_zones based on volatility
         close_std = df['close'].rolling(50).std().iloc[-1] if len(df) >= 50 else df['close'].std()
         close_mean = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else df['close'].mean()
         volatility = close_std / close_mean if close_mean > 0 else 0
         dynamic_max_zones = 4 if volatility > 0.01 else self.max_zones  # 1% threshold, else fallback
         logger.info(f"Volatility: {volatility:.4f}, using max_zones={dynamic_max_zones}")
-        top_res = [z for _, z in sorted(zip(res_counts, res_zones), reverse=True)[:dynamic_max_zones]]
-        top_sup = [z for _, z in sorted(zip(sup_counts, sup_zones), reverse=True)[:dynamic_max_zones]]
+
+        # Create list of dicts with level and strength
+        res_zone_data = [{'level': price, 'strength': count} for price, count in zip(res_zones_prices, res_counts)]
+        sup_zone_data = [{'level': price, 'strength': count} for price, count in zip(sup_zones_prices, sup_counts)]
+
+        # Sort by strength and take top N
+        top_res = sorted(res_zone_data, key=lambda x: x['strength'], reverse=True)[:dynamic_max_zones]
+        top_sup = sorted(sup_zone_data, key=lambda x: x['strength'], reverse=True)[:dynamic_max_zones]
+        
         return {'support': top_sup, 'resistance': top_res}
 
     def _bar_touches_zone(self, candle, zone: float, direction: str, tol: float = 0.003) -> bool:
@@ -354,46 +365,6 @@ class PriceActionSRStrategy(SignalGenerator):
             self.logger.debug(f"[SL] SELL: zone={zone}, candle_high={candle_extremity}, buffer={buffer}, SL={sl}")
             return sl
 
-    def _pattern_match(
-        self, 
-        idx: int, 
-        direction: str,
-        hammer_series: pd.Series,
-        shooting_star_series: pd.Series,
-        bullish_engulfing_series: pd.Series,
-        bearish_engulfing_series: pd.Series,
-        bullish_harami_series: pd.Series,
-        bearish_harami_series: pd.Series,
-        morning_star_series: pd.Series,
-        evening_star_series: pd.Series
-    ) -> Optional[str]:
-        # Ensure we have enough data for 3-candle patterns (Morning/Evening Star)
-        # This check is implicitly handled by TA-Lib functions returning 0 for early bars
-        # and the generate_signals method ensuring enough bars.
-        # However, direct access to iloc[idx] needs valid idx.
-        if idx < 0: # Basic check, TA-Lib functions handle lookback internally
-            return None
-
-        if direction == 'buy':
-            if hammer_series.iloc[idx]:
-                return 'Hammer (TA-Lib)'
-            if bullish_engulfing_series.iloc[idx]:
-                return 'Bullish Engulfing (TA-Lib)'
-            if bullish_harami_series.iloc[idx]:
-                return 'Bullish Harami (TA-Lib)'
-            if morning_star_series.iloc[idx]:
-                return 'Morning Star (TA-Lib)'
-        else: # direction == 'sell'
-            if shooting_star_series.iloc[idx]:
-                return 'Shooting Star (TA-Lib)'
-            if bearish_engulfing_series.iloc[idx]:
-                return 'Bearish Engulfing (TA-Lib)'
-            if bearish_harami_series.iloc[idx]:
-                return 'Bearish Harami (TA-Lib)'
-            if evening_star_series.iloc[idx]:
-                return 'Evening Star (TA-Lib)'
-        return None
-
     def _score_signal_01(self, pattern: str, wick: bool, volume_score: float, risk_reward: float, zone_touches: int, other_confluence: float = 0.0) -> Tuple[float, dict]:
         """
         Compute a normalized 0-1 score for a trading signal based on pattern, wick rejection, volume, risk-reward, zone strength, and optional other confluence.
@@ -503,14 +474,14 @@ class PriceActionSRStrategy(SignalGenerator):
         
         # Log support zones
         if support_zones:
-            support_str = ", ".join([f"{z:.5f}" for z in support_zones])
+            support_str = ", ".join([f"{z['level']:.5f} (strength: {z['strength']})" for z in support_zones])
             logger.info(f"[{symbol}] Support zones: {support_str}")
         else:
             logger.info(f"[{symbol}] No support zones detected")
             
         # Log resistance zones
         if resistance_zones:
-            resistance_str = ", ".join([f"{z:.5f}" for z in resistance_zones])
+            resistance_str = ", ".join([f"{z['level']:.5f} (strength: {z['strength']})" for z in resistance_zones])
             logger.info(f"[{symbol}] Resistance zones: {resistance_str}")
         else:
             logger.info(f"[{symbol}] No resistance zones detected")
@@ -659,12 +630,12 @@ class PriceActionSRStrategy(SignalGenerator):
 
         for sym in symbols:
             logger.info(f"Analyzing {sym} with {self.name}")
-            df = market_data[sym]
-            if isinstance(df, dict):
-                df_primary = df.get(self.primary_timeframe)
-                df_secondary = df.get(self.secondary_timeframe) if self.secondary_timeframe else None
+            df_data = market_data[sym]
+            if isinstance(df_data, dict):
+                df_primary = df_data.get(self.primary_timeframe)
+                df_secondary = df_data.get(self.secondary_timeframe) if self.secondary_timeframe else None
             else:
-                df_primary = df
+                df_primary = df_data
                 df_secondary = None
             if df_primary is None or len(df_primary) < self.pivot_window + 21:
                 logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df_primary) if df_primary is not None else 0}")
@@ -687,8 +658,8 @@ class PriceActionSRStrategy(SignalGenerator):
             try:
                 last_timestamp = pd.to_datetime(df_primary.index[-1])
                 last_timestamp_str = str(last_timestamp)
-            except:
-                logger.warning(f"Could not extract timestamp from dataframe for {sym}")
+            except Exception as e: # Catch specific exception if known, or general Exception
+                logger.warning(f"Could not extract timestamp from dataframe for {sym}: {e}")
                 last_timestamp_str = str(current_time)
 
             if bar_key in self.processed_bars and self.processed_bars[bar_key] == last_timestamp_str:
@@ -702,31 +673,28 @@ class PriceActionSRStrategy(SignalGenerator):
             if 'tick_volume' not in df_primary.columns:
                 df_primary['tick_volume'] = df_primary.get('volume', 1)
 
-            # Add LuxAlgo-style pattern columns
-            df_primary = add_luxalgo_patterns(df_primary)
-
-            # Use LuxAlgo pattern columns instead of TA-Lib
-            hammer_series = df_primary['hammer']
-            shooting_star_series = df_primary['shooting_star']
-            bullish_engulfing_series = df_primary['bullish_engulfing']
-            bearish_engulfing_series = df_primary['bearish_engulfing']
-            bullish_harami_series = df_primary['bullish_harami']
-            bearish_harami_series = df_primary['bearish_harami']
-            morning_star_series = df_primary['morning_star']
-            evening_star_series = df_primary['evening_star']
+            df_primary = add_luxalgo_patterns(df_primary.copy()) # Ensure using .copy()
 
             zones = self.get_sr_zones(df_primary)
             symbol_signals = []
 
             for direction, zone_list in [('buy', zones['support']), ('sell', zones['resistance'])]:
                 zone_type = 'support' if direction == 'buy' else 'resistance'
-                # Higher timeframe filter: only allow buy if uptrend_ht, sell if downtrend_ht
-                if not ht_trend_ok or (direction == 'buy' and not uptrend_ht) or (direction == 'sell' and not downtrend_ht):
-                    self.logger.debug(f"[HTF Trend Filter] Skipping {direction} signal for {sym}: HTF trend does not confirm.")
+                if not ht_trend_ok:
+                    self.logger.debug(f"[HTF Trend Filter] Skipping {direction} signal for {sym} due to insufficient secondary timeframe data.")
+                    continue
+                if direction == 'buy' and not uptrend_ht:
+                    self.logger.debug(f"[HTF Trend Filter] Skipping BUY signal for {sym}: HTF trend is not UP.")
+                    continue
+                if direction == 'sell' and not downtrend_ht:
+                    self.logger.debug(f"[HTF Trend Filter] Skipping SELL signal for {sym}: HTF trend is not DOWN.")
                     continue
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
 
-                for zone in zone_list:
+                for zone_price_map in zone_list:
+                    zone = zone_price_map['level'] # Extract the price level
+                    zone_touches = zone_price_map['strength'] # Extract strength/touches
+
                     zone_key = (sym, zone_type, round(zone, 5))
                     if zone_key in self.processed_zones:
                         last_used_time = self.processed_zones[zone_key]
@@ -736,78 +704,98 @@ class PriceActionSRStrategy(SignalGenerator):
                             hours_remaining = cooldown_remaining / 3600
                             logger.debug(f"Skipping {zone_type} zone {zone:.5f} - on cooldown for {hours_remaining:.1f} more hours")
                             continue
-                    zone_touches = int(self._is_in_zone(df_primary['close'], zone).sum())
                     idx = len(df_primary) - 1
                     process_idx = idx - 1
-                    if process_idx < self.pivot_window + 20:
-                        logger.debug(f"Not enough bars to check for patterns at index {process_idx}")
+                    if process_idx < 0 or process_idx < self.pivot_window + 20: # Ensure process_idx is valid
+                        logger.debug(f"Not enough bars to check for patterns at index {process_idx}, need at least {self.pivot_window + 20}")
                         continue
                     candle = df_primary.iloc[process_idx]
                     in_zone = self._bar_touches_zone(candle, zone, direction)
-                    pattern = self._pattern_match(
-                        process_idx, direction,
-                        hammer_series, shooting_star_series,
-                        bullish_engulfing_series, bearish_engulfing_series,
-                        bullish_harami_series, bearish_harami_series,
-                        morning_star_series, evening_star_series
-                    )
+
+                    # New pattern detection logic
+                    matched_pattern_name = None
+                    patterns_to_check = []
+                    if direction == 'buy':
+                        patterns_to_check = BULLISH_PATTERNS + NEUTRAL_PATTERNS
+                    elif direction == 'sell':
+                        patterns_to_check = BEARISH_PATTERNS + NEUTRAL_PATTERNS
+
+                    for p_col in patterns_to_check:
+                        if p_col in df_primary.columns and df_primary[p_col].iloc[process_idx]:
+                            matched_pattern_name = p_col # Store raw name like 'hammer'
+                            break # Take the first matched pattern
+
+                    pattern_display_name = f"{matched_pattern_name.replace('_', ' ').title()} (LuxAlgo)" if matched_pattern_name else None
+
                     wick = self._wick_rejection(candle, direction)
-                    vol_spike = self._volume_spike(df_primary, process_idx)
-                    # Pass direction to is_valid_volume_spike
-                    vol_wick_ok = self.is_valid_volume_spike(df_primary)
-                    # Granular logging for all filters
-                    logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern} wick={wick} vol_spike={vol_spike} vol_wick_ok={vol_wick_ok}")
+                    vol_spike = self._volume_spike(df_primary, process_idx) # This seems to be the original volume spike logic
+                    vol_wick_ok = self.is_valid_volume_spike(df_primary) # This is the TrendFollowingStrategy's volume logic
+
+                    logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern_display_name} wick={wick} vol_spike_orig={vol_spike} vol_wick_trendfollow={vol_wick_ok}")
+
                     if not in_zone:
                         logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: not in zone.")
                         continue
-                    if not pattern:
+                    if not matched_pattern_name: # Check if a pattern was matched
                         logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: no valid pattern.")
                         continue
-                    if not vol_wick_ok:
-                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: volume-wick confirmation failed.")
+                    # Decide which volume check to use, or combine. For now, let's use the strategy's original `_volume_spike`
+                    if not vol_spike:
+                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: original volume_spike confirmation failed.")
                         continue
-                    # Calculate volume score (how much above threshold)
-                    avg_vol = df_primary['tick_volume'].iloc[process_idx-20:process_idx].mean()
-                    current_vol = df_primary['tick_volume'].iloc[process_idx]
+
+                    avg_vol = df_primary['tick_volume'].iloc[max(0, process_idx-20):process_idx].mean() if process_idx > 0 else 0
+                    current_vol = df_primary['tick_volume'].iloc[process_idx] if process_idx < len(df_primary) else 0
                     volume_score = min((current_vol / avg_vol) / self.volume_multiplier, 1.0) if avg_vol > 0 else 0.0
-                    
+
                     entry = df_primary['open'].iloc[idx] if idx < len(df_primary) else candle['close']
-                    
-                    # Determine candle extremity for SL calculation
+
                     candle_low = candle['low']
                     candle_high = candle['high']
                     stop = self.calculate_stop_loss(
                         zone, 
                         direction, 
                         candle_low if direction == 'buy' else candle_high
-                    ) # Default buffer is used
+                    )
 
-                    opp_zones = zones['resistance'] if direction == 'buy' else zones['support']
+                    opp_zones_map = zones['resistance'] if direction == 'buy' else zones['support']
+                    opp_zones_levels = [z['level'] for z in opp_zones_map] # Extract levels
                     tp = None
-                    for opp in (sorted(opp_zones) if direction == 'buy' else sorted(opp_zones, reverse=True)):
-                        if (direction == 'buy' and opp > entry) or (direction == 'sell' and opp < entry):
-                            tp = opp
+                    for opp_level in (sorted(opp_zones_levels) if direction == 'buy' else sorted(opp_zones_levels, reverse=True)):
+                        if (direction == 'buy' and opp_level > entry) or (direction == 'sell' and opp_level < entry):
+                            tp = opp_level
                             break
                     if tp is None:
                         risk = abs(entry - stop)
+                        if risk == 0: # Prevent division by zero for TP calc
+                            logger.warning(f"Risk is zero for {sym} {direction} at {entry}, SL {stop}. Skipping TP calc.")
+                            continue # Or handle differently
                         tp = entry + 2 * risk if direction == 'buy' else entry - 2 * risk
                         logger.debug(f"Using fallback 2R TP: {tp:.5f}")
+
                     equity = self.risk_manager.get_account_balance() if hasattr(self.risk_manager, 'get_account_balance') else 10000
-                    size = (equity * self.risk_per_trade) / max(abs(entry - stop), 1e-6)
+
+                    # Ensure entry and stop are valid before sizing
+                    if ((direction == 'buy' and entry <= stop) or \
+                       (direction == 'sell' and entry >= stop) or \
+                       abs(entry - stop) == 0):
+                        logger.warning(f"Invalid entry/stop for position sizing: {sym} {direction}, entry={entry}, stop={stop}. Skipping signal.")
+                        continue
+
+                    size = (equity * self.risk_per_trade) / abs(entry - stop)
                     risk_reward = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
-                    # Use new 0-1 scoring system
+
                     score_01, score_breakdown = self._score_signal_01(
-                        pattern=pattern or "",
+                        pattern=pattern_display_name or "", # Use display name
                         wick=wick,
                         volume_score=volume_score,
                         risk_reward=risk_reward,
                         zone_touches=zone_touches,
                         other_confluence=0.0
                     )
-                    # Set confidence directly from score_01, with min/max cap
                     confidence = min(max(score_01, 0.1), 0.95)
                     reason = (
-                        f"Confluence: pattern={pattern}, wick={wick}, volume_spike={vol_spike} at {zone_type} zone {zone:.5f}. "
+                        f"Confluence: pattern={pattern_display_name}, wick={wick}, volume_spike={vol_spike} at {zone_type} zone {zone:.5f}. "
                         f"Risk:Reward = {risk_reward:.2f}, Score01 = {score_01:.2f}"
                     )
                     signal = {
@@ -820,7 +808,7 @@ class PriceActionSRStrategy(SignalGenerator):
                         'size': float(size),
                         'timeframe': self.primary_timeframe,
                         'reason': reason,
-                        'pattern': pattern if pattern else '',
+                        'pattern': pattern_display_name if pattern_display_name else '',
                         'zone': float(zone),
                         'zone_touches': zone_touches,
                         'volume_score': volume_score,
@@ -835,7 +823,7 @@ class PriceActionSRStrategy(SignalGenerator):
                     logger.debug(f"Score breakdown: {score_breakdown}")
                     self.processed_zones[zone_key] = current_time
                     symbol_signals.append(signal)
-                    break
+                    break # Process one signal per zone
             if len(symbol_signals) > 1:
                 all_signals = symbol_signals.copy()
                 symbol_signals = self._prioritize_signals(symbol_signals)

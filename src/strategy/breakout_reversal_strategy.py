@@ -28,8 +28,8 @@ import time
 
 from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
-import talib # Added talib import
-from src.utils.patterns_luxalgo import add_luxalgo_patterns
+import talib 
+from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, BEARISH_PATTERNS, NEUTRAL_PATTERNS, ALL_PATTERNS, filter_patterns_by_bias, get_pattern_type
 
 # Strategy parameter profiles for different timeframes
 TIMEFRAME_PROFILES = {
@@ -41,8 +41,8 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 10,
         "consolidation_update_hours": 2,
         "atr_multiplier": 0.5,   # Lower multiplier for noisy timeframe
-        "volume_percentile": 85,  # 85th percentile for volume threshold
-        "min_risk_reward": 2.0   # Align with book
+        "volume_percentile": 80,  # Changed from 85
+        "min_risk_reward": 1.8   # Changed from 2.0
     },
     "M5": {
         "lookback_period": 140,  # ~12 hours
@@ -52,8 +52,8 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 6,
         "consolidation_update_hours": 3,
         "atr_multiplier": 0.7,   # Medium multiplier
-        "volume_percentile": 85,  # 85th percentile for volume threshold
-        "min_risk_reward": 2.0   # Align with book
+        "volume_percentile": 80,  # Changed from 85
+        "min_risk_reward": 1.8   # Changed from 2.0
     },
     "M15": {
         "lookback_period": 96,   # ~24 hours
@@ -63,8 +63,8 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 3,
         "consolidation_update_hours": 6,
         "atr_multiplier": 1.0,   # Standard multiplier
-        "volume_percentile": 85,  # 85th percentile for volume threshold
-        "min_risk_reward": 2.0   # Align with book
+        "volume_percentile": 80,  # Changed from 85
+        "min_risk_reward": 1.8   # Changed from 2.0
     },
     "H1": {
         "lookback_period": 50,   # ~2 days
@@ -74,8 +74,8 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 2,
         "consolidation_update_hours": 12,
         "atr_multiplier": 1.2,   # Higher multiplier for more significant movements
-        "volume_percentile": 85,  # 85th percentile for volume threshold
-        "min_risk_reward": 3.0   # More conservative for higher TF
+        "volume_percentile": 80,  # Changed from 85
+        "min_risk_reward": 2.5   # Changed from 3.0
     },
     "H4": {
         "lookback_period": 30,   # ~5 days
@@ -85,8 +85,8 @@ TIMEFRAME_PROFILES = {
         "candles_to_check": 2,
         "consolidation_update_hours": 24,
         "atr_multiplier": 1.5,   # Higher multiplier for more significant movements
-        "volume_percentile": 85,  # 85th percentile for volume threshold
-        "min_risk_reward": 3.0   # More conservative for higher TF
+        "volume_percentile": 80,  # Changed from 85
+        "min_risk_reward": 2.5   # Changed from 3.0
     }
 }
 class _TrendLineAnalyzer:
@@ -1130,17 +1130,25 @@ class BreakoutReversalStrategy(SignalGenerator):
         """Improved swing-high detection using Bill-Williams fractals filtered by ATR significance."""
         if df is None or len(df) < 2 * window + 1:
             return []
+        
         highs = np.asarray(df['high'].values, dtype=np.float64)
         lows = np.asarray(df['low'].values, dtype=np.float64)
-        # Use TA-Lib for swing high detection
-        min_required = 2 * window + 1
+        closes = np.asarray(df['close'].values, dtype=np.float64)
+        
+        # Calculate ATR for significance threshold
+        atr = talib.ATR(highs, lows, closes, timeperiod=14)
+        sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
+
         pivots = []
         last_pivot_price = None
-        # ATR significance threshold
-        atr = talib.ATR(highs, lows, np.asarray(df['close'].values, dtype=np.float64), timeperiod=14)
-        sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
+        
+        # Pre-calculate MAX series to avoid repeated calls in loop
+        max_series = talib.MAX(highs, timeperiod=2 * window + 1)
+
         for i in range(window, len(df) - window):
-            if highs[i] == talib.MAX(highs, timeperiod=2 * window + 1)[i] and not np.isnan(talib.MAX(highs, timeperiod=2 * window + 1)[i]):
+            # Check if current high is the maximum in the window (fractal condition)
+            if not np.isnan(max_series[i]) and highs[i] == max_series[i]:
+                # ATR significance filter
                 if last_pivot_price is None or abs(highs[i] - last_pivot_price) >= sig_thresh:
                     pivots.append((i, highs[i]))
                     last_pivot_price = highs[i]
@@ -1150,16 +1158,25 @@ class BreakoutReversalStrategy(SignalGenerator):
         """Improved swing-low detection using fractals + ATR filter (mirror of swing-high logic)."""
         if df is None or len(df) < 2 * window + 1:
             return []
+
         highs = np.asarray(df['high'].values, dtype=np.float64)
         lows = np.asarray(df['low'].values, dtype=np.float64)
-        # Use TA-Lib for swing low detection
-        min_required = 2 * window + 1
+        closes = np.asarray(df['close'].values, dtype=np.float64)
+
+        # Calculate ATR for significance threshold
+        atr = talib.ATR(highs, lows, closes, timeperiod=14)
+        sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
+
         pivots = []
         last_pivot_price = None
-        atr = talib.ATR(highs, lows, np.asarray(df['close'].values, dtype=np.float64), timeperiod=14)
-        sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
+
+        # Pre-calculate MIN series
+        min_series = talib.MIN(lows, timeperiod=2 * window + 1)
+
         for i in range(window, len(df) - window):
-            if lows[i] == talib.MIN(lows, timeperiod=2 * window + 1)[i] and not np.isnan(talib.MIN(lows, timeperiod=2 * window + 1)[i]):
+            # Check if current low is the minimum in the window (fractal condition)
+            if not np.isnan(min_series[i]) and lows[i] == min_series[i]:
+                # ATR significance filter
                 if last_pivot_price is None or abs(lows[i] - last_pivot_price) >= sig_thresh:
                     pivots.append((i, lows[i]))
                     last_pivot_price = lows[i]
@@ -1173,7 +1190,7 @@ class BreakoutReversalStrategy(SignalGenerator):
         import numpy as np
         from scipy.stats import linregress
         min_points = getattr(self, 'trend_line_min_points', 3)
-        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.7)
+        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.6) # Changed from 0.7
         if len(swing_points) < min_points:
             self.logger.debug(f"Not enough swing points ({len(swing_points)}) to identify {line_type} trend lines. Need at least {min_points}.")
             return []
@@ -1209,8 +1226,10 @@ class BreakoutReversalStrategy(SignalGenerator):
         """
         import numpy as np
         if atr is None or pd.isna(atr) or atr == 0:
-            atr = df['close'].rolling(14).std().iloc[-1] if len(df) >= 14 else df['close'].std()
-        if atr is None or pd.isna(atr) or atr == 0:
+            # Ensure the calculation result is explicitly float
+            std_val = df['close'].rolling(14).std().iloc[-1] if len(df) >= 14 else df['close'].std()
+            atr = float(std_val) if pd.notna(std_val) else 0.0
+        if atr is None or pd.isna(atr) or atr == 0: # Check again in case previous assignment resulted in 0 or NaN
             atr = 1e-4
         price_series = df['low'] if line_type == 'bullish' else df['high']
         if start_idx is None or end_idx is None:
@@ -1430,7 +1449,7 @@ class BreakoutReversalStrategy(SignalGenerator):
                 labels = kmeans.fit_predict(price_reshape)
                 for c in range(n_clusters):
                     mask = labels == c
-                    if np.sum(mask) == 0:
+                    if np.sum(mask.astype(int)) == 0:
                         continue
                     cluster_prices = price_values[mask]
                     cluster_vols = volumes[mask]
@@ -1620,6 +1639,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             
         # Check if the price has retested the level using ATR-based window
         current_price = df['close'].iloc[-1]
+        current_high = df['high'].iloc[-1]
 
         # For breakout above resistance, we're looking for a retest from above
         if direction == 'bullish' and abs(current_price - level) <= price_tolerance and current_price > level:
@@ -1629,7 +1649,7 @@ class BreakoutReversalStrategy(SignalGenerator):
             self.retest_tracking[symbol] = retest_info
         
         # For breakout below support, we're looking for a retest from below
-        elif direction == 'bearish' and abs(current_price - level) <= price_tolerance and current_price < level:
+        elif direction == 'bearish' and abs(current_high - level) <= price_tolerance and current_price < level:
             logger.info(f"✅ Confirmed bearish retest of {level:.5f} for {symbol} (ATR window: {price_tolerance:.5f})")
             # Update breakout tracking to indicate retest is confirmed
             retest_info['retest_confirmed'] = True
@@ -2080,6 +2100,11 @@ class BreakoutReversalStrategy(SignalGenerator):
             
             setup_candle_idx = confirmation_candle_idx - 1
             
+            # Ensure DataFrame has enough rows before iloc
+            if setup_candle_idx < 0 or confirmation_candle_idx >= len(df):
+                self.logger.debug(f"[{symbol}/{self.primary_timeframe}] Index out of bounds: setup_idx={setup_candle_idx}, confirm_idx={confirmation_candle_idx}, df_len={len(df)}")
+                continue
+
             setup_candle = df.iloc[setup_candle_idx]
             confirmation_candle = df.iloc[confirmation_candle_idx]
 
@@ -2145,15 +2170,20 @@ class BreakoutReversalStrategy(SignalGenerator):
                     # Check these if not already a strong false_break_rejection, or to add confluence
                     if not is_false_break_rejection: # Prioritize false break detection
                         if expected_direction == 'buy':
-                            if hammer_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Hammer"
-                            elif bullish_engulfing_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Bullish Engulfing"
-                            elif morning_star_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Morning Star"
-                            # elif harami_series.iloc[setup_candle_idx] > 0: pattern_on_setup = "Bullish Harami" 
+                            if df['hammer'].iloc[setup_candle_idx]: pattern_on_setup = "Hammer"
+                            elif df['bullish_engulfing'].iloc[setup_candle_idx]: pattern_on_setup = "Bullish Engulfing"
+                            elif df['morning_star'].iloc[setup_candle_idx]: pattern_on_setup = "Morning Star"
+                            elif df['bullish_harami'].iloc[setup_candle_idx]: pattern_on_setup = "Bullish Harami"
+                            elif df['white_marubozu'].iloc[setup_candle_idx]: pattern_on_setup = "White Marubozu"
+                            elif df['pin_bar'].iloc[setup_candle_idx] and setup_candle['close'] > setup_candle['open']: pattern_on_setup = "Bullish Pin Bar"
                         else: # expected_direction == 'sell'
-                            if shooting_star_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Shooting Star"
-                            elif bearish_engulfing_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Bearish Engulfing"
-                            elif evening_star_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Evening Star"
-                            # elif harami_series.iloc[setup_candle_idx] < 0: pattern_on_setup = "Bearish Harami"
+                            if df['shooting_star'].iloc[setup_candle_idx]: pattern_on_setup = "Shooting Star"
+                            elif df['bearish_engulfing'].iloc[setup_candle_idx]: pattern_on_setup = "Bearish Engulfing"
+                            elif df['evening_star'].iloc[setup_candle_idx]: pattern_on_setup = "Evening Star"
+                            elif df['bearish_harami'].iloc[setup_candle_idx]: pattern_on_setup = "Bearish Harami"
+                            elif df['hanging_man'].iloc[setup_candle_idx]: pattern_on_setup = "Hanging Man"
+                            elif df['black_marubozu'].iloc[setup_candle_idx]: pattern_on_setup = "Black Marubozu"
+                            elif df['pin_bar'].iloc[setup_candle_idx] and setup_candle['close'] < setup_candle['open']: pattern_on_setup = "Bearish Pin Bar"
                     
                     if pattern_on_setup is None or pattern_on_setup == "Unknown Rejection" and not is_false_break_rejection : # No clear rejection or pattern on setup candle
                         self.logger.debug(f"[{symbol}/{self.primary_timeframe}] No strong rejection or pattern on setup candle {setup_candle_idx} at {level_price:.4f} for {expected_direction}.")
@@ -2334,6 +2364,36 @@ class BreakoutReversalStrategy(SignalGenerator):
         """
         results = {'is_confirmed': False, 'reason': "No confirmation criteria met", 'volume_score': 0.0, 'pattern_on_confirmation': None}
         
+        # Ensure df_for_vol_analysis (which is the main df) has the pattern columns
+        # It should already have them from the generate_signals method.
+        
+        # Convert confirmation_candle.name (timestamp) to its integer position in the DataFrame
+        try:
+            # Assuming confirmation_candle.name is the timestamp index of the candle
+            # Get the integer position of this timestamp in df_for_vol_analysis
+            # This is safer if the index might have duplicates or if get_loc returns non-integer
+            if confirmation_candle.name in df_for_vol_analysis.index:
+                 confirmation_candle_idx_int = df_for_vol_analysis.index.get_loc(confirmation_candle.name)
+                 if isinstance(confirmation_candle_idx_int, slice):
+                     # If it's a slice (e.g. duplicate timestamps), take the last one
+                     confirmation_candle_idx_int = confirmation_candle_idx_int.stop -1 
+                 elif not isinstance(confirmation_candle_idx_int, int):
+                     # If it's an array (e.g. boolean mask from get_loc), try to get the first true index
+                     true_indices = np.where(confirmation_candle_idx_int)[0]
+                     if len(true_indices) > 0:
+                         confirmation_candle_idx_int = true_indices[0]
+                     else:
+                         self.logger.error(f"Could not resolve confirmation_candle_idx for {confirmation_candle.name}")
+                         return results # Cannot proceed without a valid integer index
+            else:
+                self.logger.error(f"Confirmation candle timestamp {confirmation_candle.name} not found in df_for_vol_analysis index.")
+                return results
+
+        except Exception as e:
+            self.logger.error(f"Error getting integer index for confirmation_candle: {e}")
+            return results
+
+
         conf_open, conf_high, conf_low, conf_close = confirmation_candle[['open', 'high', 'low', 'close']]
         conf_body = conf_close - conf_open
         conf_total_range = conf_high - conf_low
@@ -2370,11 +2430,22 @@ class BreakoutReversalStrategy(SignalGenerator):
                 results['is_confirmed'] = True
                 results['reason'] = f"Bullish confirmation: bullish_close, sig_body, close_above_setup_HL={closes_above_setup_high}/CL={closes_above_setup_close}, good_wick, vol_ok, maintained_level."
                 # Check for specific bullish patterns on confirmation candle if needed
-                if talib.CDLENGULFING(df_for_vol_analysis['open'].iloc[-1:], df_for_vol_analysis['high'].iloc[-1:], df_for_vol_analysis['low'].iloc[-1:], df_for_vol_analysis['close'].iloc[-1:])[-1] > 0 and \
-                   conf_close > setup_candle['high'] and conf_open < setup_candle['low']: # Check if it engulfs the setup candle
-                     results['pattern_on_confirmation'] = "Bullish Engulfing of Setup"
-                elif talib.CDLMARUBOZU(df_for_vol_analysis['open'].iloc[-1:], df_for_vol_analysis['high'].iloc[-1:], df_for_vol_analysis['low'].iloc[-1:], df_for_vol_analysis['close'].iloc[-1:])[-1] != 0 and conf_close > conf_open:
-                     results['pattern_on_confirmation'] = "Bullish Marubozu"
+                # Ensure we are looking at the correct index in the DataFrame for LuxAlgo patterns
+                is_bullish_engulfing = False
+                is_white_marubozu = False
+                if isinstance(df_for_vol_analysis, pd.DataFrame):
+                    bullish_engulfing_series = df_for_vol_analysis.get('bullish_engulfing')
+                    if isinstance(bullish_engulfing_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(bullish_engulfing_series):
+                        is_bullish_engulfing = bool(bullish_engulfing_series.iloc[confirmation_candle_idx_int])
+
+                    white_marubozu_series = df_for_vol_analysis.get('white_marubozu')
+                    if isinstance(white_marubozu_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(white_marubozu_series):
+                        is_white_marubozu = bool(white_marubozu_series.iloc[confirmation_candle_idx_int])
+                        
+                if is_bullish_engulfing and conf_close > setup_candle['high'] and conf_open < setup_candle['low']:
+                    results['pattern_on_confirmation'] = "Bullish Engulfing of Setup"
+                elif is_white_marubozu and conf_close > conf_open:
+                    results['pattern_on_confirmation'] = "Bullish Marubozu"
 
             else: # Construct detailed fail reason
                 fail_reasons = []
@@ -2402,11 +2473,22 @@ class BreakoutReversalStrategy(SignalGenerator):
                manageable_lower_wick and volume_supports and did_not_close_above_level:
                 results['is_confirmed'] = True
                 results['reason'] = f"Bearish confirmation: bearish_close, sig_body, close_below_setup_LL={closes_below_setup_low}/CL={closes_below_setup_close}, good_wick, vol_ok, maintained_level."
-                if talib.CDLENGULFING(df_for_vol_analysis['open'].iloc[-1:], df_for_vol_analysis['high'].iloc[-1:], df_for_vol_analysis['low'].iloc[-1:], df_for_vol_analysis['close'].iloc[-1:])[-1] < 0 and \
-                   conf_close < setup_candle['low'] and conf_open > setup_candle['high']:
-                     results['pattern_on_confirmation'] = "Bearish Engulfing of Setup"
-                elif talib.CDLMARUBOZU(df_for_vol_analysis['open'].iloc[-1:], df_for_vol_analysis['high'].iloc[-1:], df_for_vol_analysis['low'].iloc[-1:], df_for_vol_analysis['close'].iloc[-1:])[-1] != 0 and conf_close < conf_open:
-                     results['pattern_on_confirmation'] = "Bearish Marubozu"
+                # Ensure we are looking at the correct index in the DataFrame for LuxAlgo patterns
+                is_bearish_engulfing = False
+                is_black_marubozu = False
+                if isinstance(df_for_vol_analysis, pd.DataFrame):
+                    bearish_engulfing_series = df_for_vol_analysis.get('bearish_engulfing')
+                    if isinstance(bearish_engulfing_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(bearish_engulfing_series):
+                        is_bearish_engulfing = bool(bearish_engulfing_series.iloc[confirmation_candle_idx_int])
+
+                    black_marubozu_series = df_for_vol_analysis.get('black_marubozu')
+                    if isinstance(black_marubozu_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(black_marubozu_series):
+                        is_black_marubozu = bool(black_marubozu_series.iloc[confirmation_candle_idx_int])
+
+                if is_bearish_engulfing and conf_close < setup_candle['low'] and conf_open > setup_candle['high']:
+                    results['pattern_on_confirmation'] = "Bearish Engulfing of Setup"
+                elif is_black_marubozu and conf_close < conf_open:
+                    results['pattern_on_confirmation'] = "Bearish Marubozu"
             else:
                 fail_reasons = []
                 if not is_bearish_candle: fail_reasons.append("not_bearish_candle")
@@ -2812,11 +2894,12 @@ class BreakoutReversalStrategy(SignalGenerator):
 
     def _is_breakout_candle(self, candle: pd.Series, df: pd.DataFrame, level: float, direction: str) -> bool:
         """
-        Relaxed breakout confirmation: 1-bar close above/below S/R with volume >80th percentile.
+        Relaxed breakout confirmation: 1-bar close above/below S/R with volume > configurable percentile.
         """
         if len(df) < 50 or 'tick_volume' not in df.columns:
             return False
-        vol_threshold = np.percentile(df['tick_volume'].iloc[-50:], 80)
+        # Use self.volume_percentile instead of hardcoded 80
+        vol_threshold = np.percentile(df['tick_volume'].iloc[-50:], self.volume_percentile)
         if direction == 'buy':
             return (candle['close'] > level and candle['tick_volume'] >= vol_threshold)
         else:

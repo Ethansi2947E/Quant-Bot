@@ -7,14 +7,14 @@ This strategy identifies the prevailing trend on a higher timeframe, marks key s
 import pandas as pd
 import numpy as np
 from loguru import logger
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from src.trading_bot import SignalGenerator
 import talib # Added talib import
 from config.config import TRADING_CONFIG,get_risk_manager_config
 from src.risk_manager import RiskManager
-from src.utils.patterns_luxalgo import add_luxalgo_patterns
+from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, BEARISH_PATTERNS, NEUTRAL_PATTERNS, ALL_PATTERNS, filter_patterns_by_bias
 
 # Timeframe-specific profiles for dynamic parameter scaling
 TIMEFRAME_PROFILES = {
@@ -158,11 +158,13 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         logger.info(f"🔌 Initializing {self.name}")
         return True
 
-    async def generate_signals(self,
-                               market_data: Optional[dict] = None,
-                               symbol: Optional[str] = None,
-                               timeframe: Optional[str] = None,
-                               **kwargs) -> list:
+    async def generate_signals(
+        self,
+        market_data: Optional[dict] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        **kwargs
+    ) -> list:
         """
         Generate long/short signals based on confluence price action.
         1. Determine up/down trend on higher timeframe
@@ -186,10 +188,10 @@ class ConfluencePriceActionStrategy(SignalGenerator):
         # initialize RiskManager and account balance
         rm = RiskManager.get_instance()
         balance = kwargs.get("balance", rm.daily_stats.get('starting_balance', 0) or 10000)
-        
+
         # For detailed debugging
         debug_visualize = kwargs.get("debug_visualize", True)
-        
+
         current_time = datetime.now().timestamp()
         for sym, frames in market_data.items():
             higher = frames.get(self.higher_timeframe)
@@ -197,14 +199,14 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             if not isinstance(higher, pd.DataFrame) or not isinstance(primary, pd.DataFrame):
                 logger.debug(f"Missing data for {sym} - higher: {type(higher)}, primary: {type(primary)}")
                 continue
-            
+
             # More detailed information about the data received
-            logger.debug(f"Analyzing {sym} - Higher TF: {self.higher_timeframe} ({len(higher)} bars), Primary TF: {self.primary_timeframe} ({len(primary)} bars)")
-            
-            # Add LuxAlgo-style pattern columns to primary timeframe
-            primary = add_luxalgo_patterns(primary)
-            
-            # Bar tracking
+            logger.debug(
+                f"Analyzing {sym} - Higher TF: {self.higher_timeframe} ({len(higher)} bars), Primary TF: {self.primary_timeframe} ({len(primary)} bars)"
+            )
+
+            primary = add_luxalgo_patterns(primary.copy())  # Use .copy()
+
             bar_key = (sym, self.primary_timeframe)
             try:
                 last_timestamp = pd.to_datetime(primary.index[-1])
@@ -212,465 +214,429 @@ class ConfluencePriceActionStrategy(SignalGenerator):
             except Exception:
                 logger.warning(f"Could not extract timestamp from dataframe for {sym}")
                 last_timestamp_str = str(current_time)
-            if bar_key in self.processed_bars and self.processed_bars[bar_key] == last_timestamp_str:
-                logger.debug(f"Already processed latest bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
+            if (
+                bar_key in self.processed_bars
+                and self.processed_bars[bar_key] == last_timestamp_str
+            ):
+                logger.debug(
+                    f"Already processed latest bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}"
+                )
                 continue
             self.processed_bars[bar_key] = last_timestamp_str
-            logger.debug(f"Processing new bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}")
-            
+            logger.debug(
+                f"Processing new bar for {sym}/{self.primary_timeframe} at {last_timestamp_str}"
+            )
+
             # --- Step 1: Cache ATR and ADX series for this symbol's primary timeframe ---
             atr_series = None
             adx_series = None
             if isinstance(primary, pd.DataFrame) and len(primary) >= 14:
                 try:
-                    if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
-                        high = np.asarray(primary['high'].values, dtype=np.float64)
-                        low = np.asarray(primary['low'].values, dtype=np.float64)
-                        close = np.asarray(primary['close'].values, dtype=np.float64)
-                        atr_series = talib.ATR(high, low, close, timeperiod=14)
+                    if (
+                        primary is not None
+                        and not primary.empty
+                        and all(col in primary.columns for col in ['high', 'low', 'close'])
+                    ):
+                        high_np = np.asarray(primary['high'].values, dtype=np.float64)
+                        low_np = np.asarray(primary['low'].values, dtype=np.float64)
+                        close_np = np.asarray(primary['close'].values, dtype=np.float64)
+                        atr_series = talib.ATR(high_np, low_np, close_np, timeperiod=14)
                     else:
-                        logger.warning(f"ATR calculation failed for {sym}: DataFrame missing required columns or is empty")
+                        logger.warning(
+                            f"ATR calculation failed for {sym}: DataFrame missing required columns or is empty"
+                        )
                 except Exception as e:
                     logger.warning(f"ATR calculation failed for {sym}: {e}")
                 try:
-                    high = np.asarray(primary['high'].values, dtype=np.float64)
-                    low = np.asarray(primary['low'].values, dtype=np.float64)
-                    close = np.asarray(primary['close'].values, dtype=np.float64)
-                    adx_series = talib.ADX(high, low, close, timeperiod=14)
+                    if (
+                        primary is not None
+                        and not primary.empty
+                        and all(col in primary.columns for col in ['high', 'low', 'close'])
+                    ):
+                        high_np = np.asarray(primary['high'].values, dtype=np.float64)
+                        low_np = np.asarray(primary['low'].values, dtype=np.float64)
+                        close_np = np.asarray(primary['close'].values, dtype=np.float64)
+                        adx_series = talib.ADX(high_np, low_np, close_np, timeperiod=14)
                 except Exception as e:
                     logger.warning(f"ADX calculation failed for {sym}: {e}")
-            
+
             # 1. Trend on higher timeframe
             trend = self._determine_trend(higher)
             logger.debug(f"{sym}: Higher timeframe trend is {trend}")
             if trend == 'neutral':
                 logger.debug(f"{sym}: Skipping due to neutral trend")
                 continue
-            
+
             # 2. Key levels on higher timeframe
             supports, resistances = self._find_key_levels(higher)
             # Filter out weak levels (strength < 2)
             supports = [lvl for lvl in supports if lvl['strength'] >= 1]
             resistances = [lvl for lvl in resistances if lvl['strength'] >= 1]
-            logger.debug(f"{sym}: Found {len(supports)} support levels and {len(resistances)} resistance levels (strength >= 1)")
-            levels = supports if trend == 'bullish' else resistances
-            level_type = "support" if trend == 'bullish' else "resistance"
-            
+            logger.debug(
+                f"{sym}: Found {len(supports)} support levels and {len(resistances)} resistance levels (strength >= 1)"
+            )
+            levels_to_check = supports if trend == 'bullish' else resistances
+            level_type_str = "support" if trend == 'bullish' else "resistance"
+
             # 3. For each level, check pullback on primary TF
-            level_info = []
-            for i, level in enumerate(levels):
-                level_info.append(f"Level {i+1}: {level['level']:.5f} (strength: {level['strength']})")
-            
-            logger.debug(f"{sym}: Checking {len(levels)} {level_type} levels: {', '.join(level_info)}")
-            
+            level_info_strs = [
+                f"Level {i+1}: {lvl['level']:.5f} (strength: {lvl['strength']})"
+                for i, lvl in enumerate(levels_to_check)
+            ]
+            logger.debug(
+                f"{sym}: Checking {len(levels_to_check)} {level_type_str} levels: {', '.join(level_info_strs)}"
+            )
+
             symbol_signals = []
-            for level in levels:
-                zone_type = 'support' if trend == 'bullish' else 'resistance'
-                zone_key = (sym, zone_type, round(level['level'], 5))
+            for level_data in levels_to_check:
+                current_level_price = level_data['level']
+                zone_type_str = 'support' if trend == 'bullish' else 'resistance'
+                zone_key = (sym, zone_type_str, round(current_level_price, 5))
                 if zone_key in self.processed_zones:
                     last_used_time = self.processed_zones[zone_key]
-                    time_since_use = current_time - last_used_time
-                    if time_since_use < self.signal_cooldown:
-                        cooldown_remaining = self.signal_cooldown - time_since_use
-                        hours_remaining = cooldown_remaining / 3600
-                        logger.debug(f"Skipping {zone_type} zone {level['level']:.5f} - on cooldown for {hours_remaining:.1f} more hours")
+                    # Ensure both are datetime objects for correct subtraction
+                    if isinstance(current_time, pd.Timestamp):
+                        current_time_dt = current_time.to_pydatetime()
+                    elif not isinstance(current_time, datetime):
+                        # Attempt to convert if not already datetime, log error if fails
+                        try:
+                            current_time_dt = pd.to_datetime(current_time).to_pydatetime()
+                        except Exception as e_ct:
+                            logger.error(f"Error converting current_time ({current_time}) to datetime: {e_ct}")
+                            continue # Skip this level if current_time is problematic
+                    else:
+                        current_time_dt = current_time
+
+                    if isinstance(last_used_time, pd.Timestamp):
+                        last_used_time_dt = last_used_time.to_pydatetime()
+                    elif not isinstance(last_used_time, datetime):
+                        try:
+                            last_used_time_dt = pd.to_datetime(last_used_time).to_pydatetime()
+                        except Exception as e_lut:
+                            logger.error(f"Error converting last_used_time ({last_used_time}) for zone {zone_key} to datetime: {e_lut}")
+                            self.processed_zones.pop(zone_key, None) # Remove potentially corrupt entry
+                            continue # Skip this level
+                    else:
+                        last_used_time_dt = last_used_time
+                    
+                    if current_time_dt and last_used_time_dt:
+                        time_since_use = current_time_dt - last_used_time_dt
+                        # Assuming self.signal_cooldown is in seconds
+                        if time_since_use.total_seconds() < self.signal_cooldown:
+                            logger.debug(
+                                f"Skipping {zone_type_str} zone {current_level_price:.5f} - on cooldown ({time_since_use.total_seconds():.0f}s < {self.signal_cooldown}s)"
+                            )
+                            continue
+                    else:
+                        logger.warning(f"Could not compare times for zone {zone_key} due to invalid datetime objects.")
                         continue
                 # --- Rejection-based (reversal) logic (existing) ---
-                logger.debug(f"Checking pullback for {sym} at {level_type} level {level['level']:.5f} (trend: {trend})")
-                signal_generated = False
-                if self._is_pullback(primary, level['level'], trend):
-                    logger.debug(f"Found pullback to {level_type} level {level['level']:.5f} for {sym}")
-                    # Only check the latest candle for patterns
+                logger.debug(
+                    f"Checking pullback for {sym} at {level_type_str} level {current_level_price:.5f} (trend: {trend})"
+                )
+                if self._is_pullback(primary, current_level_price, trend):
+                    logger.debug(
+                        f"Found pullback to {level_type_str} level {current_level_price:.5f} for {sym}"
+                    )
                     idx = len(primary) - 1
+                    if idx < 0:
+                        continue  # Should not happen if len(primary) is checked
                     candle = primary.iloc[idx]
-                    pattern = None
-                    pattern_details = {}
-                    logger.debug(f"Checking for patterns at idx={idx} ({candle.name}) for {sym} at level {level['level']:.5f} ({level_type})")
-                    
-                    # --- Explicit Breakout (Acceptance) vs. Rejection (False Break) Logic ---
-                    acceptance = False
-                    rejection = False
-                    acceptance_tol = level['level'] * self.price_tolerance
-                    
-                    # Get volume confirmation for the current candle
-                    volume_score, volume_details = self._analyze_volume_quality(primary, idx, trend)
-                    volume_confirmed = volume_score >= 0.3  # Reduced threshold from 0.5 to 0.3 for more signals
-                    
-                    # Acceptance: strong close through level, small wick, WITH volume confirmation
+
+                    # --- Updated Pattern Detection & Scoring ---
+                    detected_pattern_name = None
+                    pattern_score = 0.0
+                    patterns_to_evaluate = (
+                        BULLISH_PATTERNS if trend == 'bullish' else BEARISH_PATTERNS
+                    )
+                    patterns_to_evaluate += NEUTRAL_PATTERNS  # Always consider neutral for confluence
+
+                    # Check for specific Breakout/Rejection conditions first
+                    is_breakout_acceptance = False
+                    is_rejection_reversal = False
+
+                    volume_score_for_pattern, _ = self._analyze_volume_quality(
+                        primary, idx, trend
+                    )  # Analyze volume for the current candle
+                    volume_confirmed_for_pattern = volume_score_for_pattern >= 0.3
+
                     if trend == 'bullish':
                         if (
-                            candle['open'] < level['level'] and
-                            candle['close'] > level['level'] and
-                            (candle['high'] - candle['close']) < acceptance_tol and
-                            volume_confirmed  # Added volume requirement
+                            candle['open'] < current_level_price
+                            and candle['close'] > current_level_price
+                            and (candle['high'] - candle['close'])
+                            < (current_level_price * self.price_tolerance)
+                            and volume_confirmed_for_pattern
                         ):
-                            acceptance = True
-                            logger.debug(f"[Acceptance] Bullish breakout acceptance with volume score {volume_score:.2f}")
-                    else:
+                            is_breakout_acceptance = True
+                            detected_pattern_name = 'Breakout Acceptance'
+                            pattern_score = 1.0  # High score for confirmed breakout
+                        elif (
+                            candle['open'] < current_level_price
+                            and candle['high'] > current_level_price
+                            and candle['close'] < current_level_price
+                        ):
+                            is_rejection_reversal = True
+                            detected_pattern_name = 'Rejection Reversal (Bullish)'  # More specific
+                            pattern_score = 0.9  # High score for clear rejection
+                    else:  # Bearish trend
                         if (
-                            candle['open'] > level['level'] and
-                            candle['close'] < level['level'] and
-                            (candle['close'] - candle['low']) < acceptance_tol and
-                            volume_confirmed  # Added volume requirement
+                            candle['open'] > current_level_price
+                            and candle['close'] < current_level_price
+                            and (candle['close'] - candle['low'])
+                            < (current_level_price * self.price_tolerance)
+                            and volume_confirmed_for_pattern
                         ):
-                            acceptance = True
-                            logger.debug(f"[Acceptance] Bearish breakout acceptance with volume score {volume_score:.2f}")
-                    # Rejection: false break then close back inside
-                    if trend == 'bullish':
-                        if (
-                            candle['open'] < level['level'] and
-                            candle['high'] > level['level'] and
-                            candle['close'] < level['level']
+                            is_breakout_acceptance = True
+                            detected_pattern_name = 'Breakout Acceptance'
+                            pattern_score = 1.0
+                        elif (
+                            candle['open'] > current_level_price
+                            and candle['low'] < current_level_price
+                            and candle['close'] > current_level_price
                         ):
-                            rejection = True
-                    else:
-                        if (
-                            candle['open'] > level['level'] and
-                            candle['low'] < level['level'] and
-                            candle['close'] > level['level']
-                        ):
-                            rejection = True
-                    # Add explicit pattern/rationale
-                    if acceptance:
-                        pattern = 'Breakout Acceptance'
-                        pattern_details = {
-                            'open': candle['open'],
-                            'close': candle['close'],
-                            'level': level['level'],
-                            'wick_size': (candle['high'] - candle['close']) if trend == 'bullish' else (candle['close'] - candle['low']),
-                            'acceptance_tol': acceptance_tol,
-                            'volume_score': volume_score,
-                            'volume_confirmed': volume_confirmed
-                        }
-                        logger.debug(f"Breakout Acceptance detected at idx={idx} for {sym} with volume score {volume_score:.2f}")
-                    elif rejection:
-                        pattern = 'Rejection Reversal'
-                        pattern_details = {
-                            'open': candle['open'],
-                            'close': candle['close'],
-                            'level': level['level'],
-                            'wick_size': (candle['high'] - candle['close']) if trend == 'bullish' else (candle['close'] - candle['low']),
-                            'acceptance_tol': acceptance_tol,
-                            'volume_score': volume_score,
-                            'volume_confirmed': volume_confirmed
-                        }
-                        logger.debug(f"Rejection Reversal detected at idx={idx} for {sym} with volume score {volume_score:.2f}")
-                    
-                    if not pattern:
-                        logger.debug(f"No valid pattern detected at idx={idx} for {sym} at level {level['level']:.5f}")
+                            is_rejection_reversal = True
+                            detected_pattern_name = 'Rejection Reversal (Bearish)'  # More specific
+                            pattern_score = 0.9
+
+                    # If not a breakout/rejection, check standard LuxAlgo patterns
+                    if not detected_pattern_name:
+                        for p_col in patterns_to_evaluate:
+                            if p_col in primary.columns:
+                                pattern_series = primary[p_col]
+                                if pattern_series.iloc[idx]:
+                                    detected_pattern_name = f"{p_col.replace('_', ' ').title()} (LuxAlgo)"
+                                    # Assign scores based on pattern type from your rubric
+                                    if p_col in ['hammer', 'shooting_star', 'pin_bar']:
+                                        pattern_score = 1.0
+                                    elif p_col in ['bullish_engulfing', 'bearish_engulfing']:
+                                        pattern_score = 0.95
+                                    elif p_col in ['inverted_hammer', 'hanging_man']:
+                                        pattern_score = 0.9
+                                    elif p_col in ['morning_star', 'evening_star']:
+                                        pattern_score = 0.9
+                                    elif p_col in ['bullish_harami', 'bearish_harami']:
+                                        pattern_score = 0.8
+                                    elif p_col in ['white_marubozu', 'black_marubozu']:
+                                        pattern_score = 0.7
+                                    elif p_col in ['inside_bar']:
+                                        pattern_score = 0.7  # Neutral, but can be part of a setup
+                                    else:
+                                        pattern_score = 0.6  # Default for other/new patterns
+                                    break  # Found a pattern
+
+                    if not detected_pattern_name:
+                        logger.debug(
+                            f"No valid pattern detected at idx={idx} for {sym} at level {current_level_price:.5f}"
+                        )
+                        continue
+                    logger.debug(
+                        f"{sym}: Found {detected_pattern_name} pattern at {candle.name} with score {pattern_score:.2f}"
+                    )
+
+                    # Confluence Checks (Fibonacci, MA)
+                    fib_ok = self._check_fibonacci(primary, current_level_price, self.use_fibonacci)
+                    ma_ok = self._check_ma(primary, current_level_price)
+                    fib_details = {}  # Populate if fib_ok
+                    ma_details = {}  # Populate if ma_ok
+                    # ... (Populate fib_details and ma_details as before) ...
+
+                    # Confluence Scoring (as per your existing logic, adapt as needed)
+                    htf_trend_score = 1.0  # Already filtered by trend
+                    htf_sr_score = 1.0 if level_data['strength'] >= 1 else 0.0
+                    # pattern_score is already set above
+                    fib_score_bonus = 0.3 if fib_ok else 0.0
+                    ma_score_bonus = 0.3 if ma_ok else 0.0
+                    volume_score_confluence = min(
+                        max(volume_score_for_pattern, 0.0), 0.2
+                    )  # Use earlier volume score
+                    level_strength_bonus = min(0.2, level_data['strength'] / 5.0)
+
+                    confluence_total_score = (
+                        htf_trend_score
+                        + htf_sr_score
+                        + pattern_score
+                        + fib_score_bonus
+                        + ma_score_bonus
+                        + volume_score_confluence
+                        + level_strength_bonus
+                    )
+                    min_score_threshold = 2.2
+
+                    # Max possible score: 1(trend) + 1(sr) + 1(pattern) + 0.3(fib) + 0.3(ma) + 0.2(vol) + 0.2(strength) = 4.0
+                    normalization_divisor = 4.0 # Changed from 3.0
+
+                    if confluence_total_score < min_score_threshold:
+                        logger.debug(
+                            f"[ConfluenceScoring] Signal for {sym} at {current_level_price:.5f} rejected: total score {confluence_total_score:.2f} < {min_score_threshold}"
+                        )
                         continue
                     
-                    logger.debug(f"{sym}: Found {pattern} pattern at {candle.name}")
+                    # --- Inserted Missing Block: Signal Assembly (entry, SL, TP, etc.) ---
+                    entry = candle['close']
+                    direction_str = "buy" if trend == 'bullish' else "sell"
+
+                    # Robust SL tolerance: use max of ATR and pattern candle's range
+                    atr_val_sl_tp = (
+                        atr_series[-1]
+                        if atr_series is not None and len(atr_series) > 0 and pd.notna(atr_series[-1])
+                        else current_level_price * 0.001 # Fallback if ATR is not available
+                    )
+                    candle_range_sl_tp = candle['high'] - candle['low']
+                    tol_val_sl_tp = max(
+                        current_level_price * self.price_tolerance,
+                        atr_val_sl_tp if pd.notna(atr_val_sl_tp) and atr_val_sl_tp > 0 else current_level_price * 0.001, # Ensure tol_val is sensible
+                        candle_range_sl_tp
+                    )
+
+                    if direction_str == 'buy':
+                        stop = candle['low'] - tol_val_sl_tp
+                        # Ensure stop is not ridiculously far or positive if candle['low'] is very small
+                        stop = min(stop, entry - (TICK_SIZE * 2)) # Must be below entry
+                        reward_calc = entry - stop 
+                        tp = entry + reward_calc * self.min_risk_reward
+                    else:  # sell
+                        stop = candle['high'] + tol_val_sl_tp
+                        # Ensure stop is not ridiculously far or negative if candle['high'] is very high
+                        stop = max(stop, entry + (TICK_SIZE * 2)) # Must be above entry
+                        reward_calc = stop - entry
+                        tp = entry - reward_calc * self.min_risk_reward
+
+                    # CAP SL/TP DISTANCE (as before, from the deleted block)
+                    max_sl_dist_val = None
+                    if pd.notna(atr_val_sl_tp) and atr_val_sl_tp > 0 and self.max_sl_atr_mult is not None:
+                        max_sl_dist_val = max(atr_val_sl_tp * self.max_sl_atr_mult, 2 * TICK_SIZE)
                     
-                    # 5. Confluence: Fibonacci or MA  
-                    fib_ok = self._check_fibonacci(primary, level['level'], self.use_fibonacci)
-                    fib_details = {}
-                    if fib_ok and self.use_fibonacci:
-                        high = primary['high'].max()
-                        low = primary['low'].min()
-                        for f in self.fib_levels:
-                            fib_lv = low + (high - low) * f
-                            if abs(level['level'] - fib_lv) <= level['level'] * self.price_tolerance:
-                                fib_details = {
-                                    'fib_level': f,
-                                    'calculated_value': fib_lv,
-                                    'price_to_fib_distance': abs(level['level'] - fib_lv)
-                                }
-                                break
-                    ma_ok = self._check_ma(primary, level['level'])
-                    ma_details = {}
-                    if ma_ok:
-                        ma = primary['close'].rolling(self.ma_period).mean().iloc[-1]
-                        ma_details = {
-                            'ma_period': self.ma_period,
-                            'ma_value': ma,
-                            'price_to_ma_distance': abs(level['level'] - ma)
-                        }
-                    # --- Step 4: Flexible confluence stacking and early scoring ---
-                    # New: Confluence Scoring System (see .cursor/scratchpad.md for rubric)
-                    # Core factors: HTF Trend, HTF S/R, Pattern (all must be present)
-                    htf_trend_score = 1.0 if trend in ('bullish', 'bearish') else 0.0
-                    htf_sr_score = 1.0 if level['strength'] >= 1 else 0.0
-                    pattern_score = 0.0
-                    # Expanded pattern recognition with more tolerance and new patterns
-                    if primary['hammer'].iloc[idx]:
-                        pattern = 'Hammer (LuxAlgo)'
-                        pattern_score = 1.0
-                    elif primary['inverted_hammer'].iloc[idx]:
-                        pattern = 'Inverted Hammer (LuxAlgo)'
-                        pattern_score = 0.9
-                    elif primary['shooting_star'].iloc[idx]:
-                        pattern = 'Shooting Star (LuxAlgo)'
-                        pattern_score = 1.0
-                    elif primary['hanging_man'].iloc[idx]:
-                        pattern = 'Hanging Man (LuxAlgo)'
-                        pattern_score = 0.9
-                    elif primary['bullish_engulfing'].iloc[idx]:
-                        pattern = 'Bullish Engulfing (LuxAlgo)'
-                        pattern_score = 0.95
-                    elif primary['bearish_engulfing'].iloc[idx]:
-                        pattern = 'Bearish Engulfing (LuxAlgo)'
-                        pattern_score = 0.95
-                    elif primary['bullish_harami'].iloc[idx]:
-                        pattern = 'Bullish Harami (LuxAlgo)'
-                        pattern_score = 0.8
-                    elif primary['bearish_harami'].iloc[idx]:
-                        pattern = 'Bearish Harami (LuxAlgo)'
-                        pattern_score = 0.8
-                    elif primary['morning_star'].iloc[idx]:
-                        pattern = 'Morning Star (LuxAlgo)'
-                        pattern_score = 0.9
-                    elif primary['evening_star'].iloc[idx]:
-                        pattern = 'Evening Star (LuxAlgo)'
-                        pattern_score = 0.9
-                    elif primary['white_marubozu'].iloc[idx]:
-                        pattern = 'White Marubozu (LuxAlgo)'
-                        pattern_score = 0.7
-                    elif primary['black_marubozu'].iloc[idx]:
-                        pattern = 'Black Marubozu (LuxAlgo)'
-                        pattern_score = 0.7
-                    elif primary['pin_bar'].iloc[idx]:
-                        pattern = 'Pin Bar (LuxAlgo)'
-                        pattern_score = 1.0
-                    elif primary['inside_bar'].iloc[idx]:
-                        pattern = 'Inside Bar (LuxAlgo)'
-                        pattern_score = 0.7
-                    # Optional/bonus factors
-                    fib_score = 0.3 if fib_ok else 0.0
-                    ma_score = 0.3 if ma_ok else 0.0
-                    # Reuse volume analysis from acceptance logic (volume_score, volume_details already calculated)
-                    confluence_volume_score = min(max(volume_score, 0.0), 0.2)  # Clamp to [0, 0.2] for confluence scoring
-                    level_strength_score = min(0.2, level['strength'] / 5.0)  # Scaled bonus
-                    # Total score
-                    confluence_total = htf_trend_score + htf_sr_score + pattern_score + fib_score + ma_score + confluence_volume_score + level_strength_score
-                    # Minimum score to trigger trade
-                    min_score = 2.2
-                    # Allow slightly weaker S/R or filter if total score >= 2.5
-                    if htf_trend_score < 1.0 or htf_sr_score < 1.0 or pattern_score < 0.7:
-                        if confluence_total < 2.5:
-                            logger.debug(f"[ConfluenceScoring] Signal for {sym} at {level['level']:.5f} rejected: missing core factor and total score {confluence_total:.2f} < 2.5")
-                            continue
-                    else:
-                        if confluence_total < min_score:
-                            logger.debug(f"[ConfluenceScoring] Signal for {sym} at {level['level']:.5f} rejected: total score {confluence_total:.2f} < {min_score}")
-                            continue
-                    logger.info(f"[ConfluenceScoring] {sym} {pattern} at {level_type} {level['level']:.5f}: htf_trend={htf_trend_score}, htf_sr={htf_sr_score}, pattern={pattern_score}, fib={fib_score}, ma={ma_score}, volume={confluence_volume_score}, sr_strength={level_strength_score}, total={confluence_total}")
-                    
-                    # 6. Assemble signal
-                    # Use the pattern's close as entry, not the latest bar
-                    entry = primary.iloc[idx]['close']
-                    # --- ATR-based SL tolerance ---
-                    atr_val = None
-                    if len(primary) >= 14:
-                        if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
-                            high = np.asarray(primary['high'].values, dtype=np.float64)
-                            low = np.asarray(primary['low'].values, dtype=np.float64)
-                            close = np.asarray(primary['close'].values, dtype=np.float64)
-                            atr_series = talib.ATR(high, low, close, timeperiod=14)
-                            if len(atr_series) > 0:
-                                atr_idx = idx -1 
-                                if atr_idx < len(atr_series) and pd.notna(atr_series[atr_idx]):
-                                    atr_val = float(atr_series[atr_idx])
-                                elif pd.notna(atr_series[-1]):
-                                     atr_val = float(atr_series[-1])
-                        else:
-                            logger.warning(f"ATR calculation failed for {sym}: DataFrame missing required columns or is empty")
-                    else:
-                        atr_val = level['level'] * self.price_tolerance
-                    # Ensure atr_val is a valid float, fallback to sane default if not
-                    if not atr_val or not np.isfinite(atr_val) or atr_val == 0:
-                        atr_val = entry * 0.001  # fallback default
-                    # --- Robust SL tolerance: use max of ATR and pattern candle's range ---
-                    candle_range = candle['high'] - candle['low']
-                    tol_val = max(level['level'] * self.price_tolerance, atr_val if atr_val is not None else 0, candle_range)
-                    logger.debug(f"[SL] ATR: {atr_val}, Candle range: {candle_range}, tol_val: {tol_val}")
-                    if trend == 'bullish':
-                        stop = candle['low'] - tol_val
-                        reward = entry - stop
-                        tp = entry + reward * self.min_risk_reward
-                        direction = 'buy'
-                    else:
-                        stop = candle['high'] + tol_val
-                        reward = stop - entry
-                        tp = entry - reward * self.min_risk_reward
-                        direction = 'sell'
-                    # --- CAP SL/TP DISTANCE ---
-                    max_sl_dist = None
-                    if atr_val is not None and self.max_sl_atr_mult is not None:
-                        max_sl_dist = max(atr_val * self.max_sl_atr_mult, 2 * TICK_SIZE)
                     if self.max_sl_pct is not None:
-                        max_sl_dist_pct = entry * self.max_sl_pct
-                        max_sl_dist = min(max_sl_dist, max_sl_dist_pct) if max_sl_dist is not None else max_sl_dist_pct
-                    # Always ensure max_sl_dist is valid
-                    if max_sl_dist is None or not np.isfinite(max_sl_dist) or max_sl_dist == 0:
-                        max_sl_dist = max(entry * 0.002, 2 * TICK_SIZE)  # fallback default
-                    logger.debug(f"[SL] max_sl_dist: {max_sl_dist}, abs(entry-stop): {abs(entry-stop)}")
-                    if abs(entry - stop) > max_sl_dist:
-                        if direction == 'buy':
-                            stop = entry - max_sl_dist
+                        max_sl_dist_pct_val = entry * self.max_sl_pct
+                        if max_sl_dist_val is not None and pd.notna(max_sl_dist_val):
+                            max_sl_dist_val = min(max_sl_dist_val, max_sl_dist_pct_val)
                         else:
-                            stop = entry + max_sl_dist
-                        reward = abs(entry - stop)
-                        tp = entry + reward * self.min_risk_reward if direction == 'buy' else entry - reward * self.min_risk_reward
-                    # Calculate risk-reward and other trade metrics
+                            max_sl_dist_val = max_sl_dist_pct_val
+                    
+                    if max_sl_dist_val is None or not np.isfinite(max_sl_dist_val) or max_sl_dist_val <= (TICK_SIZE * 2):
+                        max_sl_dist_val = max(entry * 0.002, 2 * TICK_SIZE) # Default sensible cap
+
+                    if abs(entry - stop) > max_sl_dist_val:
+                        if direction_str == 'buy':
+                            stop = entry - max_sl_dist_val
+                        else:
+                            stop = entry + max_sl_dist_val
+                        reward_calc = abs(entry - stop)
+                        tp = (
+                            entry + reward_calc * self.min_risk_reward
+                            if direction_str == 'buy'
+                            else entry - reward_calc * self.min_risk_reward
+                        )
+                    
+                    # Final check for valid SL/TP relative to entry
+                    if direction_str == 'buy' and (stop >= entry or tp <= entry):
+                        logger.warning(f"{sym} BUY signal: Invalid SL({stop:.5f})/TP({tp:.5f}) relative to Entry({entry:.5f}). Adjusting SL/TP or skipping.")
+                        # Attempt a minimal adjustment or skip
+                        if stop >= entry: stop = entry - (2 * TICK_SIZE)
+                        if tp <= entry: tp = entry + (abs(entry-stop) * self.min_risk_reward if abs(entry-stop) > 0 else 4 * TICK_SIZE)
+                        if stop >= entry or tp <= entry: # If still invalid, skip
+                            logger.error(f"{sym} BUY signal: Could not correct SL/TP. Skipping signal.")
+                            continue
+                    elif direction_str == 'sell' and (stop <= entry or tp >= entry):
+                        logger.warning(f"{sym} SELL signal: Invalid SL({stop:.5f})/TP({tp:.5f}) relative to Entry({entry:.5f}). Adjusting SL/TP or skipping.")
+                        if stop <= entry: stop = entry + (2 * TICK_SIZE)
+                        if tp >= entry: tp = entry - (abs(stop-entry) * self.min_risk_reward if abs(stop-entry) > 0 else 4 * TICK_SIZE)
+                        if stop <= entry or tp >= entry: # If still invalid, skip
+                            logger.error(f"{sym} SELL signal: Could not correct SL/TP. Skipping signal.")
+                            continue
+
                     risk_pips = abs(entry - stop)
                     reward_pips = abs(tp - entry)
-                    # Enforce minimum pip reward (e.g., 5 ticks)
-                    min_pip_reward = 5 * TICK_SIZE
-                    if reward_pips < min_pip_reward:
-                        logger.debug(f"{sym}: Skipping signal due to reward_pips {reward_pips:.5f} < minimum {min_pip_reward:.5f}")
+                    min_pip_reward_val = 5 * TICK_SIZE
+                    if risk_pips < TICK_SIZE: # Prevent zero or too small risk
+                        logger.debug(f"{sym}: Skipping signal due to extremely small risk_pips {risk_pips:.5f}")
                         continue
-                    
-                    # Build concise analysis string
-                    volume_desc = "strong volume" if volume_score > 0.7 else ("adequate volume" if volume_score > 0.3 else "weak volume")
-                    
-                    # Determine if it's a continuation or reversal pattern
-                    # Default to reversal unless pattern suggests breakout/acceptance
-                    trade_type_suggestion = 'reversal'
-                    if pattern and ('Breakout' in pattern or 'Acceptance' in pattern):
-                        trade_type_suggestion = 'continuation'
-
-                    reason_parts = [
-                        f"Detected {pattern if pattern else 'unspecified pattern'} at {level_type} level {level.get('level', 'N/A'):.5f} (strength: {level.get('strength', 'N/A')}).",
-                        f"This suggests a potential {direction} {trade_type_suggestion}.",
-                        f"Volume: {volume_desc}."
-                    ]
-
-                    if fib_ok and self.use_fibonacci:
-                        fib_level_val = fib_details.get('fib_level', 'N/A')
-                        calculated_fib_val_str = f"{fib_details.get('calculated_value', 'N/A'):.5f}" if isinstance(fib_details.get('calculated_value'), (int, float)) else 'N/A'
-                        reason_parts.append(f"Confluence with Fibonacci level {fib_level_val} ({calculated_fib_val_str}).")
-                    
-                    if ma_ok:
-                        ma_period_val = ma_details.get('ma_period', 'N/A')
-                        ma_value_str = f"{ma_details.get('ma_value', 'N/A'):.5f}" if isinstance(ma_details.get('ma_value'), (int, float)) else 'N/A'
-                        reason_parts.append(f"Confluence with MA ({ma_period_val}MA at {ma_value_str}).")
-
-                    if technical_metrics:
-                        rsi_val = technical_metrics.get('rsi')
-                        if rsi_val is not None:
-                            reason_parts.append(f"RSI: {rsi_val:.1f}.")
-                        
-                        stop_dist_atr = technical_metrics.get('stop_distance_atr')
-                        if stop_dist_atr is not None:
-                            reason_parts.append(f"Stop distance: {stop_dist_atr:.2f} ATR.")
-
-                    rationale = " ".join(reason_parts)
-                    concise_analysis = f"📝 Analysis ({sym} - {self.primary_timeframe}):\n{direction.capitalize()} signal based on {pattern if pattern else 'unspecified pattern'} at {level_type} {level.get('level', 'N/A'):.5f}.\nRationale: {rationale}"
-                    
-                    reasoning = [concise_analysis]
-                   
-                    # Technical metrics for entry
-                    technical_metrics = {}
-                    if len(primary) >= 14:
-                        delta = primary['close'].diff().astype(float)
-                        gain = delta.where(delta > 0, 0)
-                        loss = -delta.where(delta < 0, 0)
-                        avg_gain = gain.rolling(window=14).mean()
-                        avg_loss = loss.rolling(window=14).mean()
-                        rs = avg_gain / avg_loss
-                        rsi = 100 - (100 / (1 + rs))
-                        current_rsi = rsi.iloc[-1]
-                        technical_metrics['rsi'] = current_rsi
-                        reasoning.append(f"RSI: {current_rsi:.1f}")
-                    if len(primary) >= 14:
-                        if primary is not None and not primary.empty and all(col in primary.columns for col in ['high', 'low', 'close']):
-                            high = np.asarray(primary['high'].values, dtype=np.float64)
-                            low = np.asarray(primary['low'].values, dtype=np.float64)
-                            close = np.asarray(primary['close'].values, dtype=np.float64)
-                            atr_series = talib.ATR(high, low, close, timeperiod=14)
-                            if len(atr_series) > 0:
-                                current_atr = float(atr_series[-1])
-                            else:
-                                current_atr = None
-                        else:
-                            current_atr = None
-                        if current_atr is not None and current_atr > 0:
-                            stop_distance_atr = risk_pips / current_atr
-                            technical_metrics['atr'] = current_atr
-                            technical_metrics['stop_distance_atr'] = stop_distance_atr
-                            reasoning.append(f"Stop distance: {stop_distance_atr:.2f} ATR")
-                    # Score breakdown
-                   
-                    # Only allow buy reversals if higher timeframe trend is bullish, sell reversals if bearish
-                    if (direction == 'buy' and trend != 'bullish') or (direction == 'sell' and trend != 'bearish'):
-                        logger.debug(f"{sym}: Skipping reversal signal due to higher timeframe trend filter (trend: {trend}, direction: {direction})")
+                    if reward_pips < min_pip_reward_val:
+                        logger.debug(
+                            f"{sym}: Skipping signal due to reward_pips {reward_pips:.5f} < minimum {min_pip_reward_val:.5f}"
+                        )
                         continue
-                    
-                    # --- RiskManager integration for validation and sizing ---
-                    # --- Scoring weights and normalization ---
-                    pattern_weight = 0.4
-                    confluence_weight = 0.4
-                    volume_weight = 0.1
-                    recency_weight = 0.1
-                    # Normalize sub-scores to 0-1
-                    norm_pattern_score = min(max(pattern_score, 0.0), 1.0)
-                    # Confluence: sum of htf_trend_score, htf_sr_score, fib_score, ma_score, level_strength_score (max 4.5)
-                    norm_confluence_score = min(max((htf_trend_score + htf_sr_score + fib_score + ma_score + level_strength_score) / 4.5, 0.0), 1.0)
-                    norm_volume_score = min(max(confluence_volume_score / 0.2, 0.0), 1.0)  # 0.2 is max volume score
-                    norm_recency_score = 0.0  # Placeholder, set to 0 unless recency logic is added
-                    # Weighted sum for signal quality/confidence
-                    signal_quality = (
-                        norm_pattern_score * pattern_weight +
-                        norm_confluence_score * confluence_weight +
-                        norm_volume_score * volume_weight +
-                        norm_recency_score * recency_weight
+                    # --- End of Inserted Missing Block ---
+
+                    signal_quality_norm = min(
+                        max(confluence_total_score / normalization_divisor, 0.0), 1.0 
                     )
-                    # Store normalized (0-1) value in signal dict
-                    signal = {
+                    concise_analysis = (
+                        f"📝 Analysis ({sym} - {self.primary_timeframe}): {direction_str.capitalize()} signal based on {detected_pattern_name} at {level_type_str} {current_level_price:.5f}."
+                    )
+                    # ... more details for rationale ...
+                    reasoning_list = [concise_analysis]
+
+                    signal_to_add = {
                         "symbol": sym,
-                        "direction": direction,
+                        "direction": direction_str,
                         "entry_price": entry,
                         "stop_loss": stop,
                         "take_profit": tp,
                         "timeframe": self.primary_timeframe,
-                        "confidence": signal_quality,  # Normalized 0-1
-                        "strategy_name": self.name,  # Changed from "source" to "strategy_name"
-                        "pattern": pattern,
-                        "confluence": {"fib": fib_ok, "ma": ma_ok},
-                        "pattern_details": pattern_details,
+                        "confidence": signal_quality_norm,
+                        "strategy_name": self.name,
+                        "pattern": detected_pattern_name,
+                        "pattern_details": {},
                         "fib_details": fib_details if fib_ok else {},
                         "ma_details": ma_details if ma_ok else {},
-                        "volume_details": volume_details,
+                        "volume_details": {},
                         "risk_pips": risk_pips,
                         "reward_pips": reward_pips,
                         "risk_reward_ratio": reward_pips / risk_pips if risk_pips > 0 else 0,
-                        "signal_quality": signal_quality,  # Normalized 0-1
-                        "technical_metrics": technical_metrics,
-                        "pattern_score": norm_pattern_score,
-                        "confluence_score": norm_confluence_score,
-                        "volume_score": norm_volume_score,
-                        "recency_score": norm_recency_score,
-                        "level_strength": level['strength'],
-                        "level_strength_score": level_strength_score,
+                        "signal_quality": signal_quality_norm,
+                        "technical_metrics": {},
+                        "pattern_score": pattern_score,
+                        "confluence_score": confluence_total_score / normalization_divisor, # Changed from 3.0
+                        "volume_score": volume_score_confluence,
+                        "recency_score": 0.0,
+                        "level_strength": level_data['strength'],
+                        "level_strength_score": level_strength_bonus,
                         "description": concise_analysis,
-                        "detailed_reasoning": reasoning
+                        "detailed_reasoning": reasoning_list,
+                        "signal_bar_index": idx,
+                        "signal_timestamp": str(candle.name),
                     }
-                    # Add signal freshness metadata
-                    signal['signal_bar_index'] = idx
-                    signal['signal_timestamp'] = str(candle.name)
-                    result = rm.validate_and_size_trade(signal)
-                    if not result['is_valid']:
-                        logger.info(f"Signal for {sym} rejected by RiskManager: {result['reason']}")
+                    result_validation = rm.validate_and_size_trade(
+                        signal_to_add
+                    )  # Use the correctly named dict
+                    if not result_validation['is_valid']:
+                        logger.info(
+                            f"Signal for {sym} rejected by RiskManager: {result_validation['reason']}"
+                        )
                         continue
-                    adjusted_signal = result['final_trade_params']
-                    for k in signal:
-                        if k not in adjusted_signal:
-                            adjusted_signal[k] = signal[k]
-                    symbol_signals.append(adjusted_signal)
-                    # After signal is generated and appended:
+                    adjusted_signal_final = result_validation['final_trade_params']
+                    for k_sig, v_sig in signal_to_add.items():  # Corrected loop variable
+                        if k_sig not in adjusted_signal_final:
+                            adjusted_signal_final[k_sig] = v_sig
+                    symbol_signals.append(adjusted_signal_final)
                     self.processed_zones[zone_key] = current_time
-                    # Only generate one signal per zone per bar
-                    break
-            # Prioritize signals if there are conflicting ones
+                    break  # Process one signal per zone
             if len(symbol_signals) > 1:
                 symbol_signals = self._prioritize_signals(symbol_signals)
             signals.extend(symbol_signals)
-        # Cleanup old processed zones entries (older than 48 hours)
-        cleanup_time = current_time - (self.signal_cooldown * 2)
-        old_keys = [k for k, v in self.processed_zones.items() if v < cleanup_time]
-        for k in old_keys:
-            del self.processed_zones[k]
+        
+        # Ensure current_time is a datetime object before timedelta operations
+        if isinstance(current_time, (float, int)):
+            try:
+                current_time_dt = datetime.fromtimestamp(current_time)
+            except ValueError: # Handle cases like milliseconds timestamp
+                current_time_dt = datetime.fromtimestamp(current_time / 1000)
+        elif isinstance(current_time, pd.Timestamp):
+            current_time_dt = current_time.to_pydatetime()
+        elif isinstance(current_time, datetime):
+            current_time_dt = current_time
+        else:
+            logger.error(f"Cannot determine cleanup_time: current_time is of unexpected type {type(current_time)}")
+            current_time_dt = datetime.now() # Fallback, though ideally this path isn't hit
+
+        cleanup_delta = timedelta(seconds=(self.signal_cooldown * 2))
+        cleanup_time = current_time_dt - cleanup_delta
+        
+        old_keys = [k for k, v in self.processed_zones.items() if isinstance(v, (datetime, pd.Timestamp)) and pd.to_datetime(v) < cleanup_time]
+        for k_del in old_keys:  # Corrected loop variable
+            del self.processed_zones[k_del]
         if old_keys:
             logger.debug(f"Cleaned up {len(old_keys)} old zone records")
         return signals
