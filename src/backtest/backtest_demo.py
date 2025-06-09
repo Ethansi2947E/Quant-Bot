@@ -19,10 +19,6 @@ STRATEGY_NAME = 'PriceActionSRStrategy'  # e.g. 'PriceActionSRStrategy', 'Breako
 PRIMARY_TIMEFRAME = 'M15'
 HIGHER_TIMEFRAME = 'H1'  # Only used if strategy requires it
 
-# === EXPORT DIRECTORY STRUCTURE ===
-# Results will be saved in: src/backtest/results/{year}/{symbol_or_multi_symbol}/{strategy}/{period}/
-# Example: src/backtest/results/2025/XAUUSD/ConfluencePriceActionStrategy/2025-01-01_to_2025-01-31/
-
 # 1. Setup MT5 handler (singleton pattern)
 mt5_handler = None  # Will be created only if needed
 

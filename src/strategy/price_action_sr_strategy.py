@@ -116,7 +116,8 @@ class PriceActionSRStrategy(SignalGenerator):
 
     def _find_pivot_highs(self, df: pd.DataFrame) -> List[float]:
         """
-        Find pivot highs over the configured window using TA-Lib MAX.
+        Find true fractal/pivot highs using classic pivot point logic.
+        A pivot high must be higher than N bars on both left and right sides.
         Args:
             df (pd.DataFrame): Price data with 'high' column
         Returns:
@@ -125,16 +126,29 @@ class PriceActionSRStrategy(SignalGenerator):
         w = self.pivot_window
         if len(df) < 2 * w + 1:
             return []
-        highs = np.array(df['high'].values, dtype=np.float64)
-        # Use TA-Lib MAX to get rolling max
-        max_highs = talib.MAX(highs, timeperiod=2 * w + 1)
-        pivots = [highs[i] for i in range(w, len(highs) - w)
-                  if highs[i] == max_highs[i] and not np.isnan(max_highs[i])]
+        highs = df['high'].values
+        pivots = []
+        for i in range(w, len(highs) - w):
+            current_high = highs[i]
+            is_pivot = True
+            for j in range(i - w, i):
+                if current_high <= highs[j]:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                for j in range(i + 1, i + w + 1):
+                    if current_high <= highs[j]:
+                        is_pivot = False
+                        break
+            if is_pivot:
+                pivots.append(current_high)
+                self.logger.debug(f"Found pivot high at index {i}: {current_high:.5f}")
         return pivots
 
     def _find_pivot_lows(self, df: pd.DataFrame) -> List[float]:
         """
-        Find pivot lows over the configured window using TA-Lib MIN.
+        Find true fractal/pivot lows using classic pivot point logic.
+        A pivot low must be lower than N bars on both left and right sides.
         Args:
             df (pd.DataFrame): Price data with 'low' column
         Returns:
@@ -143,11 +157,23 @@ class PriceActionSRStrategy(SignalGenerator):
         w = self.pivot_window
         if len(df) < 2 * w + 1:
             return []
-        lows = np.array(df['low'].values, dtype=np.float64)
-        # Use TA-Lib MIN to get rolling min
-        min_lows = talib.MIN(lows, timeperiod=2 * w + 1)
-        pivots = [lows[i] for i in range(w, len(lows) - w)
-                  if lows[i] == min_lows[i] and not np.isnan(min_lows[i])]
+        lows = df['low'].values
+        pivots = []
+        for i in range(w, len(lows) - w):
+            current_low = lows[i]
+            is_pivot = True
+            for j in range(i - w, i):
+                if current_low >= lows[j]:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                for j in range(i + 1, i + w + 1):
+                    if current_low >= lows[j]:
+                        is_pivot = False
+                        break
+            if is_pivot:
+                pivots.append(current_low)
+                self.logger.debug(f"Found pivot low at index {i}: {current_low:.5f}")
         return pivots
 
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
@@ -313,45 +339,6 @@ class PriceActionSRStrategy(SignalGenerator):
         else:
             self.logger.debug(f"Volume spike check: current={current_vol}, 85th percentile={threshold_85}, 70th percentile={threshold_70}, 1.5x mean={1.5*avg_vol if not np.isnan(avg_vol) else 'N/A'} - NO SPIKE")
             return False
-
-    def is_valid_volume_spike(self, df: pd.DataFrame) -> bool:
-        if 'volume' not in df.columns:
-            self.logger.debug("[Volume] 'volume' column missing in DataFrame.")
-            return False
-        current_volume = df['volume'].iloc[-1]
-        vol_mean = df['volume'].rolling(20).mean().iloc[-1]
-        if vol_mean == 0 or np.isnan(vol_mean):
-            self.logger.debug("[Volume] Rolling mean is zero or NaN.")
-            return False
-        # --- Simple, robust volume spike definition ---
-        is_spike = current_volume > 2 * vol_mean
-        if not is_spike:
-            self.logger.debug(f"[Volume] No spike: current={current_volume}, mean={vol_mean}")
-            return False
-        # --- Candle shape analysis after spike confirmed ---
-        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
-        total_range = df['high'].iloc[-1] - df['low'].iloc[-1]
-        if total_range == 0:
-            self.logger.debug(f"[Volume] Total range is zero, cannot compute wick ratios.")
-            return False
-        wick = (df['high'].iloc[-1] - df['low'].iloc[-1]) - body
-        wick_body_ratio = wick / body if body > 0 else 0
-        upper_wick = df['high'].iloc[-1] - max(df['open'].iloc[-1], df['close'].iloc[-1])
-        lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
-        upper_wick_ratio = upper_wick / total_range
-        lower_wick_ratio = lower_wick / total_range
-        # --- Simple pattern: prefer small wick/body ratio for conviction ---
-        if wick_body_ratio < 0.5:
-            valid = True
-        else:
-            valid = False
-        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, is_spike={is_spike}, wick_body_ratio={wick_body_ratio:.3f}, valid={valid}")
-        # --- VSA-style enhancement (future): ---
-        # High volume + small range + close in middle: possible absorption/indecision
-        # High volume + small range + close near low (in uptrend): selling pressure
-        # Low volume + large range (breakout): weak breakout, likely to fail
-        # These can be added as advanced filters if needed.
-        return valid
     
     def calculate_stop_loss(self, zone: float, direction: str, candle_extremity: float, buffer: float = 0.001) -> float:
         if direction == "buy":
@@ -379,30 +366,44 @@ class PriceActionSRStrategy(SignalGenerator):
         Returns:
             (float, dict): Tuple of (score, breakdown dict)
         """
-        # Pattern reliability mapping
+        # Pattern reliability mapping - updated to include LuxAlgo patterns
         pattern_score = 0.0
-        if pattern == 'Hammer (TA-Lib)':
-            pattern_score = 0.8 # Consistently high score for Hammer as a rejection pattern
-        elif pattern == 'Shooting Star (TA-Lib)':
-            pattern_score = 0.8 # Consistently high score for Shooting Star
-        elif pattern == 'Bullish Engulfing (TA-Lib)':
+        pattern_lower = pattern.lower() if pattern else ""
+        
+        # High-reliability patterns (0.8-1.0)
+        if any(p in pattern_lower for p in ['bullish engulfing', 'bearish engulfing']):
             pattern_score = 1.0
-        elif pattern == 'Bearish Engulfing (TA-Lib)':
-            pattern_score = 1.0
-        elif pattern == 'Bullish Harami (TA-Lib)':
+        elif any(p in pattern_lower for p in ['hammer', 'shooting star']):
+            pattern_score = 0.8
+        elif any(p in pattern_lower for p in ['pin bar', 'pin_bar_bullish', 'pin_bar_bearish']):
+            pattern_score = 0.8  # Pin bars are strong reversal patterns at S/R levels
+        elif any(p in pattern_lower for p in ['morning star', 'evening star']):
+            pattern_score = 0.9  # Morning/Evening stars are strong 3-candle patterns
+        
+        # Medium-reliability patterns (0.5-0.7)
+        elif any(p in pattern_lower for p in ['bullish harami', 'bearish harami']):
             pattern_score = 0.6
-        elif pattern == 'Bearish Harami (TA-Lib)':
-            pattern_score = 0.6
-        elif pattern == 'Morning Star (TA-Lib)':
-             pattern_score = 0.9 # Morning/Evening stars are strong 3-candle patterns
-        elif pattern == 'Evening Star (TA-Lib)':
-             pattern_score = 0.9 # Morning/Evening stars are strong 3-candle patterns
-        # The 'wick' boolean parameter (from _wick_rejection) directly contributes to 'wick_score'
+        elif any(p in pattern_lower for p in ['inverted hammer', 'hanging man']):
+            pattern_score = 0.7
+        elif any(p in pattern_lower for p in ['white marubozu', 'black marubozu']):
+            pattern_score = 0.7
+        
+        # Lower-reliability patterns (0.3-0.5)
+        elif any(p in pattern_lower for p in ['inside bar']):
+            pattern_score = 0.4  # Inside bars are more of a consolidation pattern
+        
+        # If no pattern matched, check for empty/None
+        elif not pattern or pattern.strip() == '':
+            pattern_score = 0.0
+        else:
+            # Default score for unrecognized patterns
+            pattern_score = 0.3
+            self.logger.debug(f"[Scoring] Unrecognized pattern '{pattern}', using default score {pattern_score}")
        
         wick_score = 1.0 if wick else 0.0
         # Volume: allow float for partial spike (e.g. 0.5 if just above threshold)
         volume_score = max(0.0, min(volume_score, 1.0))
-        # Risk-reward: 0 if <1, 0.5 at 2:1, 1.0 at 3:1 or higher
+        # Risk-reward: Enhanced scoring for better R:R ratios
         if risk_reward < 1.0:
             risk_reward_score = 0.0
         elif risk_reward >= 3.0:
@@ -413,7 +414,8 @@ class PriceActionSRStrategy(SignalGenerator):
         else: # 1.0 <= risk_reward < 2.0
             risk_reward_score = 0.5 * (risk_reward - 1.0)
         risk_reward_score = max(0.0, min(risk_reward_score, 1.0))
-        # Zone strength: 0 if 1 touch, 0.5 at 3, 1.0 at 5+
+        
+        # Zone strength: Enhanced scoring for zone touches
         if zone_touches <= 1:
             zone_strength_score = 0.0
         elif zone_touches >= 5:
@@ -452,7 +454,7 @@ class PriceActionSRStrategy(SignalGenerator):
             },
             'final_score': score
         }
-        self.logger.debug(f"[Scoring01] pattern={pattern}({pattern_score}), wick={wick_score}, volume={volume_score}, risk_reward={risk_reward_score}, zone={zone_strength_score}, other={other_confluence_score} -> score={score:.2f}")
+        self.logger.debug(f"[Scoring01] pattern='{pattern}'({pattern_score}), wick={wick_score}, volume={volume_score}, risk_reward={risk_reward_score}, zone={zone_strength_score}, other={other_confluence_score} -> score={score:.2f}")
         return score, breakdown
 
     def _log_debug_info(self, symbol: str, df: pd.DataFrame, zones: Dict, signals: List[Dict]) -> None:
@@ -601,27 +603,144 @@ class PriceActionSRStrategy(SignalGenerator):
         return periods
 
     def is_uptrend(self, df: pd.DataFrame) -> bool:
-        # Fallback to original logic
-        highs = df['high'].iloc[-self.trend_lookback:]
-        lows = df['low'].iloc[-self.trend_lookback:]
-        higher_high = highs.iloc[-1] > highs.iloc[0]
-        higher_low = lows.iloc[-1] > lows.iloc[0]
-        self.logger.debug(f"[TrendCheck] Uptrend analysis: higher_high={higher_high}, higher_low={higher_low}")
-        return higher_high and higher_low
+        """
+        Determine if market is in uptrend using robust swing analysis.
+        Analyzes sequence of significant swing highs and lows over trend_lookback period.
+        """
+        lookback = min(self.trend_lookback, len(df))
+        if lookback < 2 * self.pivot_window + 1:
+            self.logger.debug(f"[Uptrend] Not enough data for swing analysis: need {2 * self.pivot_window + 1}, have {lookback}")
+            return False
+
+        df_lookback = df.iloc[-lookback:]
+        
+        # Find all swing highs and lows with their indices
+        swing_highs = []
+        swing_lows = []
+        w = self.pivot_window
+        highs = df_lookback['high'].values
+        lows = df_lookback['low'].values
+        
+        for i in range(w, len(df_lookback) - w):
+            is_high = all(highs[i] > highs[j] for j in range(i - w, i)) and all(highs[i] > highs[j] for j in range(i + 1, i + w + 1))
+            is_low = all(lows[i] < lows[j] for j in range(i - w, i)) and all(lows[i] < lows[j] for j in range(i + 1, i + w + 1))
+            
+            if is_high:
+                swing_highs.append((i, highs[i]))
+            if is_low:
+                swing_lows.append((i, lows[i]))
+
+        # Filter for significant swings using ATR
+        atr = self._calculate_atr(df_lookback)
+        min_dist = max(atr, 0.002 * df_lookback['close'].iloc[-1])  # 0.2% or ATR
+        
+        def filter_significant(swings):
+            filtered = []
+            for idx, price in swings:
+                if not filtered:
+                    filtered.append((idx, price))
+                else:
+                    last_idx, last_price = filtered[-1]
+                    if abs(price - last_price) > min_dist:
+                        filtered.append((idx, price))
+            return filtered
+        
+        swing_highs = filter_significant(swing_highs)
+        swing_lows = filter_significant(swing_lows)
+        
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            self.logger.debug(f"[Uptrend] Insufficient significant swings: {len(swing_highs)} highs, {len(swing_lows)} lows")
+            return False
+
+        # Analyze last 2-3 swings for uptrend
+        def is_progressive_up(seq):
+            if len(seq) < 3:
+                return len(seq) >= 2 and seq[-1] > seq[-2]  # At least 2 swings, last higher than previous
+            return seq[-1] > seq[-2] and seq[-2] > seq[-3]
+
+        last_highs = [price for idx, price in swing_highs[-3:]]
+        last_lows = [price for idx, price in swing_lows[-3:]]
+        
+        is_higher_high = is_progressive_up(last_highs)
+        is_higher_low = is_progressive_up(last_lows)
+        
+        uptrend = is_higher_high and is_higher_low
+        
+        self.logger.debug(f"[Uptrend] last_highs={last_highs}, last_lows={last_lows}, is_higher_high={is_higher_high}, is_higher_low={is_higher_low}, uptrend={uptrend}")
+        return uptrend
 
     def is_downtrend(self, df: pd.DataFrame) -> bool:        
-        # Fallback to original logic
-        highs = df['high'].iloc[-self.trend_lookback:]
-        lows = df['low'].iloc[-self.trend_lookback:]
-        lower_high = highs.iloc[-1] < highs.iloc[0]
-        lower_low = lows.iloc[-1] < lows.iloc[0]
-        self.logger.debug(f"[TrendCheck] Downtrend analysis: lower_high={lower_high}, lower_low={lower_low}")
-        return lower_high and lower_low
+        """
+        Determine if market is in downtrend using robust swing analysis.
+        Analyzes sequence of significant swing highs and lows over trend_lookback period.
+        """
+        lookback = min(self.trend_lookback, len(df))
+        if lookback < 2 * self.pivot_window + 1:
+            self.logger.debug(f"[Downtrend] Not enough data for swing analysis: need {2 * self.pivot_window + 1}, have {lookback}")
+            return False
+
+        df_lookback = df.iloc[-lookback:]
+        
+        # Find all swing highs and lows with their indices
+        swing_highs = []
+        swing_lows = []
+        w = self.pivot_window
+        highs = df_lookback['high'].values
+        lows = df_lookback['low'].values
+        
+        for i in range(w, len(df_lookback) - w):
+            is_high = all(highs[i] > highs[j] for j in range(i - w, i)) and all(highs[i] > highs[j] for j in range(i + 1, i + w + 1))
+            is_low = all(lows[i] < lows[j] for j in range(i - w, i)) and all(lows[i] < lows[j] for j in range(i + 1, i + w + 1))
+            
+            if is_high:
+                swing_highs.append((i, highs[i]))
+            if is_low:
+                swing_lows.append((i, lows[i]))
+
+        # Filter for significant swings using ATR
+        atr = self._calculate_atr(df_lookback)
+        min_dist = max(atr, 0.002 * df_lookback['close'].iloc[-1])  # 0.2% or ATR
+        
+        def filter_significant(swings):
+            filtered = []
+            for idx, price in swings:
+                if not filtered:
+                    filtered.append((idx, price))
+                else:
+                    last_idx, last_price = filtered[-1]
+                    if abs(price - last_price) > min_dist:
+                        filtered.append((idx, price))
+            return filtered
+        
+        swing_highs = filter_significant(swing_highs)
+        swing_lows = filter_significant(swing_lows)
+        
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            self.logger.debug(f"[Downtrend] Insufficient significant swings: {len(swing_highs)} highs, {len(swing_lows)} lows")
+            return False
+
+        # Analyze last 2-3 swings for downtrend
+        def is_progressive_down(seq):
+            if len(seq) < 3:
+                return len(seq) >= 2 and seq[-1] < seq[-2]  # At least 2 swings, last lower than previous
+            return seq[-1] < seq[-2] and seq[-2] < seq[-3]
+
+        last_highs = [price for idx, price in swing_highs[-3:]]
+        last_lows = [price for idx, price in swing_lows[-3:]]
+        
+        is_lower_high = is_progressive_down(last_highs)
+        is_lower_low = is_progressive_down(last_lows)
+        
+        downtrend = is_lower_high and is_lower_low
+        
+        self.logger.debug(f"[Downtrend] last_highs={last_highs}, last_lows={last_lows}, is_lower_high={is_lower_high}, is_lower_low={is_lower_low}, downtrend={downtrend}")
+        return downtrend
 
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
         """
         Generate trading signals based on S/R zone entry, candlestick pattern, wick rejection, and volume spike.
         Uses a normalized 0-1 scoring system for signal quality and confidence.
+        Volume confirmation uses _volume_spike (quantile-based, adaptive) as the primary filter.
         """
         logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}, lookback_periods={self.lookback_periods}")
         signals = []
@@ -640,7 +759,6 @@ class PriceActionSRStrategy(SignalGenerator):
             if df_primary is None or len(df_primary) < self.pivot_window + 21:
                 logger.warning(f"Insufficient data for {sym}: Need at least {self.pivot_window + 21} bars, got {len(df_primary) if df_primary is not None else 0}")
                 continue
-            # Higher timeframe trend filter
             ht_trend_ok = True
             if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
                 if df_secondary is None or len(df_secondary) < self.trend_lookback:
@@ -658,7 +776,7 @@ class PriceActionSRStrategy(SignalGenerator):
             try:
                 last_timestamp = pd.to_datetime(df_primary.index[-1])
                 last_timestamp_str = str(last_timestamp)
-            except Exception as e: # Catch specific exception if known, or general Exception
+            except Exception as e:
                 logger.warning(f"Could not extract timestamp from dataframe for {sym}: {e}")
                 last_timestamp_str = str(current_time)
 
@@ -673,7 +791,7 @@ class PriceActionSRStrategy(SignalGenerator):
             if 'tick_volume' not in df_primary.columns:
                 df_primary['tick_volume'] = df_primary.get('volume', 1)
 
-            df_primary = add_luxalgo_patterns(df_primary.copy()) # Ensure using .copy()
+            df_primary = add_luxalgo_patterns(df_primary.copy())
 
             zones = self.get_sr_zones(df_primary)
             symbol_signals = []
@@ -692,8 +810,8 @@ class PriceActionSRStrategy(SignalGenerator):
                 logger.debug(f"Checking {len(zone_list)} {zone_type} zones for {sym}")
 
                 for zone_price_map in zone_list:
-                    zone = zone_price_map['level'] # Extract the price level
-                    zone_touches = zone_price_map['strength'] # Extract strength/touches
+                    zone = zone_price_map['level']
+                    zone_touches = zone_price_map['strength']
 
                     zone_key = (sym, zone_type, round(zone, 5))
                     if zone_key in self.processed_zones:
@@ -706,13 +824,12 @@ class PriceActionSRStrategy(SignalGenerator):
                             continue
                     idx = len(df_primary) - 1
                     process_idx = idx - 1
-                    if process_idx < 0 or process_idx < self.pivot_window + 20: # Ensure process_idx is valid
+                    if process_idx < 0 or process_idx < self.pivot_window + 20:
                         logger.debug(f"Not enough bars to check for patterns at index {process_idx}, need at least {self.pivot_window + 20}")
                         continue
                     candle = df_primary.iloc[process_idx]
                     in_zone = self._bar_touches_zone(candle, zone, direction)
 
-                    # New pattern detection logic
                     matched_pattern_name = None
                     patterns_to_check = []
                     if direction == 'buy':
@@ -722,26 +839,26 @@ class PriceActionSRStrategy(SignalGenerator):
 
                     for p_col in patterns_to_check:
                         if p_col in df_primary.columns and df_primary[p_col].iloc[process_idx]:
-                            matched_pattern_name = p_col # Store raw name like 'hammer'
-                            break # Take the first matched pattern
+                            matched_pattern_name = p_col
+                            break
 
                     pattern_display_name = f"{matched_pattern_name.replace('_', ' ').title()} (LuxAlgo)" if matched_pattern_name else None
 
                     wick = self._wick_rejection(candle, direction)
-                    vol_spike = self._volume_spike(df_primary, process_idx) # This seems to be the original volume spike logic
-                    vol_wick_ok = self.is_valid_volume_spike(df_primary) # This is the TrendFollowingStrategy's volume logic
+                    vol_spike = self._volume_spike(df_primary, process_idx) # Primary volume confirmation
+                    # If you want to add wick/body analysis as a secondary filter after a volume spike, do it here (currently not used)
+                    # Example: if vol_spike and self.is_valid_volume_spike(df_primary): ...
 
-                    logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern_display_name} wick={wick} vol_spike_orig={vol_spike} vol_wick_trendfollow={vol_wick_ok}")
+                    logger.debug(f"[Filter] {sym} idx={process_idx} direction={direction} in_zone={in_zone} pattern={pattern_display_name} wick={wick} vol_spike={vol_spike}")
 
                     if not in_zone:
                         logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: not in zone.")
                         continue
-                    if not matched_pattern_name: # Check if a pattern was matched
+                    if not matched_pattern_name:
                         logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: no valid pattern.")
                         continue
-                    # Decide which volume check to use, or combine. For now, let's use the strategy's original `_volume_spike`
                     if not vol_spike:
-                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: original volume_spike confirmation failed.")
+                        logger.debug(f"[Skip] {sym} {direction} at zone {zone:.5f}: volume_spike confirmation failed.")
                         continue
 
                     avg_vol = df_primary['tick_volume'].iloc[max(0, process_idx-20):process_idx].mean() if process_idx > 0 else 0
@@ -759,7 +876,7 @@ class PriceActionSRStrategy(SignalGenerator):
                     )
 
                     opp_zones_map = zones['resistance'] if direction == 'buy' else zones['support']
-                    opp_zones_levels = [z['level'] for z in opp_zones_map] # Extract levels
+                    opp_zones_levels = [z['level'] for z in opp_zones_map]
                     tp = None
                     for opp_level in (sorted(opp_zones_levels) if direction == 'buy' else sorted(opp_zones_levels, reverse=True)):
                         if (direction == 'buy' and opp_level > entry) or (direction == 'sell' and opp_level < entry):
@@ -767,15 +884,14 @@ class PriceActionSRStrategy(SignalGenerator):
                             break
                     if tp is None:
                         risk = abs(entry - stop)
-                        if risk == 0: # Prevent division by zero for TP calc
+                        if risk == 0:
                             logger.warning(f"Risk is zero for {sym} {direction} at {entry}, SL {stop}. Skipping TP calc.")
-                            continue # Or handle differently
+                            continue
                         tp = entry + 2 * risk if direction == 'buy' else entry - 2 * risk
                         logger.debug(f"Using fallback 2R TP: {tp:.5f}")
 
                     equity = self.risk_manager.get_account_balance() if hasattr(self.risk_manager, 'get_account_balance') else 10000
 
-                    # Ensure entry and stop are valid before sizing
                     if ((direction == 'buy' and entry <= stop) or \
                        (direction == 'sell' and entry >= stop) or \
                        abs(entry - stop) == 0):
@@ -786,7 +902,7 @@ class PriceActionSRStrategy(SignalGenerator):
                     risk_reward = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
 
                     score_01, score_breakdown = self._score_signal_01(
-                        pattern=pattern_display_name or "", # Use display name
+                        pattern=pattern_display_name or "",
                         wick=wick,
                         volume_score=volume_score,
                         risk_reward=risk_reward,

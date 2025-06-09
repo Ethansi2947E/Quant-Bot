@@ -8,7 +8,7 @@ BULLISH_PATTERNS = [
     'white_marubozu',
     'bullish_harami',
     'morning_star',
-    'pin_bar'  # Context (e.g., at support, long lower wick) makes it bullish
+    'pin_bar_bullish'  # Context: at support, long lower wick
 ]
 
 BEARISH_PATTERNS = [
@@ -18,7 +18,7 @@ BEARISH_PATTERNS = [
     'black_marubozu',
     'bearish_harami',
     'evening_star',
-    'pin_bar'  # Context (e.g., at resistance, long upper wick) makes it bearish
+    'pin_bar_bearish'  # Context: at resistance, long upper wick
 ]
 
 NEUTRAL_PATTERNS = [
@@ -161,21 +161,59 @@ def detect_black_marubozu(df: pd.DataFrame, atr: pd.Series) -> pd.Series:
 # Add any additional patterns from price_action_sr_strategy.py that are not in the LuxAlgo script, using similar logic.
 # For example, if you have a pin bar or inside bar, add them here with vectorized logic.
 
-def detect_pin_bar(df: pd.DataFrame) -> pd.Series:
-    # Example: Pin bar logic (customize as needed)
+def detect_pin_bar_bullish(df: pd.DataFrame) -> pd.Series:
+    """
+    Detect bullish pin bars (hammer-like with long lower wick).
+    Bullish pin bars typically form at support levels and signal potential upward reversal.
+    """
     o, c, h, l = df['open'], df['close'], df['high'], df['low']
     body = (c - o).abs()
     upper_wick = h - np.maximum(c, o)
     lower_wick = np.minimum(c, o) - l
     total_range = h - l
-    min_wick_ratio = 1.5
-    max_body_ratio = 0.7
-    # Ensure total_range is not zero to avoid division by zero or NaN issues
+
+    # Criteria for bullish pin bar
+    min_wick_ratio = 2.0  # Lower wick should be at least 2x the body
+    max_body_ratio = 0.3  # Body should be small relative to total range
+    max_upper_wick_ratio = 0.2  # Upper wick should be small
+
     valid_range = total_range > 0
-    bullish = valid_range & (lower_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
-    bearish = valid_range & (upper_wick >= min_wick_ratio * body) & (body / total_range < max_body_ratio)
-    # Ensure that the result is a boolean series even if NaNs are produced by conditions
-    return pd.Series(bullish | bearish, index=df.index).fillna(False)
+
+    condition = (
+        valid_range &
+        (lower_wick >= min_wick_ratio * body) &  # Long lower wick
+        (upper_wick <= max_upper_wick_ratio * body) &  # Small upper wick
+        (body / total_range < max_body_ratio)  # Small body relative to range
+    )
+
+    return pd.Series(condition, index=df.index).fillna(False)
+
+def detect_pin_bar_bearish(df: pd.DataFrame) -> pd.Series:
+    """
+    Detect bearish pin bars (shooting star-like with long upper wick).
+    Bearish pin bars typically form at resistance levels and signal potential downward reversal.
+    """
+    o, c, h, l = df['open'], df['close'], df['high'], df['low']
+    body = (c - o).abs()
+    upper_wick = h - np.maximum(c, o)
+    lower_wick = np.minimum(c, o) - l
+    total_range = h - l
+
+    # Criteria for bearish pin bar
+    min_wick_ratio = 2.0  # Upper wick should be at least 2x the body
+    max_body_ratio = 0.3  # Body should be small relative to total range
+    max_lower_wick_ratio = 0.2  # Lower wick should be small
+
+    valid_range = total_range > 0
+
+    condition = (
+        valid_range &
+        (upper_wick >= min_wick_ratio * body) &  # Long upper wick
+        (lower_wick <= max_lower_wick_ratio * body) &  # Small lower wick
+        (body / total_range < max_body_ratio)  # Small body relative to range
+    )
+
+    return pd.Series(condition, index=df.index).fillna(False)
 
 def detect_bullish_harami(df: pd.DataFrame) -> pd.Series:
     # Bullish Harami: Downtrend, previous candle is long bearish, current is small bullish inside previous body
@@ -254,5 +292,6 @@ def add_luxalgo_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df['morning_star'] = detect_morning_star(df)
     df['evening_star'] = detect_evening_star(df)
     df['inside_bar'] = detect_inside_bar(df)
-    df['pin_bar'] = detect_pin_bar(df)
+    df['pin_bar_bullish'] = detect_pin_bar_bullish(df)
+    df['pin_bar_bearish'] = detect_pin_bar_bearish(df)
     return df 

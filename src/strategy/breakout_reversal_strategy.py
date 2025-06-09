@@ -147,104 +147,77 @@ class _SignalScorer:
 
     def analyze_volume_quality(self, candle: pd.Series, threshold: float, df: pd.DataFrame = None) -> float:
         """
-        Analyze the quality of volume based on candle structure and wick analysis.
-        Returns a score indicating volume quality (-2 to +2).
-        Uses configurable threshold type: percentile, mean, or median.
+        Simplified volume analysis based on threshold and candle decisiveness.
+        Returns +1.0 (Strong), 0.0 (Neutral), or -1.0 (Weak/Contradictory).
         """
         try:
-            # Check if 'tick_volume' column exists, if not use 'volume', if neither exists use a default
-            if 'tick_volume' not in candle:
-                if 'volume' in candle:
-                    tick_volume = candle['volume']
-                    self.strategy.logger.debug(f"Using 'volume' instead of missing 'tick_volume' for volume analysis")
+            tick_volume = candle.get('tick_volume', candle.get('volume'))
+            if tick_volume is None:
+                self.strategy.logger.debug("Volume data missing, returning weak score.")
+                return -1.0
+
+            # Compute threshold if df is provided (for dynamic thresholds)
+            if df is not None and not df.empty:
+                lookback = min(50, len(df))
+                if 'tick_volume' in df.columns:
+                    if self.strategy.volume_threshold_type == 'mean':
+                        dynamic_threshold = df['tick_volume'].iloc[-lookback:].mean()
+                    elif self.strategy.volume_threshold_type == 'median':
+                        dynamic_threshold = df['tick_volume'].iloc[-lookback:].median()
+                    else: # Default to percentile
+                        dynamic_threshold = np.percentile(df['tick_volume'].iloc[-lookback:], self.strategy.volume_percentile)
+                    threshold = dynamic_threshold # Override static threshold if df is available
+                    self.strategy.logger.debug(f"[VOLUME] Using dynamic threshold ({self.strategy.volume_threshold_type}): {threshold:.1f}")
                 else:
-                    self.strategy.logger.debug(f"Using default volume value as neither 'tick_volume' nor 'volume' exists")
-                    tick_volume = threshold * 0.8  # Default to 80% of threshold as a reasonable value
+                    self.strategy.logger.debug("[VOLUME] 'tick_volume' not in df, using static threshold.")
             else:
-                tick_volume = candle['tick_volume']
+                self.strategy.logger.debug(f"[VOLUME] No df for dynamic threshold, using static threshold: {threshold:.1f}")
 
-            # Compute threshold based on config
-            lookback = min(50, len(df)) if df is not None else 50
-            if df is not None and 'tick_volume' in df.columns:
-                if self.strategy.volume_threshold_type == 'mean':
-                    threshold = df['tick_volume'].iloc[-lookback:].mean()
-                    self.strategy.logger.debug(f"[VOLUME] Using mean as threshold: {threshold:.1f}")
-                elif self.strategy.volume_threshold_type == 'median':
-                    threshold = df['tick_volume'].iloc[-lookback:].median()
-                    self.strategy.logger.debug(f"[VOLUME] Using median as threshold: {threshold:.1f}")
-                else:
-                    threshold = np.percentile(df['tick_volume'].iloc[-lookback:], self.strategy.volume_percentile)
-                    self.strategy.logger.debug(f"[VOLUME] Using percentile ({self.strategy.volume_percentile}) as threshold: {threshold:.1f}")
+            volume_above_threshold = tick_volume >= threshold
 
-            # First check if volume is even significant - using a more lenient threshold
-            volume_ratio = tick_volume / threshold
-            self.strategy.logger.debug(f"Volume ratio: {volume_ratio:.2f} (volume: {tick_volume}, threshold: {threshold:.1f})")
-            if volume_ratio < 0.6:  # Reduced from 0.8 to 0.6 for more lenient volume filtering
-                self.strategy.logger.debug(f"Insufficient volume: {tick_volume} < 60% of threshold {threshold:.1f}")
-                return 0  # Insufficient volume
-                
-            # Calculate components
-            is_bullish = candle['close'] > candle['open']
+            if not volume_above_threshold:
+                self.strategy.logger.debug(f"Volume {tick_volume:.1f} < threshold {threshold:.1f} -> Weak Volume")
+                return -1.0 # Weak if below threshold
+
+            # Volume is above threshold, now check candle structure
+            is_bullish_candle = candle['close'] > candle['open']
+            is_bearish_candle = candle['close'] < candle['open']
             total_range = candle['high'] - candle['low']
-            body = abs(candle['close'] - candle['open'])
-            
-            if total_range == 0 or total_range < 0.00001:  # Guard against division by zero
-                self.strategy.logger.debug("Doji or very small candle - neutral volume")
-                return 0  # Doji or similar
-                
-            # Analyze wick structure
-            if is_bullish:
-                upper_wick = candle['high'] - candle['close']
-                lower_wick = candle['open'] - candle['low']
-                
-                upper_wick_ratio = upper_wick / total_range
-                lower_wick_ratio = lower_wick / total_range
-                body_ratio = body / total_range
-                
-                # Debug information
-                self.strategy.logger.debug(f"Bullish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
-                
-                # Bullish cases
-                if body_ratio > 0.6 and lower_wick_ratio < 0.2:
-                    # Strong buying pressure - high quality bullish volume
-                    return 2.0
-                elif body_ratio > 0.4 and lower_wick_ratio < upper_wick_ratio:
-                    # Good buying pressure - moderate quality bullish volume
-                    return 1.0
-                elif upper_wick_ratio > 0.6:
-                    # Large upper wick - poor quality for bulls despite green candle
-                    return -0.5
-                else:
-                    # Average quality bullish volume
-                    return 0.5
-            else:
-                # Bearish candle
-                upper_wick = candle['high'] - candle['open']
-                lower_wick = candle['close'] - candle['low']
-                
-                upper_wick_ratio = upper_wick / total_range
-                lower_wick_ratio = lower_wick / total_range
-                body_ratio = body / total_range
-                
-                # Debug information
-                self.strategy.logger.debug(f"Bearish candle - body ratio: {body_ratio:.2f}, upper wick: {upper_wick_ratio:.2f}, lower wick: {lower_wick_ratio:.2f}")
-                
-                # Bearish cases
-                if body_ratio > 0.6 and upper_wick_ratio < 0.2:
-                    # Strong selling pressure - high quality bearish volume
-                    return -2.0
-                elif body_ratio > 0.4 and upper_wick_ratio < lower_wick_ratio:
-                    # Good selling pressure - moderate quality bearish volume
-                    return -1.0
-                elif lower_wick_ratio > 0.6:
-                    # Large lower wick - poor quality for bears despite red candle
-                    return 0.5
-                else:
-                    # Average quality bearish volume
-                    return -0.5
+            body_size = abs(candle['close'] - candle['open'])
+
+            if total_range == 0: # Doji or no range
+                self.strategy.logger.debug("Doji or zero range candle with high volume -> Neutral Volume")
+                return 0.0 
+
+            body_ratio = body_size / total_range
+            upper_wick = candle['high'] - max(candle['open'], candle['close'])
+            lower_wick = min(candle['open'], candle['close']) - candle['low']
+            upper_wick_ratio = upper_wick / total_range
+            lower_wick_ratio = lower_wick / total_range
+
+            # Strong Bullish Implication
+            if is_bullish_candle and body_ratio > 0.6 and lower_wick_ratio < 0.3:
+                self.strategy.logger.debug("Strong bullish candle (large body, small lower wick) -> Bullish Volume (+1.0)")
+                return 1.0
+            if lower_wick_ratio > 0.5 and body_ratio < 0.3: # Strong lower wick rejection
+                self.strategy.logger.debug("Strong lower wick rejection -> Bullish Volume (+1.0)")
+                return 1.0
+
+            # Strong Bearish Implication
+            if is_bearish_candle and body_ratio > 0.6 and upper_wick_ratio < 0.3:
+                self.strategy.logger.debug("Strong bearish candle (large body, small upper wick) -> Bearish Volume (-1.0)")
+                return -1.0
+            if upper_wick_ratio > 0.5 and body_ratio < 0.3: # Strong upper wick rejection
+                self.strategy.logger.debug("Strong upper wick rejection -> Bearish Volume (-1.0)")
+                return -1.0
+
+            # If volume is high but candle is not decisive or shows mixed signals
+            self.strategy.logger.debug("High volume but indecisive candle -> Neutral Volume")
+            return 0.0
+
         except Exception as e:
-            self.strategy.logger.error(f"Error in volume analysis: {str(e)}")
-            return 0  # Safe default
+            self.strategy.logger.error(f"Error in analyze_volume_quality: {str(e)}")
+            return -1.0 # Default to weak on error
 
     def score_signal(
         self,
@@ -268,9 +241,9 @@ class _SignalScorer:
         symbol = signal.get('symbol')
         direction = signal['direction']
         level = signal.get('level')
-        entry = signal['entry_price']
-        stop = signal['stop_loss']
-        tp = signal['take_profit']
+        entry = signal.get('entry_price')
+        stop = signal.get('stop_loss')
+        tp = signal.get('take_profit')
         reason = signal.get('reason', '').lower()
         # Use context or fallback to strategy
         price_tolerance = (extra_context or {}).get('price_tolerance', getattr(self.strategy, 'price_tolerance', 0.001))
@@ -298,26 +271,32 @@ class _SignalScorer:
                         level_strength_score = min(level_strength_score+0.2,1.0)
                         self.strategy.logger.debug(f"[LEVEL] Added recency bonus for {symbol} SELL: {level_strength_score:.2f}")
         # 2. Volume Quality (20%)
-        volume_quality_score = 0
-        if 'strong' in reason and 'volume' in reason:
+        volume_quality_score = 0.5 # Default to neutral
+        if 'strong' in reason and 'volume' in reason: # Legacy reason check, can be phased out
             volume_quality_score = 1.0
             self.strategy.logger.debug(f"[VOLUME] {symbol}: Detected 'strong volume' in reason, setting score to 1.0")
-        elif 'adequate' in reason and 'volume' in reason:
+        elif 'adequate' in reason and 'volume' in reason: # Legacy reason check
             volume_quality_score = 0.7
             self.strategy.logger.debug(f"[VOLUME] {symbol}: Detected 'adequate volume' in reason, setting score to 0.7")
         else:
             try:
-                lookback = min(50,len(df)-1)
-                vol_thresh = np.percentile(df['tick_volume'].iloc[-lookback:], volume_percentile)
-                candle = df.iloc[-1]
-                vol_quality = self.analyze_volume_quality(candle, vol_thresh, df)
+                # Ensure df is available and has enough data for dynamic threshold calculation if used
+                df_for_vol_threshold = df if df is not None and len(df) >= 20 else None
+                vol_thresh_static = np.percentile(df['tick_volume'].iloc[-min(50,len(df)-1):], volume_percentile) if df is not None and not df.empty and 'tick_volume' in df.columns else 1.0
+                
+                candle = df.iloc[-1] # Assuming signal is for the last candle
+                vol_quality = self.analyze_volume_quality(candle, vol_thresh_static, df_for_vol_threshold)
+
+                # Map new vol_quality score (-1, 0, +1) to volume_quality_score (0 to 1)
                 if direction == 'buy':
-                    volume_quality_score = max(0, vol_quality/2)
-                else:
-                    volume_quality_score = max(0, -vol_quality/2)
-                self.strategy.logger.debug(f"[VOLUME] {symbol}: Calculated volume quality is {vol_quality:.2f}, direction-adjusted score: {volume_quality_score:.2f}")
+                    volume_quality_score = (vol_quality + 1) / 2
+                else: # direction == 'sell'
+                    volume_quality_score = (-vol_quality + 1) / 2
+                
+                self.strategy.logger.debug(f"[VOLUME] {symbol} {direction}: Raw vol_quality={vol_quality:.1f}, Mapped score={volume_quality_score:.2f}")
+
             except Exception as e:
-                volume_quality_score = 0.5
+                volume_quality_score = 0.5 # Default to neutral in case of error
                 self.strategy.logger.warning(f"[VOLUME] {symbol}: Error calculating volume quality: {e}. Using default 0.5")
         # 3. Pattern Reliability (20%)
         pattern_reliability = {
@@ -368,19 +347,25 @@ class _SignalScorer:
                 trend_alignment_score = 0.0
                 self.strategy.logger.debug(f"[TREND] {symbol}: SELL against BULLISH higher timeframe (counter-trend)")
         # 5. Risk-Reward (10%)
-        if direction=='buy':
-            risk = entry-stop
-            reward = tp-entry
-        else:
-            risk = stop-entry
-            reward = entry-tp
-        if risk > 0:
-            rr_ratio = reward/risk
-            risk_reward_score = min(rr_ratio/3, 1.0)
-            self.strategy.logger.debug(f"[R:R] {symbol}: Risk-reward ratio {rr_ratio:.2f}:1, score: {risk_reward_score:.2f}")
-        else:
+        if entry is None or stop is None or tp is None:
+            risk = 0
+            reward = 0
             risk_reward_score = 0
-            self.strategy.logger.warning(f"[R:R] {symbol}: Invalid risk calculation (risk={risk})")
+            rr_ratio = 0
+        else:
+            if direction=='buy':
+                risk = entry-stop
+                reward = tp-entry
+            else:
+                risk = stop-entry
+                reward = entry-tp
+            if risk > 0:
+                rr_ratio = reward/risk
+                risk_reward_score = min(rr_ratio/3, 1.0)
+                self.strategy.logger.debug(f"[R:R] {symbol}: Risk-reward ratio {rr_ratio:.2f}:1, score: {risk_reward_score:.2f}")
+            else:
+                risk_reward_score = 0
+                self.strategy.logger.warning(f"[R:R] {symbol}: Invalid risk calculation (risk={risk})")
         
         # Reset bonus tracking
         signal['_volume_profile_bonus'] = False
@@ -611,13 +596,13 @@ class BreakoutReversalStrategy(SignalGenerator):
             'consolidation_ranges': {}
         }
         
-        current_time = datetime.now()
-        logger.debug(f"⏰ Initializing time tracking with current time: {current_time}")
+        current_time_init = datetime.now()
+        logger.debug(f"⏰ Initializing time tracking with current time: {current_time_init}")
         
         logger.info(f"🔧 Initialized {self.name} with primary TF: {primary_timeframe}, higher TF: {higher_timeframe}")
         
         # Log all parameters for reference
-        params = {
+        params_log = {
             'lookback_period': self.lookback_period,
             'price_tolerance': self.price_tolerance,
             'min_level_touches': self.min_level_touches,
@@ -630,36 +615,31 @@ class BreakoutReversalStrategy(SignalGenerator):
             'volume_percentile': self.volume_percentile,
             'consolidation_bars': self.consolidation_bars
         }
-        logger.debug(f"📊 Strategy parameters: {params}")
+        logger.debug(f"📊 Strategy parameters: {params_log}")
         self._scorer = _SignalScorer(self)
         self.risk_manager = RiskManager.get_instance()
         self.use_range_extension_tp = use_range_extension_tp
         self.swing_window = kwargs.get('swing_window', self.candles_to_check)
         self.use_simple_entry = kwargs.get("use_simple_entry", True)
         # --- Deduplication tracking ---
-        self.processed_bars = {}  # (symbol, timeframe): last_processed_bar_timestamp (str)
-        self.processed_zones = {} # (symbol, zone_type, rounded_zone_price): last_processed_timestamp (float)
+        self.processed_bars: Dict[Tuple[str, str], str] = {}  # Ensure type hint matches value type (str)
+        self.processed_zones: Dict[Tuple[str, str, float, str], float] = {}
         self.signal_cooldown = kwargs.get('signal_cooldown', 86400)  # 24h default
-    
+        self.bar_expiry_hours = kwargs.get('bar_expiry_hours', 24) # Added bar_expiry_hours
         self.debug_plots_enabled = kwargs.get('debug_plots_enabled', False)
         self.plot_save_path = Path(kwargs.get('plot_save_path', 'debug_plots'))
         if self.debug_plots_enabled:
             self.plot_save_path.mkdir(parents=True, exist_ok=True)
-
         # Initialize state attributes
         self.key_levels: Dict[str, Dict[str, List[Dict]]] = {}  # E.g. {'EURUSD': {'support': [], 'resistance': []}}
         self.trend_lines: Dict[str, Dict[str, List[Dict]]] = {} # E.g. {'EURUSD': {'support': [], 'resistance': []}}
         self.consolidation_ranges: Dict[str, List[Dict]] = {} # E.g. {'EURUSD': []}
         self.last_level_update: Dict[str, datetime] = {}
         self.last_consolidation_update: Dict[str, datetime] = {}
-        self.processed_bars: Dict[Tuple[str, str], Any] = {} # (symbol, timeframe) -> last_processed_timestamp
-        self.active_trades: Dict[str, List[Dict]] = {} # symbol -> list of active trade dicts
-        self.retest_conditions: Dict[str, List[Dict]] = {} # Stores info about levels pending retest
-        self.processed_zones: Dict[Tuple[str, str, float, str], float] = {} # (symbol, level_type, price, source) -> timestamp
-
+        self.active_trades: Dict[str, List[Dict]] = {}
+        self.retest_conditions: Dict[str, List[Dict]] = {}
         self._scorer = _SignalScorer(self)
         self.backtest_mode = backtest_mode
-        
         self._load_timeframe_profile() # Ensure tf_profile is set during __init__
 
     def _load_timeframe_profile(self):
@@ -717,10 +697,10 @@ class BreakoutReversalStrategy(SignalGenerator):
         return True
     
     async def generate_signals(self, market_data: Dict[str, Any], symbol: Optional[str] = None, **kwargs) -> List[Dict]:
-        start_time = time.time()
-        current_time = time.time() # Define current_time here
+        start_time_gs = time.time() # Renamed to avoid conflict
+        current_time_gs_ts = time.time() # Renamed to avoid conflict, gs for generate_signals, ts for timestamp
         signals = []
-        all_signals = [] # To store signals from all symbols before selection
+        all_signals = []
 
         logger.debug(f"[StrategyInit] {self.__class__.__name__}: required_timeframes={self.required_timeframes}")
         logger.debug(f"[BreakoutReversalStrategy] Analyzing symbol(s): {list(market_data.keys()) if market_data else symbol} | primary_timeframe={self.primary_timeframe}, higher_timeframe={self.higher_timeframe}")
@@ -730,13 +710,11 @@ class BreakoutReversalStrategy(SignalGenerator):
             logger.warning("⚠️ No market data provided to generate signals")
             return []
             
-        # Check if we should force visualization for debugging
         debug_visualize = kwargs.get('debug_visualize', False)
         force_trendlines = kwargs.get('force_trendlines', False)
         skip_plots = kwargs.get('skip_plots', False)
         process_immediately = kwargs.get('process_immediately', False)
         
-        # Debug logging
         if debug_visualize:
             logger.info("🔍 Debug visualization mode enabled - will force trendline updates with plots")
         elif force_trendlines:
@@ -744,192 +722,141 @@ class BreakoutReversalStrategy(SignalGenerator):
             
         logger.info(f"🔍 Generating signals with {self.name} strategy for {len(market_data)} symbols")
         
-        # Process symbols one by one, potentially returning signals immediately
-        for symbol in market_data:
-            symbol_start_time = time.time()
-            logger.debug(f"📊 Market data for {symbol} contains timeframes: {list(market_data[symbol].keys())}")
+        for symbol_loop_var in market_data:
+            symbol_start_time_loop = time.time() # Renamed
+            logger.debug(f"📊 Market data for {symbol_loop_var} contains timeframes: {list(market_data[symbol_loop_var].keys())}")
             
-            # Skip if we don't have all required timeframes
-            if not all(tf in market_data[symbol] for tf in self.required_timeframes):
-                missing_tfs = [tf for tf in self.required_timeframes if tf not in market_data[symbol]]
-                logger.debug(f"⏩ Missing required timeframes for {symbol}: {missing_tfs}, skipping")
+            if not all(tf in market_data[symbol_loop_var] for tf in self.required_timeframes):
+                missing_tfs = [tf for tf in self.required_timeframes if tf not in market_data[symbol_loop_var]]
+                logger.debug(f"⏩ Missing required timeframes for {symbol_loop_var}: {missing_tfs}, skipping")
                 continue
                 
-            # Prepare dataframes for primary and higher timeframes
-            primary_raw = market_data[symbol].get(self.primary_timeframe)
+            primary_raw = market_data[symbol_loop_var].get(self.primary_timeframe)
             primary_df = _to_dataframe(primary_raw, self.primary_timeframe)
             primary_df = _ensure_datetime_index(primary_df, self.primary_timeframe)
 
+            if primary_df is not None and not primary_df.empty:
+                last_bar_timestamp_str = str(primary_df.index[-1])
+                bar_key = (symbol_loop_var, self.primary_timeframe)
+                if self.processed_bars.get(bar_key) == last_bar_timestamp_str:
+                    logger.debug(f"[{symbol_loop_var}/{self.primary_timeframe}] Bar at {last_bar_timestamp_str} already processed in this session. Skipping symbol.")
+                    continue 
+                self.processed_bars[bar_key] = last_bar_timestamp_str 
+            else:
+                logger.debug(f"[{symbol_loop_var}/{self.primary_timeframe}] No valid primary_df. Skipping analysis for this symbol.")
+                continue
+
             higher_df = None
             if self.higher_timeframe and self.higher_timeframe != self.primary_timeframe:
-                higher_raw = market_data[symbol].get(self.higher_timeframe)
+                higher_raw = market_data[symbol_loop_var].get(self.higher_timeframe)
                 higher_df = _to_dataframe(higher_raw, self.higher_timeframe)
                 higher_df = _ensure_datetime_index(higher_df, self.higher_timeframe)
 
-            # Add LuxAlgo-style pattern columns
             primary_df = add_luxalgo_patterns(primary_df)
             if higher_df is not None:
                 higher_df = add_luxalgo_patterns(higher_df)
             
-            # Check if DataFrames are None or empty
-            if primary_df is None or len(primary_df) == 0 or higher_df is None or len(higher_df) == 0:
-                logger.debug(f"⏩ DataFrame is None or empty for {symbol}, skipping.")
-                continue
-            # Warn if not enough bars for lookback, but proceed anyway
-            if len(primary_df) < self.lookback_period:
-                logger.debug(f"[PERMISSIVE] {symbol}: primary_df has only {len(primary_df)} rows (lookback required: {self.lookback_period}) – proceeding anyway.")
-            if len(higher_df) < 10:
-                logger.debug(f"[PERMISSIVE] {symbol}: higher_df has only {len(higher_df)} rows (min 10 recommended) – proceeding anyway.")
-            
-            # Verify we have proper DataFrames before processing
-            if not isinstance(primary_df, pd.DataFrame) or not isinstance(higher_df, pd.DataFrame):
-                logger.warning(f"Expected DataFrames but got: primary={type(primary_df)}, higher={type(higher_df)}")
+            if higher_df is None or higher_df.empty: # primary_df already checked
+                logger.debug(f"⏩ Higher timeframe DataFrame is None or empty for {symbol_loop_var}, skipping.")
                 continue
             
-            # Update key levels and trend lines
-            try:
-                if primary_df is not None and len(primary_df) > 0:
-                    # Force trend line updates if debug_visualize or force_trendlines is True
-                    self._update_key_levels(symbol, primary_df, debug_force_update=(debug_visualize or force_trendlines))
-                    self._find_trend_lines(symbol, primary_df, debug_force_update=(debug_visualize or force_trendlines), skip_plots=skip_plots)
-                    self._identify_consolidation_ranges(symbol, primary_df)
-                    self._process_retest_conditions(symbol, primary_df)
-                else:
-                    logger.warning(f"⚠️ Empty primary DataFrame for {symbol}, skipping level and trendline detection")
-            except Exception as e:
-                logger.exception(f"Error during level detection for {symbol}: {str(e)}")
+            self._update_key_levels(symbol_loop_var, primary_df, debug_force_update=(debug_visualize or force_trendlines))
+            self._find_trend_lines(symbol_loop_var, primary_df, debug_force_update=(debug_visualize or force_trendlines), skip_plots=skip_plots)
+            self._identify_consolidation_ranges(symbol_loop_var, primary_df)
+            self._process_retest_conditions(symbol_loop_var, primary_df)
             
+            breakout_signals = self._check_breakout_signals(symbol_loop_var, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time_gs_ts)
+            reversal_signals = self._check_reversal_signals(symbol_loop_var, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time_gs_ts)
             
-            # Check for breakout signals
-            breakout_signals = self._check_breakout_signals(symbol, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time)
-            
-            # Check for reversal signals
-            reversal_signals = self._check_reversal_signals(symbol, primary_df, higher_df, skip_plots, processed_zones=self.processed_zones, signal_cooldown=self.signal_cooldown, current_time=current_time)
-            
-            # Collect all signals for this symbol
-            symbol_signals = []
+            symbol_signals_loop = [] # Renamed
             if breakout_signals:
-                symbol_signals.extend(breakout_signals)
-            
+                symbol_signals_loop.extend(breakout_signals)
             if reversal_signals:
-                symbol_signals.extend(reversal_signals)
+                symbol_signals_loop.extend(reversal_signals)
                 
-            # Score signals using helper
-            symbol_signals = self._score_signals(symbol_signals, primary_df, higher_df)
+            symbol_signals_loop = self._score_signals(symbol_signals_loop, primary_df, higher_df)
             
-            # For each symbol, return the best signal immediately if requested
-            if process_immediately and symbol_signals:
-                # Find best signal for this symbol
-                best_signal = max(symbol_signals, key=lambda x: x.get('score', 0))
-                
-                # Log all signals with their scores for debugging
-                for signal in symbol_signals:
-                    logger.debug(f"Signal {signal['direction']} for {symbol}: {signal.get('reason', 'No reason')} - Score: {signal.get('score', 0):.2f}")
-                
-                logger.info(f"🌟 Selected best signal for {symbol}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
-                
-                # Remove scoring metadata before returning
-                if 'original_symbol' in best_signal:
-                    del best_signal['original_symbol']
-                if 'score_details' in best_signal:
-                    del best_signal['score_details']
-                
-                # Return this single signal in a list for immediate processing
-                symbol_time = time.time() - symbol_start_time
-                logger.info(f"📊 Generated signal for {symbol} in {symbol_time:.2f}s: {best_signal['direction']} at {best_signal['entry_price']:.5f} | confidence: {best_signal['confidence']:.2f}")
-                logger.info(f"👉 RETURNING IMMEDIATE SIGNAL FOR {symbol}")
+            if process_immediately and symbol_signals_loop:
+                best_signal = max(symbol_signals_loop, key=lambda x: x.get('score', 0))
+                for signal_item_loop in symbol_signals_loop: # Renamed
+                    logger.debug(f"Signal {signal_item_loop['direction']} for {symbol_loop_var}: {signal_item_loop.get('reason', 'No reason')} - Score: {signal_item_loop.get('score', 0):.2f}")
+                logger.info(f"🌟 Selected best signal for {symbol_loop_var}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
+                if 'original_symbol' in best_signal: del best_signal['original_symbol']
+                if 'score_details' in best_signal: del best_signal['score_details']
+                symbol_time_loop = time.time() - symbol_start_time_loop # Renamed
+                logger.info(f"📊 Generated signal for {symbol_loop_var} in {symbol_time_loop:.2f}s: {best_signal['direction']} at {best_signal['entry_price']:.5f} | confidence: {best_signal['confidence']:.2f}")
+                logger.info(f"👉 RETURNING IMMEDIATE SIGNAL FOR {symbol_loop_var}")
                 return [best_signal]
             
-            # Add to all signals collection for batch processing
-            all_signals.extend(symbol_signals)
+            all_signals.extend(symbol_signals_loop)
         
-        # After processing all symbols, add this log before signal selection:
         if all_signals:
             logger.info(f"👉 Found {len(all_signals)} potential signals before scoring and selection")
-            
-            # --- Consolidation zone integration ---
-            for signal in all_signals:
-                symbol = signal.get('symbol')
-                consolidation_info = self.last_consolidation_ranges.get(symbol, {})
+            for signal_as in all_signals: # Renamed
+                symbol_as = signal_as.get('symbol') # Renamed
+                consolidation_info = self.last_consolidation_ranges.get(symbol_as, {})
                 is_consolidation = consolidation_info.get('is_consolidation', False)
                 range_high = consolidation_info.get('high')
                 range_low = consolidation_info.get('low')
-                # Annotate breakout signals that break out of consolidation
-                if signal.get('type', '').upper() == 'BREAKOUT' and is_consolidation:
-                    entry = signal.get('entry_price')
-                    direction = signal.get('direction', '').lower()
+                if signal_as.get('type', '').upper() == 'BREAKOUT' and is_consolidation:
+                    entry = signal_as.get('entry_price')
+                    direction = signal_as.get('direction', '').lower()
                     if direction == 'buy' and range_high is not None and entry is not None and entry > range_high:
-                        signal['consolidation_breakout'] = True
-                        signal['reason'] += ' | Breakout from consolidation zone'
-                        signal['score'] = min(1.0, signal.get('score', 0) + 0.1) # Prioritize
+                        signal_as['consolidation_breakout'] = True
+                        signal_as['reason'] += ' | Breakout from consolidation zone'
+                        signal_as['score'] = min(1.0, signal_as.get('score', 0) + 0.1)
                     elif direction == 'sell' and range_low is not None and entry is not None and entry < range_low:
-                        signal['consolidation_breakout'] = True
-                        signal['reason'] += ' | Breakout from consolidation zone'
-                        signal['score'] = min(1.0, signal.get('score', 0) + 0.1)
-            
-            # Group signals by symbol
+                        signal_as['consolidation_breakout'] = True
+                        signal_as['reason'] += ' | Breakout from consolidation zone'
+                        signal_as['score'] = min(1.0, signal_as.get('score', 0) + 0.1)
             signals_by_symbol = {}
-            for signal in all_signals:
-                symbol = signal['original_symbol']
-                if symbol not in signals_by_symbol:
-                    signals_by_symbol[symbol] = []
-                signals_by_symbol[symbol].append(signal)
-            
-            # For each symbol, only select highest scoring signal
-            for symbol, symbol_signals in signals_by_symbol.items():
-                if not symbol_signals:
-                    continue
-                    
-                # Find highest scoring signal
-                best_signal = max(symbol_signals, key=lambda x: x.get('score', 0))
-                
-                # Log all signals with their scores for debugging
-                for signal in symbol_signals:
-                    logger.debug(f"Signal {signal['direction']} for {symbol}: {signal.get('reason', 'No reason')} - Score: {signal.get('score', 0):.2f}")
-                
-                logger.info(f"🌟 Selected best signal for {symbol}: {best_signal['direction']} {best_signal.get('reason', 'No reason')} with score {best_signal.get('score', 0):.2f}")
-                
-                # Remove scoring metadata before returning
-                if 'original_symbol' in best_signal:
-                    del best_signal['original_symbol']
-                if 'score_details' in best_signal:
-                    del best_signal['score_details']
-                
-                signals.append(best_signal)
+            for signal_sbs in all_signals: # Renamed
+                symbol_sbs = signal_sbs['original_symbol'] # Renamed
+                if symbol_sbs not in signals_by_symbol:
+                    signals_by_symbol[symbol_sbs] = []
+                signals_by_symbol[symbol_sbs].append(signal_sbs)
+            for symbol_final, symbol_signals_final in signals_by_symbol.items(): # Renamed
+                if not symbol_signals_final: continue
+                best_signal_final = max(symbol_signals_final, key=lambda x: x.get('score', 0)) # Renamed
+                for signal_item_final in symbol_signals_final: # Renamed
+                    logger.debug(f"Signal {signal_item_final['direction']} for {symbol_final}: {signal_item_final.get('reason', 'No reason')} - Score: {signal_item_final.get('score', 0):.2f}")
+                logger.info(f"🌟 Selected best signal for {symbol_final}: {best_signal_final['direction']} {best_signal_final.get('reason', 'No reason')} with score {best_signal_final.get('score', 0):.2f}")
+                if 'original_symbol' in best_signal_final: del best_signal_final['original_symbol']
+                if 'score_details' in best_signal_final: del best_signal_final['score_details']
+                signals.append(best_signal_final)
         
-        generation_time = time.time() - start_time
-        logger.info(f"✅ Generation completed in {generation_time:.2f}s - Produced {len(signals)} final signals")
+        generation_time_gs = time.time() - start_time_gs # Renamed
+        logger.info(f"✅ Generation completed in {generation_time_gs:.2f}s - Produced {len(signals)} final signals")
         if signals:
-            for i, signal in enumerate(signals):
-                logger.info(f"📊 Final Signal #{i+1}: {signal['symbol']} {signal['direction']} at {signal['entry_price']:.5f} | confidence: {signal['confidence']:.2f}")
+            for i, signal_ret in enumerate(signals): # Renamed
+                logger.info(f"📊 Final Signal #{i+1}: {signal_ret['symbol']} {signal_ret['direction']} at {signal_ret['entry_price']:.5f} | confidence: {signal_ret['confidence']:.2f}")
             logger.info(f"👉 RETURNING {len(signals)} SIGNALS FOR PROCESSING")
         else:
             logger.info("📭 No signals generated - returning empty list")
         
-        # --- Cleanup old processed_zones entries ---
-        # Ensure current_time is defined; it should be set at the start or from latest data if processed.
-        # Using the current_time defined at the beginning of the function for now.
-        cleanup_delay_seconds = self.signal_cooldown * 2 # Assuming signal_cooldown is in seconds
-        cleanup_threshold_time = current_time - cleanup_delay_seconds
-
+        cleanup_delay_seconds = self.signal_cooldown * 2
+        cleanup_threshold_time = current_time_gs_ts - cleanup_delay_seconds
         old_zone_keys = [k for k, v in self.processed_zones.items() if v < cleanup_threshold_time]
-        for k in old_zone_keys:
-            del self.processed_zones[k]
+        for k_zone_cleanup in old_zone_keys: # Renamed
+            del self.processed_zones[k_zone_cleanup]
         if old_zone_keys:
             logger.debug(f"[DEDUP] Cleaned up {len(old_zone_keys)} old zone records")
-        # --- Cleanup old processed_bars entries ---
-        last_bar_str = None
-        try:
-            if 'primary_df' in locals() and primary_df is not None:
-                last_bar_str = str(primary_df.index[-1])
-        except Exception:
-            last_bar_str = None
-        if last_bar_str is not None:
-            old_bar_keys = [k for k, v in self.processed_bars.items() if v != last_bar_str]
-            for k in old_bar_keys:
-                del self.processed_bars[k]
-            if old_bar_keys:
-                logger.debug(f"[DEDUP] Cleaned up {len(old_bar_keys)} old bar records")
+
+        bar_expiry_seconds = self.bar_expiry_hours * 3600
+        keys_to_delete_bars = [] # Renamed
+        current_dt_for_cleanup = datetime.fromtimestamp(current_time_gs_ts)
+        for bar_key_cleanup, timestamp_str_cleanup in self.processed_bars.items(): # Renamed
+            try:
+                processed_dt = pd.to_datetime(timestamp_str_cleanup).to_pydatetime()
+                if (current_dt_for_cleanup - processed_dt).total_seconds() > bar_expiry_seconds:
+                    keys_to_delete_bars.append(bar_key_cleanup)
+            except Exception as e:
+                logger.warning(f"[DEDUP] Error parsing timestamp for processed_bars key {bar_key_cleanup} ('{timestamp_str_cleanup}'): {e}. This entry might not be cleaned correctly based on time.")
+        for k_bar_delete in keys_to_delete_bars: # Renamed
+            if k_bar_delete in self.processed_bars: 
+                 del self.processed_bars[k_bar_delete]
+        if keys_to_delete_bars:
+            logger.debug(f"[DEDUP] Cleaned up {len(keys_to_delete_bars)} bar processing records older than {self.bar_expiry_hours} hours.")
         
         return signals
     
@@ -1011,13 +938,13 @@ class BreakoutReversalStrategy(SignalGenerator):
         Only plot trendlines and raw price series if skip_plots is False.
         """
         
-        current_time = datetime.now()
-        last_update_time = self.last_updated['trend_lines'].get(symbol, None)
-        force_update = debug_force_update
+        current_time_tl = datetime.now() # Renamed
+        last_update_time_tl = self.last_updated['trend_lines'].get(symbol, None) # Renamed
+        force_update_tl = debug_force_update # Renamed
 
-        if (not force_update and last_update_time is not None and 
-            (current_time - last_update_time).total_seconds() < self.trend_line_update_interval * 3600):
-            logger.debug(f"⏭️ Skipping trend line update for {symbol} - last update: {last_update_time}")
+        if (not force_update_tl and last_update_time_tl is not None and 
+            (current_time_tl - last_update_time_tl).total_seconds() < self.trend_line_update_interval * 3600):
+            logger.debug(f"⏭️ Skipping trend line update for {symbol} - last update: {last_update_time_tl}")
             return
 
         logger.info(f"🔍 Finding trend lines for {symbol}")
@@ -1035,33 +962,32 @@ class BreakoutReversalStrategy(SignalGenerator):
         if skip_plots:
             if bullish_trend_lines:
                 logger.debug(f"📈 BULLISH TREND LINES for {symbol} (skipping plots)")
-                for i, line in enumerate(bullish_trend_lines):
-                    logger.debug(f"  📈 Bullish Line #{{i+1}}: Angle={{line['angle']:.2f}}°, r²={{line['r_squared']:.3f}}, Touches={{line['touches']}}")
+                for i, line_bull in enumerate(bullish_trend_lines): # Renamed
+                    logger.debug(f"  📈 Bullish Line #{{i+1}}: Angle={{line_bull['angle']:.2f}}°, r²={{line_bull['r_squared']:.3f}}, Touches={{line_bull['touches']}}")
             if bearish_trend_lines:
                 logger.debug(f"📉 BEARISH TREND LINES for {symbol} (skipping plots)")
-                for i, line in enumerate(bearish_trend_lines):
-                    logger.debug(f"  📉 Bearish Line #{{i+1}}: Angle={{line['angle']:.2f}}°, r²={{line['r_squared']:.3f}}, Touches={{line['touches']}}")
-            self.last_updated['trend_lines'][symbol] = current_time
+                for i, line_bear in enumerate(bearish_trend_lines): # Renamed
+                    logger.debug(f"  📉 Bearish Line #{{i+1}}: Angle={{line_bear['angle']:.2f}}°, r²={{line_bear['r_squared']:.3f}}, Touches={{line_bear['touches']}}")
+            self.last_updated['trend_lines'][symbol] = current_time_tl
             return
-        # Create debug plots directory if it doesn't exist
+        
         debug_dir = Path("debug_plots")
         debug_dir.mkdir(exist_ok=True)
         plt.figure(figsize=(15, 10))
         plot_range = min(200, len(df))
-        # Use datetime index for x-axis
         x_dates = df.index[-plot_range:]
         plt.plot(x_dates, df['close'].iloc[-plot_range:], color='blue', alpha=0.5, label='Close Price')
         plt.plot(x_dates, df['high'].iloc[-plot_range:], color='green', alpha=0.3, label='High')
         plt.plot(x_dates, df['low'].iloc[-plot_range:], color='red', alpha=0.3, label='Low')
-        # Plot swing highs and lows
+        
         swing_highs, swing_lows = analyzer.find_swings()
         if swing_highs:
-            high_x = [df.index[x] for x, y in swing_highs if x >= len(df) - plot_range]
-            high_y = [y for x, y in swing_highs if x >= len(df) - plot_range]
+            high_x = [df.index[x_val] for x_val, y_val in swing_highs if x_val >= len(df) - plot_range] # Renamed
+            high_y = [y_val for x_val, y_val in swing_highs if x_val >= len(df) - plot_range] # Renamed
             plt.scatter(high_x, high_y, color='green', marker='^', s=50, label='Swing Highs')
             if len(high_x) >= 2:
-                for i in range(len(high_x) - 1):
-                    plt.plot([high_x[i], high_x[i+1]], [high_y[i], high_y[i+1]], color='lightgreen', linestyle='--', alpha=0.5)
+                for i_sh in range(len(high_x) - 1): # Renamed
+                    plt.plot([high_x[i_sh], high_x[i_sh+1]], [high_y[i_sh], high_y[i_sh+1]], color='lightgreen', linestyle='--', alpha=0.5)
         if swing_lows:
             low_x = [df.index[x] for x, y in swing_lows if x >= len(df) - plot_range]
             low_y = [y for x, y in swing_lows if x >= len(df) - plot_range]
@@ -1124,59 +1050,43 @@ class BreakoutReversalStrategy(SignalGenerator):
         plt.savefig(file_path)
         plt.close()
         logger.info(f"📊 Saved trend line visualization to {file_path}")
-        self.last_updated['trend_lines'][symbol] = current_time
+        self.last_updated['trend_lines'][symbol] = current_time_tl
     
     def _find_swing_highs(self, df: pd.DataFrame, window: int = 5) -> list:
-        """Improved swing-high detection using Bill-Williams fractals filtered by ATR significance."""
+        """Classic Bill Williams fractal swing-high detection with ATR significance filter."""
         if df is None or len(df) < 2 * window + 1:
             return []
-        
         highs = np.asarray(df['high'].values, dtype=np.float64)
         lows = np.asarray(df['low'].values, dtype=np.float64)
         closes = np.asarray(df['close'].values, dtype=np.float64)
-        
-        # Calculate ATR for significance threshold
         atr = talib.ATR(highs, lows, closes, timeperiod=14)
         sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
-
         pivots = []
         last_pivot_price = None
-        
-        # Pre-calculate MAX series to avoid repeated calls in loop
-        max_series = talib.MAX(highs, timeperiod=2 * window + 1)
-
         for i in range(window, len(df) - window):
-            # Check if current high is the maximum in the window (fractal condition)
-            if not np.isnan(max_series[i]) and highs[i] == max_series[i]:
-                # ATR significance filter
+            left = highs[i - window:i]
+            right = highs[i + 1:i + window + 1]
+            if all(highs[i] > h for h in left) and all(highs[i] > h for h in right):
                 if last_pivot_price is None or abs(highs[i] - last_pivot_price) >= sig_thresh:
                     pivots.append((i, highs[i]))
                     last_pivot_price = highs[i]
         return pivots
-    
+
     def _find_swing_lows(self, df: pd.DataFrame, window: int = 5) -> list:
-        """Improved swing-low detection using fractals + ATR filter (mirror of swing-high logic)."""
+        """Classic Bill Williams fractal swing-low detection with ATR significance filter."""
         if df is None or len(df) < 2 * window + 1:
             return []
-
         highs = np.asarray(df['high'].values, dtype=np.float64)
         lows = np.asarray(df['low'].values, dtype=np.float64)
         closes = np.asarray(df['close'].values, dtype=np.float64)
-
-        # Calculate ATR for significance threshold
         atr = talib.ATR(highs, lows, closes, timeperiod=14)
         sig_thresh = atr[-1] * 0.25 if len(atr) > 0 and not np.isnan(atr[-1]) else 0
-
         pivots = []
         last_pivot_price = None
-
-        # Pre-calculate MIN series
-        min_series = talib.MIN(lows, timeperiod=2 * window + 1)
-
         for i in range(window, len(df) - window):
-            # Check if current low is the minimum in the window (fractal condition)
-            if not np.isnan(min_series[i]) and lows[i] == min_series[i]:
-                # ATR significance filter
+            left = lows[i - window:i]
+            right = lows[i + 1:i + window + 1]
+            if all(lows[i] < l for l in left) and all(lows[i] < l for l in right):
                 if last_pivot_price is None or abs(lows[i] - last_pivot_price) >= sig_thresh:
                     pivots.append((i, lows[i]))
                     last_pivot_price = lows[i]
@@ -1184,40 +1094,57 @@ class BreakoutReversalStrategy(SignalGenerator):
     
     def _identify_trend_lines(self, df: pd.DataFrame, swing_points: list, line_type: str, skip_plots: bool = False) -> list:
         """
-        Fit a trendline to the given swing points using linear regression.
-        Returns a list with a single trendline dict if valid, else empty list.
+        Fit multiple trend lines to recent combinations of swing points (e.g., last 3, 4, 5).
+        Return a list of valid trend lines with metadata (start/end idx, r_squared, angle, touches, recency, quality_score).
         """
         import numpy as np
         from scipy.stats import linregress
+        import math
         min_points = getattr(self, 'trend_line_min_points', 3)
-        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.6) # Changed from 0.7
+        max_angle = getattr(self, 'trend_line_max_angle', 45)
+        r2_threshold = getattr(self, 'trend_line_r2_threshold', 0.6)
+        max_lines = 8
         if len(swing_points) < min_points:
             self.logger.debug(f"Not enough swing points ({len(swing_points)}) to identify {line_type} trend lines. Need at least {min_points}.")
             return []
-        x = np.array([p[0] for p in swing_points])
-        y = np.array([p[1] for p in swing_points])
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
-        r_squared = float(r_value) ** 2
-        if r_squared < r2_threshold:
-            self.logger.debug(f"Rejected {line_type} trendline: r_squared={r_squared:.2f} < threshold {r2_threshold}")
-            return []
-        import math
-        trendline = {
-            'slope': slope,
-            'intercept': intercept,
-            'r_squared': r_squared,
-            'start_idx': int(x[0]),
-            'end_idx': int(x[-1]),
-            'line_type': line_type,
-            'points': swing_points,
-            'quality_score': r_squared * len(swing_points),
-            # Newly added metadata for downstream processing
-            'angle': math.degrees(math.atan(slope)) if slope is not None else 0.0,
-            'x_start': float(x[0]),
-            'x_end': float(x[-1]),
-            'touches': len(swing_points),
-        }
-        return [trendline]
+        lines = []
+        # Try fitting lines to last 3, 4, 5, ... up to all points (but prioritize recency)
+        for n in range(min_points, min(len(swing_points), min_points + 3) + 1):
+            pts = swing_points[-n:]
+            x = np.array([p[0] for p in pts])
+            y = np.array([p[1] for p in pts])
+            slope, intercept, r_value, p_value, std_err = linregress(x, y)
+            r_squared = float(r_value) ** 2
+            angle = math.degrees(math.atan(slope)) if slope is not None else 0.0
+            start_idx = int(x[0])
+            end_idx = int(x[-1])
+            # Count touches: how many swing points are within tolerance of the line
+            tol = np.std(y) * 0.25 if len(y) > 1 else 0.0001
+            line_y = slope * x + intercept
+            touches = int(np.sum(np.abs(y - line_y) <= tol))
+            # Recency: average index of points used, normalized (closer to end = more recent)
+            recency_score = np.mean(x) / len(df) if len(df) > 0 else 0
+            # Only keep lines that meet minimum criteria
+            if touches >= min_points and abs(angle) < max_angle and r_squared >= r2_threshold:
+                quality_score = r_squared * touches * (1 + recency_score)
+                lines.append({
+                    'slope': slope,
+                    'intercept': intercept,
+                    'r_squared': r_squared,
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'line_type': line_type,
+                    'points': pts,
+                    'quality_score': quality_score,
+                    'angle': angle,
+                    'x_start': float(x[0]),
+                    'x_end': float(x[-1]),
+                    'touches': touches,
+                    'recency_score': recency_score,
+                })
+        # Sort by quality_score descending, return up to max_lines
+        lines = sorted(lines, key=lambda l: l['quality_score'], reverse=True)[:max_lines]
+        return lines
     
     def _count_trend_line_touches(self, df: pd.DataFrame, slope: float, intercept: float, 
                                   line_type: str, atr: float = None, start_idx: int = None, end_idx: int = None) -> int:
@@ -2086,8 +2013,10 @@ class BreakoutReversalStrategy(SignalGenerator):
         evening_star_series = df['evening_star']
         white_marubozu_series = df['white_marubozu']
         black_marubozu_series = df['black_marubozu']
-        pin_bar_series = df['pin_bar']
         inside_bar_series = df['inside_bar']
+
+        pin_bar_bullish_series = df['pin_bar_bullish']
+        pin_bar_bearish_series = df['pin_bar_bearish']
 
         start_idx = max(1, len(df) - self.candles_to_check -1) # Ensure we have at least one prior bar for setup
         end_idx = len(df) -1 # Current candle is T+1 (confirmation)
@@ -2170,20 +2099,21 @@ class BreakoutReversalStrategy(SignalGenerator):
                     # Check these if not already a strong false_break_rejection, or to add confluence
                     if not is_false_break_rejection: # Prioritize false break detection
                         if expected_direction == 'buy':
-                            if df['hammer'].iloc[setup_candle_idx]: pattern_on_setup = "Hammer"
-                            elif df['bullish_engulfing'].iloc[setup_candle_idx]: pattern_on_setup = "Bullish Engulfing"
-                            elif df['morning_star'].iloc[setup_candle_idx]: pattern_on_setup = "Morning Star"
-                            elif df['bullish_harami'].iloc[setup_candle_idx]: pattern_on_setup = "Bullish Harami"
-                            elif df['white_marubozu'].iloc[setup_candle_idx]: pattern_on_setup = "White Marubozu"
-                            elif df['pin_bar'].iloc[setup_candle_idx] and setup_candle['close'] > setup_candle['open']: pattern_on_setup = "Bullish Pin Bar"
+                            if hammer_series.iloc[setup_candle_idx]: pattern_on_setup = "Hammer"
+                            elif bullish_engulfing_series.iloc[setup_candle_idx]: pattern_on_setup = "Bullish Engulfing"
+                            elif morning_star_series.iloc[setup_candle_idx]: pattern_on_setup = "Morning Star"
+                            elif bullish_harami_series.iloc[setup_candle_idx]: pattern_on_setup = "Bullish Harami"
+                            elif white_marubozu_series.iloc[setup_candle_idx]: pattern_on_setup = "White Marubozu"
+                            elif inside_bar_series.iloc[setup_candle_idx]: pattern_on_setup = "Inside Bar"
+                            elif pin_bar_bullish_series.iloc[setup_candle_idx]: pattern_on_setup = "Bullish Pin Bar"
                         else: # expected_direction == 'sell'
-                            if df['shooting_star'].iloc[setup_candle_idx]: pattern_on_setup = "Shooting Star"
-                            elif df['bearish_engulfing'].iloc[setup_candle_idx]: pattern_on_setup = "Bearish Engulfing"
-                            elif df['evening_star'].iloc[setup_candle_idx]: pattern_on_setup = "Evening Star"
-                            elif df['bearish_harami'].iloc[setup_candle_idx]: pattern_on_setup = "Bearish Harami"
-                            elif df['hanging_man'].iloc[setup_candle_idx]: pattern_on_setup = "Hanging Man"
-                            elif df['black_marubozu'].iloc[setup_candle_idx]: pattern_on_setup = "Black Marubozu"
-                            elif df['pin_bar'].iloc[setup_candle_idx] and setup_candle['close'] < setup_candle['open']: pattern_on_setup = "Bearish Pin Bar"
+                            if shooting_star_series.iloc[setup_candle_idx]: pattern_on_setup = "Shooting Star"
+                            elif bearish_engulfing_series.iloc[setup_candle_idx]: pattern_on_setup = "Bearish Engulfing"
+                            elif evening_star_series.iloc[setup_candle_idx]: pattern_on_setup = "Evening Star"
+                            elif bearish_harami_series.iloc[setup_candle_idx]: pattern_on_setup = "Bearish Harami"
+                            elif black_marubozu_series.iloc[setup_candle_idx]: pattern_on_setup = "Black Marubozu"
+                            elif inside_bar_series.iloc[setup_candle_idx]: pattern_on_setup = "Inside Bar"
+                            elif pin_bar_bearish_series.iloc[setup_candle_idx]: pattern_on_setup = "Bearish Pin Bar"
                     
                     if pattern_on_setup is None or pattern_on_setup == "Unknown Rejection" and not is_false_break_rejection : # No clear rejection or pattern on setup candle
                         self.logger.debug(f"[{symbol}/{self.primary_timeframe}] No strong rejection or pattern on setup candle {setup_candle_idx} at {level_price:.4f} for {expected_direction}.")
@@ -2359,143 +2289,103 @@ class BreakoutReversalStrategy(SignalGenerator):
                                       expected_direction: str, level_price: float, atr_value: float, 
                                       volume_threshold: float, df_for_vol_analysis: pd.DataFrame) -> dict:
         """
-        Validates if the confirmation_candle (T+1) confirms the reversal setup from setup_candle (T).
-        Returns: dict with 'is_confirmed' (bool), 'reason' (str), 'volume_score' (float), 'pattern_on_confirmation' (str)
+        Simplified: First check for strong patterns (engulfing, marubozu, pin bar). If found, confirm immediately.
+        If not, apply minimal secondary checks (body size, wick, volume).
         """
         results = {'is_confirmed': False, 'reason': "No confirmation criteria met", 'volume_score': 0.0, 'pattern_on_confirmation': None}
-        
-        # Ensure df_for_vol_analysis (which is the main df) has the pattern columns
-        # It should already have them from the generate_signals method.
-        
-        # Convert confirmation_candle.name (timestamp) to its integer position in the DataFrame
         try:
-            # Assuming confirmation_candle.name is the timestamp index of the candle
-            # Get the integer position of this timestamp in df_for_vol_analysis
-            # This is safer if the index might have duplicates or if get_loc returns non-integer
             if confirmation_candle.name in df_for_vol_analysis.index:
-                 confirmation_candle_idx_int = df_for_vol_analysis.index.get_loc(confirmation_candle.name)
-                 if isinstance(confirmation_candle_idx_int, slice):
-                     # If it's a slice (e.g. duplicate timestamps), take the last one
-                     confirmation_candle_idx_int = confirmation_candle_idx_int.stop -1 
-                 elif not isinstance(confirmation_candle_idx_int, int):
-                     # If it's an array (e.g. boolean mask from get_loc), try to get the first true index
-                     true_indices = np.where(confirmation_candle_idx_int)[0]
-                     if len(true_indices) > 0:
-                         confirmation_candle_idx_int = true_indices[0]
-                     else:
-                         self.logger.error(f"Could not resolve confirmation_candle_idx for {confirmation_candle.name}")
-                         return results # Cannot proceed without a valid integer index
+                confirmation_candle_idx_int = df_for_vol_analysis.index.get_loc(confirmation_candle.name)
+                if isinstance(confirmation_candle_idx_int, slice):
+                    confirmation_candle_idx_int = confirmation_candle_idx_int.stop - 1
+                elif not isinstance(confirmation_candle_idx_int, int):
+                    true_indices = np.where(confirmation_candle_idx_int)[0]
+                    if len(true_indices) > 0:
+                        confirmation_candle_idx_int = true_indices[0]
+                    else:
+                        self.logger.error(f"Could not resolve confirmation_candle_idx for {confirmation_candle.name}")
+                        return results
             else:
                 self.logger.error(f"Confirmation candle timestamp {confirmation_candle.name} not found in df_for_vol_analysis index.")
                 return results
-
         except Exception as e:
             self.logger.error(f"Error getting integer index for confirmation_candle: {e}")
             return results
 
-
         conf_open, conf_high, conf_low, conf_close = confirmation_candle[['open', 'high', 'low', 'close']]
         conf_body = conf_close - conf_open
         conf_total_range = conf_high - conf_low
-        if conf_total_range == 0: # Should not happen with real data
+        if conf_total_range == 0:
             results['reason'] = "Confirmation candle has zero range."
             return results
-
         conf_upper_wick = conf_high - max(conf_open, conf_close)
         conf_lower_wick = min(conf_open, conf_close) - conf_low
+        conf_vol_score = self._scorer.analyze_volume_quality(confirmation_candle, volume_threshold)
+        results['volume_score'] = conf_vol_score
 
-        # Volume on confirmation candle
-        conf_vol_details = self._scorer.analyze_volume_quality(confirmation_candle, volume_threshold)
-        results['volume_score'] = conf_vol_details
-
-        # Min body size for confirmation (e.g., 20% of ATR, or 10% of its own range)
-        min_body_for_confirmation = max(0.2 * atr_value, 0.1 * conf_total_range, 0.0005 * conf_close)
-
-
+        # --- 1. STRONG PATTERN CONFIRMATION ---
+        strong_pattern = None
         if expected_direction == 'buy':
-           
+            if 'bullish_engulfing' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['bullish_engulfing'].iloc[confirmation_candle_idx_int]):
+                strong_pattern = "Bullish Engulfing"
+            elif 'white_marubozu' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['white_marubozu'].iloc[confirmation_candle_idx_int]):
+                strong_pattern = "White Marubozu"
+            elif 'pin_bar' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['pin_bar'].iloc[confirmation_candle_idx_int]) and conf_close > conf_open:
+                strong_pattern = "Bullish Pin Bar"
+        elif expected_direction == 'sell':
+            if 'bearish_engulfing' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['bearish_engulfing'].iloc[confirmation_candle_idx_int]):
+                strong_pattern = "Bearish Engulfing"
+            elif 'black_marubozu' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['black_marubozu'].iloc[confirmation_candle_idx_int]):
+                strong_pattern = "Black Marubozu"
+            elif 'pin_bar' in df_for_vol_analysis.columns and bool(df_for_vol_analysis['pin_bar'].iloc[confirmation_candle_idx_int]) and conf_close < conf_open:
+                strong_pattern = "Bearish Pin Bar"
+        if strong_pattern:
+            results['is_confirmed'] = True
+            results['reason'] = f"Strong pattern confirmation: {strong_pattern}"
+            results['pattern_on_confirmation'] = strong_pattern
+            self.logger.info(f"[CONFIRM] {strong_pattern} found on confirmation candle. Immediate confirmation.")
+            return results
+
+        # --- 2. MINIMAL SECONDARY CHECKS ---
+        min_body_for_confirmation = max(0.2 * atr_value, 0.1 * conf_total_range, 0.0005 * conf_close)
+        if expected_direction == 'buy':
             is_bullish_candle = conf_close > conf_open
             has_significant_body = conf_body >= min_body_for_confirmation
-            closes_above_setup_high = conf_close > setup_candle['high']
-            closes_above_setup_close = conf_close > setup_candle['close']
-            
-            # Manageable upper wick: not more than 60% of its own range, and not larger than its body
+            closes_above_setup = conf_close > max(setup_candle['high'], setup_candle['close'])
             manageable_upper_wick = (conf_upper_wick / conf_total_range) < 0.6 and conf_upper_wick < conf_body if conf_body > 0 else (conf_upper_wick / conf_total_range) < 0.6
-
-            volume_supports = conf_vol_details >= 0.4 # e.g. at least 'average-low' or better
-            did_not_close_below_level = conf_close > level_price # Crucial: confirms rejection of support
-
-            if is_bullish_candle and has_significant_body and (closes_above_setup_high or closes_above_setup_close) and \
-               manageable_upper_wick and volume_supports and did_not_close_below_level:
+            volume_supports = conf_vol_score >= 0.4
+            did_not_close_below_level = conf_close > level_price
+            if is_bullish_candle and has_significant_body and closes_above_setup and manageable_upper_wick and volume_supports and did_not_close_below_level:
                 results['is_confirmed'] = True
-                results['reason'] = f"Bullish confirmation: bullish_close, sig_body, close_above_setup_HL={closes_above_setup_high}/CL={closes_above_setup_close}, good_wick, vol_ok, maintained_level."
-                # Check for specific bullish patterns on confirmation candle if needed
-                # Ensure we are looking at the correct index in the DataFrame for LuxAlgo patterns
-                is_bullish_engulfing = False
-                is_white_marubozu = False
-                if isinstance(df_for_vol_analysis, pd.DataFrame):
-                    bullish_engulfing_series = df_for_vol_analysis.get('bullish_engulfing')
-                    if isinstance(bullish_engulfing_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(bullish_engulfing_series):
-                        is_bullish_engulfing = bool(bullish_engulfing_series.iloc[confirmation_candle_idx_int])
-
-                    white_marubozu_series = df_for_vol_analysis.get('white_marubozu')
-                    if isinstance(white_marubozu_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(white_marubozu_series):
-                        is_white_marubozu = bool(white_marubozu_series.iloc[confirmation_candle_idx_int])
-                        
-                if is_bullish_engulfing and conf_close > setup_candle['high'] and conf_open < setup_candle['low']:
-                    results['pattern_on_confirmation'] = "Bullish Engulfing of Setup"
-                elif is_white_marubozu and conf_close > conf_open:
-                    results['pattern_on_confirmation'] = "Bullish Marubozu"
-
-            else: # Construct detailed fail reason
+                results['reason'] = "Minimal bullish confirmation: body, close, wick, volume, level respected."
+                self.logger.info(f"[CONFIRM] Minimal bullish confirmation met.")
+            else:
                 fail_reasons = []
                 if not is_bullish_candle: fail_reasons.append("not_bullish_candle")
                 if not has_significant_body: fail_reasons.append("insignificant_body")
-                if not (closes_above_setup_high or closes_above_setup_close): fail_reasons.append("not_above_setup_close/high")
+                if not closes_above_setup: fail_reasons.append("not_above_setup_close/high")
                 if not manageable_upper_wick: fail_reasons.append("long_upper_wick")
-                if not volume_supports: fail_reasons.append(f"low_volume_(below threshold)")
+                if not volume_supports: fail_reasons.append("low_volume")
                 if not did_not_close_below_level: fail_reasons.append("closed_below_support_level")
                 results['reason'] = f"Bullish confirmation failed: {', '.join(fail_reasons)}"
-
         elif expected_direction == 'sell':
-           
             is_bearish_candle = conf_close < conf_open
-            has_significant_body = abs(conf_body) >= min_body_for_confirmation # abs for bearish body
-            closes_below_setup_low = conf_close < setup_candle['low']
-            closes_below_setup_close = conf_close < setup_candle['close']
-            
-            manageable_lower_wick = (conf_lower_wick / conf_total_range) < 0.6 and conf_lower_wick < abs(conf_body) if conf_body !=0 else (conf_lower_wick / conf_total_range) < 0.6
-            
-            volume_supports = conf_vol_details >= 0.4
+            has_significant_body = abs(conf_body) >= min_body_for_confirmation
+            closes_below_setup = conf_close < min(setup_candle['low'], setup_candle['close'])
+            manageable_lower_wick = (conf_lower_wick / conf_total_range) < 0.6 and conf_lower_wick < abs(conf_body) if conf_body != 0 else (conf_lower_wick / conf_total_range) < 0.6
+            volume_supports = conf_vol_score >= 0.4
             did_not_close_above_level = conf_close < level_price
-
-            if is_bearish_candle and has_significant_body and (closes_below_setup_low or closes_below_setup_close) and \
-               manageable_lower_wick and volume_supports and did_not_close_above_level:
+            if is_bearish_candle and has_significant_body and closes_below_setup and manageable_lower_wick and volume_supports and did_not_close_above_level:
                 results['is_confirmed'] = True
-                results['reason'] = f"Bearish confirmation: bearish_close, sig_body, close_below_setup_LL={closes_below_setup_low}/CL={closes_below_setup_close}, good_wick, vol_ok, maintained_level."
-                # Ensure we are looking at the correct index in the DataFrame for LuxAlgo patterns
-                is_bearish_engulfing = False
-                is_black_marubozu = False
-                if isinstance(df_for_vol_analysis, pd.DataFrame):
-                    bearish_engulfing_series = df_for_vol_analysis.get('bearish_engulfing')
-                    if isinstance(bearish_engulfing_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(bearish_engulfing_series):
-                        is_bearish_engulfing = bool(bearish_engulfing_series.iloc[confirmation_candle_idx_int])
-
-                    black_marubozu_series = df_for_vol_analysis.get('black_marubozu')
-                    if isinstance(black_marubozu_series, pd.Series) and 0 <= confirmation_candle_idx_int < len(black_marubozu_series):
-                        is_black_marubozu = bool(black_marubozu_series.iloc[confirmation_candle_idx_int])
-
-                if is_bearish_engulfing and conf_close < setup_candle['low'] and conf_open > setup_candle['high']:
-                    results['pattern_on_confirmation'] = "Bearish Engulfing of Setup"
-                elif is_black_marubozu and conf_close < conf_open:
-                    results['pattern_on_confirmation'] = "Bearish Marubozu"
+                results['reason'] = "Minimal bearish confirmation: body, close, wick, volume, level respected."
+                self.logger.info(f"[CONFIRM] Minimal bearish confirmation met.")
             else:
                 fail_reasons = []
                 if not is_bearish_candle: fail_reasons.append("not_bearish_candle")
                 if not has_significant_body: fail_reasons.append("insignificant_body")
-                if not (closes_below_setup_low or closes_below_setup_close): fail_reasons.append("not_below_setup_close/low")
+                if not closes_below_setup: fail_reasons.append("not_below_setup_close/low")
                 if not manageable_lower_wick: fail_reasons.append("long_lower_wick")
-                if not volume_supports: fail_reasons.append(f"low_volume_(below threshold)")
+                if not volume_supports: fail_reasons.append("low_volume")
                 if not did_not_close_above_level: fail_reasons.append("closed_above_resistance_level")
                 results['reason'] = f"Bearish confirmation failed: {', '.join(fail_reasons)}"
         
@@ -2510,10 +2400,6 @@ class BreakoutReversalStrategy(SignalGenerator):
         """
         # Dynamic tolerance: e.g., 0.3 * ATR or a small fixed percentage of the price
         tolerance = max(0.3 * atr_value, 0.001 * level_price) # Use constants for level proximity
-        
-        # For support, candle's low should be near or slightly penetrate the level.
-        # For resistance, candle's high should be near or slightly penetrate.
-        # The candle should ideally close respecting the level for reversal setups.
         
         is_near = False
         if level_type == 'support':
@@ -2635,7 +2521,6 @@ class BreakoutReversalStrategy(SignalGenerator):
         """Score a list of raw signals using SignalScorer and standardize confidence."""
         scored = []
         for sig in raw_signals:
-            # preserve original symbol for post-processing
             symbol = sig.get('symbol')
             scored_sig = self._scorer.score_signal(
                 sig,
@@ -2657,15 +2542,11 @@ class BreakoutReversalStrategy(SignalGenerator):
             )
             # Standardized confidence: direct mapping, clamped to [0, 1]
             scored_sig['confidence'] = max(0.0, min(1.0, scored_sig.get('score', 0)))
-            
             # Add detailed explanations about why this signal received its score
             score_details = scored_sig.get('score_details', {})
             detailed_reasons = []
-            
             direction = sig.get('direction', '').lower()
             h1_trend = self._determine_higher_timeframe_trend(higher_df)
-            
-            # Format explanations based on score components
             if score_details:
                 # Level strength explanation
                 level_strength = score_details.get('level_strength', 0)
@@ -2743,10 +2624,10 @@ class BreakoutReversalStrategy(SignalGenerator):
             for reason in detailed_reasons:
                 logger.info(f"  • {reason}")
             logger.info(f"  📊 Final score: {scored_sig.get('score', 0):.2f} → Confidence: {scored_sig.get('confidence', 0):.2f}")
-            
-            # *** Add the original symbol back for grouping later ***
-            scored_sig['original_symbol'] = symbol  # Add this line
-            scored.append(scored_sig)
+            scored_sig['original_symbol'] = symbol
+            # HARD FILTER: Only add if not skip_due_to_volume
+            if not scored_sig.get('skip_due_to_volume', False):
+                scored.append(scored_sig)
         return scored
 
     def _compute_atr(self, df: pd.DataFrame) -> float:

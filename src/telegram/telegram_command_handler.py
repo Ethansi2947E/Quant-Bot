@@ -814,9 +814,6 @@ class TelegramCommandHandler:
             if not mt5_handler or not mt5_handler.connected:
                 return "⚠️ <b>MT5 Not Connected</b>\n\nCannot retrieve trade counts without an active MT5 connection."
             
-            # Get deals from MT5
-            import MetaTrader5 as mt5
-            
             # Function to count trades in a date range
             def count_trades(from_date, to_date=None):
                 if not to_date:
@@ -931,8 +928,7 @@ class TelegramCommandHandler:
             logger.info(f"Retrieving metrics for period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
             
             # Get trade history using direct MT5 calls for accurate data
-            import MetaTrader5 as mt5
-            
+                    
             # Connect to MT5 if not already connected
             if hasattr(mt5, "terminal_info") and not mt5.terminal_info():
                 logger.info("Initializing MT5 connection")

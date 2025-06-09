@@ -24,6 +24,25 @@ from src.trading_bot import SignalGenerator
 from src.risk_manager import RiskManager
 from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, BEARISH_PATTERNS, NEUTRAL_PATTERNS, ALL_PATTERNS, filter_patterns_by_bias, get_pattern_type
 
+# Helper function, should be defined outside the class or as a static method properly.
+def is_progressive_swing_check(seq: List[float], direction: str = "up", logger_instance=None) -> bool:
+    """Analyze last 2-3 swings for trend."""
+    if logger_instance:
+        logger_instance.debug(f"[is_progressive_swing_check] Analyzing seq: {seq}, direction: {direction}, len: {len(seq)}")
+    if len(seq) < 3:
+        if logger_instance:
+            logger_instance.debug(f"[is_progressive_swing_check] Sequence too short ({len(seq)} < 3), returning False.")
+        return False
+    
+    progressive = False
+    if direction == "up":
+        progressive = seq[-1] > seq[-2] and seq[-2] > seq[-3]
+    else: # direction == "down"
+        progressive = seq[-1] < seq[-2] and seq[-2] < seq[-3]
+    if logger_instance:
+        logger_instance.debug(f"[is_progressive_swing_check] Result: {progressive}")
+    return progressive
+
 class TrendFollowingStrategy(SignalGenerator):
     """Trend Following Strategy: Pure price action (no indicators, no EMAs/ADX/ATR)."""
 
@@ -34,7 +53,7 @@ class TrendFollowingStrategy(SignalGenerator):
         risk_per_trade: float = 0.01,
         wick_threshold: float = 0.4,
         volume_confirmation_enabled: bool = False,
-        debug_disable_pattern: bool = True,
+        debug_disable_pattern: bool = False,
         debug_disable_volume: bool = True,
         lookback_period: int = 300,
         pivot_window: int = 10,
@@ -71,59 +90,118 @@ class TrendFollowingStrategy(SignalGenerator):
         logger.info(f"  Primary Timeframe: {self.primary_timeframe}, Secondary Timeframe: {self.secondary_timeframe}, Lookback: {self.lookback_period}")
         logger.info(f"  Risk: Risk Per Trade={self.risk_per_trade}, Pivot Window: {self.pivot_window}, Max Zones: {self.max_zones}")
 
-    def get_trend_direction(self, df: pd.DataFrame, window: int = 20) -> Optional[str]:
-        """
-        Determine trend direction using proper price structure analysis.
-        Based on Chapter 3 principles: trends identified through actual swing highs/lows,
-        not artificial window splits.
-        
-        Args:
-            df: Price data with OHLC
-            window: Lookback window size (minimum bars needed for analysis)
+    def get_trend_direction(self, df: pd.DataFrame) -> Optional[str]:
+        self.logger.debug(f"[get_trend_direction START] df len: {len(df)}, lookback_period: {self.lookback_period}, pivot_window: {self.pivot_window}")
+
+        lookback = min(self.lookback_period, len(df))
+        if lookback < 2 * self.pivot_window + 1:
+            self.logger.warning(f"[get_trend_direction] Not enough data for robust swing analysis: need {2 * self.pivot_window + 1}, have {lookback}. Returning None.")
+            return None
+
+        df_lookback = df.iloc[-lookback:]
+        swing_highs_raw = []
+        swing_lows_raw = []
+        w = self.pivot_window
+        highs_vals = df_lookback['high'].values
+        lows_vals = df_lookback['low'].values
+        for i in range(w, len(df_lookback) - w):
+            is_high = all(highs_vals[i] > highs_vals[j] for j in range(i - w, i)) and all(highs_vals[i] > highs_vals[j] for j in range(i + 1, i + w + 1))
+            is_low = all(lows_vals[i] < lows_vals[j] for j in range(i - w, i)) and all(lows_vals[i] < lows_vals[j] for j in range(i + 1, i + w + 1))
+            if is_high:
+                swing_highs_raw.append((i, highs_vals[i]))
+            if is_low:
+                swing_lows_raw.append((i, lows_vals[i]))
+        self.logger.debug(f"[get_trend_direction] Raw swings found: {len(swing_highs_raw)} highs, {len(swing_lows_raw)} lows")
+
+        atr = self._calculate_atr(df_lookback)
+        current_close_for_min_dist = df_lookback['close'].iloc[-1] if not df_lookback.empty else 0
+        min_dist = max(atr, 0.002 * current_close_for_min_dist) if current_close_for_min_dist > 0 else atr
+        self.logger.debug(f"[get_trend_direction] Significance filter: ATR={atr:.5f}, current_close={current_close_for_min_dist:.5f}, min_dist={min_dist:.5f}")
+
+        def filter_significant(swings, swing_type):
+            filtered = []
+            for idx, price in swings:
+                if not filtered:
+                    filtered.append((idx, price))
+                else:
+                    _, last_price = filtered[-1]
+                    if abs(price - last_price) > min_dist:
+                        filtered.append((idx, price))
+                    else:
+                        self.logger.debug(f"[filter_significant] Filtering out {swing_type} swing at index {idx} (price {price:.5f}) due to min_dist (last price {last_price:.5f})")
+            return filtered
             
-        Returns:
-            "UP", "DOWN", or None
-        """
-        if len(df) < window:
-            self.logger.debug(f"[get_trend_direction] Not enough data for window {window}, have {len(df)}")
-            return None
+        swing_highs_filtered = filter_significant(swing_highs_raw, "high")
+        swing_lows_filtered = filter_significant(swing_lows_raw, "low")
+        self.logger.debug(f"[get_trend_direction] Filtered significant swings: {len(swing_highs_filtered)} highs, {len(swing_lows_filtered)} lows")
 
-        # Get actual swing highs and lows using our fractal detection
-        swing_highs = self._find_pivot_highs(df.iloc[-window:])
-        swing_lows = self._find_pivot_lows(df.iloc[-window:])
-        
-        # Need at least 2 swings of each type to determine trend
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            self.logger.debug(f"[get_trend_direction] Insufficient swing points: {len(swing_highs)} highs, {len(swing_lows)} lows")
+        if len(swing_highs_filtered) < 2 or len(swing_lows_filtered) < 2:
+            self.logger.warning(f"[get_trend_direction] Insufficient significant swings for 2-swing sequence analysis: {len(swing_highs_filtered)} highs, {len(swing_lows_filtered)} lows. Need at least 2 of each. Returning None.")
             return None
+        
+        # Get the prices of the last two significant highs and lows
+        last_high_1 = swing_highs_filtered[-1][1]
+        last_high_2 = swing_highs_filtered[-2][1]
+        last_low_1 = swing_lows_filtered[-1][1]
+        last_low_2 = swing_lows_filtered[-2][1]
 
-        # Sort swings to get most recent ones
-        swing_highs = sorted(swing_highs)
-        swing_lows = sorted(swing_lows)
+        self.logger.debug(f"[get_trend_direction] Last two highs: {last_high_1:.5f} (latest), {last_high_2:.5f}")
+        self.logger.debug(f"[get_trend_direction] Last two lows:  {last_low_1:.5f} (latest), {last_low_2:.5f}")
+
+        is_HH = last_high_1 > last_high_2  # Higher High
+        is_HL = last_low_1 > last_low_2    # Higher Low
+        is_LH = last_high_1 < last_high_2  # Lower High
+        is_LL = last_low_1 < last_low_2    # Lower Low
         
-        # Compare recent swings to previous swings
-        recent_high = swing_highs[-1]
-        previous_high = swing_highs[-2]
-        recent_low = swing_lows[-1] 
-        previous_low = swing_lows[-2]
+        self.logger.debug(f"[get_trend_direction] Trend components: HH={is_HH}, HL={is_HL}, LH={is_LH}, LL={is_LL}")
         
-        # Classic trend definition: Higher Highs + Higher Lows = Uptrend
-        is_higher_high = recent_high > previous_high
-        is_higher_low = recent_low > previous_low
+        # Basic Dow Theory trend identification
+        basic_uptrend = is_HH and is_HL
+        basic_downtrend = is_LH and is_LL
         
-        # Classic trend definition: Lower Highs + Lower Lows = Downtrend  
-        is_lower_high = recent_high < previous_high
-        is_lower_low = recent_low < previous_low
+        # Additional progressive swing analysis for enhanced confirmation
+        # Extract just the prices for progressive analysis
+        swing_high_prices = [price for _, price in swing_highs_filtered]
+        swing_low_prices = [price for _, price in swing_lows_filtered]
         
-        if is_higher_high and is_higher_low:
-            self.logger.debug(f"[get_trend_direction] UP trend: HH ({recent_high:.4f} > {previous_high:.4f}) + HL ({recent_low:.4f} > {previous_low:.4f})")
-            return "UP"
-        elif is_lower_high and is_lower_low:
-            self.logger.debug(f"[get_trend_direction] DOWN trend: LH ({recent_high:.4f} < {previous_high:.4f}) + LL ({recent_low:.4f} < {previous_low:.4f})")
-            return "DOWN"
+        # Use progressive swing check if we have enough data (3+ swings)
+        progressive_uptrend_confirmed = False
+        progressive_downtrend_confirmed = False
+        
+        if len(swing_high_prices) >= 3:
+            progressive_uptrend_confirmed = is_progressive_swing_check(swing_high_prices, "up", self.logger)
+            self.logger.debug(f"[get_trend_direction] Progressive uptrend in highs: {progressive_uptrend_confirmed}")
+            
+        if len(swing_low_prices) >= 3:
+            progressive_uptrend_low_confirmed = is_progressive_swing_check(swing_low_prices, "up", self.logger)
+            progressive_downtrend_confirmed = is_progressive_swing_check(swing_low_prices, "down", self.logger)
+            self.logger.debug(f"[get_trend_direction] Progressive uptrend in lows: {progressive_uptrend_low_confirmed}")
+            self.logger.debug(f"[get_trend_direction] Progressive downtrend in lows: {progressive_downtrend_confirmed}")
+            
+            # For uptrend, we want progressive highs AND progressive lows
+            if progressive_uptrend_confirmed and progressive_uptrend_low_confirmed:
+                progressive_uptrend_confirmed = True
+            else:
+                progressive_uptrend_confirmed = False
+        
+        # Enhanced trend determination with progressive confirmation
+        if basic_uptrend:
+            if progressive_uptrend_confirmed:
+                self.logger.info(f"[get_trend_direction] STRONG UP trend identified (HH+HL + progressive swings confirmed).")
+                return "UP"
+            else:
+                self.logger.info(f"[get_trend_direction] UP trend identified (HH+HL, progressive confirmation: {progressive_uptrend_confirmed}).")
+                return "UP"
+        elif basic_downtrend:
+            if progressive_downtrend_confirmed:
+                self.logger.info(f"[get_trend_direction] STRONG DOWN trend identified (LH+LL + progressive swings confirmed).")
+                return "DOWN"
+            else:
+                self.logger.info(f"[get_trend_direction] DOWN trend identified (LH+LL, progressive confirmation: {progressive_downtrend_confirmed}).")
+                return "DOWN"
         else:
-            self.logger.debug(f"[get_trend_direction] No clear trend: H({previous_high:.4f}→{recent_high:.4f}), L({previous_low:.4f}→{recent_low:.4f})")
-        return None
+            self.logger.info(f"[get_trend_direction] No clear UP or DOWN trend identified based on swing analysis. Returning None.")
+            return None
 
     def _build_signal(
         self,
@@ -320,20 +398,27 @@ class TrendFollowingStrategy(SignalGenerator):
         # Ensure LuxAlgo patterns are present
         if not all(col in df.columns for col in ['hammer', 'shooting_star']):
             self.logger.warning(f"[PriceAcceptance] LuxAlgo pattern columns ('hammer', 'shooting_star') not found in DataFrame. Adding them now.")
-            # Ensure df is a copy to avoid SettingWithCopyWarning if it's a slice
             df_copy = df.copy()
             df_with_patterns = add_luxalgo_patterns(df_copy) 
-            # Use the DataFrame with patterns for subsequent operations
-            # It's important that this df_with_patterns is used for accessing pattern columns
         else:
-            df_with_patterns = df # If patterns already exist, use the original df
+            df_with_patterns = df
 
         highs = np.asarray(df_with_patterns['high'].values, dtype=np.float64)
         lows = np.asarray(df_with_patterns['low'].values, dtype=np.float64)
         closes = np.asarray(df_with_patterns['close'].values, dtype=np.float64)
         opens = np.asarray(df_with_patterns['open'].values, dtype=np.float64)
-        resistance_level_T_minus_2 = talib.MAX(highs, timeperiod=SR_WINDOW)[-3]
-        support_level_T_minus_2 = talib.MIN(lows, timeperiod=SR_WINDOW)[-3]
+
+        # --- S/R level for breakout: use up to T-4 (exclude last 3 bars) ---
+        if len(df_with_patterns) > SR_WINDOW + 3:
+            highs_sr = highs[:-3]
+            lows_sr = lows[:-3]
+        else:
+            highs_sr = highs
+            lows_sr = lows
+        resistance_level_T_minus_2 = talib.MAX(highs_sr, timeperiod=SR_WINDOW)[-1]
+        support_level_T_minus_2 = talib.MIN(lows_sr, timeperiod=SR_WINDOW)[-1]
+        self.logger.debug(f"[PriceAcceptance] S/R for breakout: resistance_level_T_minus_2={resistance_level_T_minus_2:.4f}, support_level_T_minus_2={support_level_T_minus_2:.4f} (computed up to T-4)")
+
         current_close_T = closes[-1]
         prev_close_T_minus_1 = closes[-2]
         prev_prev_close_T_minus_2 = closes[-3]
@@ -341,10 +426,9 @@ class TrendFollowingStrategy(SignalGenerator):
         # --- Breakout Confirmation: 3-bar close rule + volume/body check ---
         breakout_body = abs(current_close_T - current_open_T)
         breakout_range = abs(df_with_patterns['high'].iloc[-1] - df_with_patterns['low'].iloc[-1])
-        # Use ATR for dynamic body threshold
         atr = talib.ATR(highs, lows, closes, timeperiod=14)[-1] if len(df_with_patterns) >= 14 else breakout_range
         strong_body = breakout_body > 0.5 * atr if atr and not np.isnan(atr) else breakout_body > 0.5 * breakout_range
-        high_volume = self.is_valid_volume_spike(df_with_patterns)
+        high_volume = self.is_valid_volume_spike(df_with_patterns, mode='breakout')
         # Resistance breakout
         result["breakout_resistance_confirmed"] = (
             prev_prev_close_T_minus_2 < resistance_level_T_minus_2 and
@@ -360,7 +444,6 @@ class TrendFollowingStrategy(SignalGenerator):
             strong_body and high_volume
         )
         # --- Rejection Logic: Dynamic wick/body threshold, close location, TA-Lib pattern ---
-        # Use ATR for dynamic wick threshold
         wick_atr = atr if atr and not np.isnan(atr) else breakout_range
         wick_threshold = 0.4 * wick_atr
         # Support rejection
@@ -368,24 +451,16 @@ class TrendFollowingStrategy(SignalGenerator):
             lower_wick = min(df_with_patterns['open'].iloc[-1], df_with_patterns['close'].iloc[-1]) - df_with_patterns['low'].iloc[-1]
             body_size = abs(df_with_patterns['close'].iloc[-1] - df_with_patterns['open'].iloc[-1])
             close_location = abs(df_with_patterns['close'].iloc[-1] - df_with_patterns['open'].iloc[-1]) < 0.3 * breakout_range
-            
-            # Use LuxAlgo Hammer pattern from the DataFrame
             hammer_luxalgo = df_with_patterns['hammer'].iloc[-1] if 'hammer' in df_with_patterns.columns else False
-            
-            # Rejection if wick is large, close is near open, and/or hammer pattern
             result["rejection_at_support"] = (
                 (lower_wick > wick_threshold and close_location) or hammer_luxalgo
             )
         # Resistance rejection
-        if self.is_near_resistance(df_with_patterns): # Pass df_with_patterns
+        if self.is_near_resistance(df_with_patterns):
             upper_wick = df_with_patterns['high'].iloc[-1] - max(df_with_patterns['open'].iloc[-1], df_with_patterns['close'].iloc[-1])
             body_size = abs(df_with_patterns['close'].iloc[-1] - df_with_patterns['open'].iloc[-1])
             close_location = abs(df_with_patterns['close'].iloc[-1] - df_with_patterns['open'].iloc[-1]) < 0.3 * breakout_range
-            
-            # Use LuxAlgo Shooting Star pattern from the DataFrame
             shooting_star_luxalgo = df_with_patterns['shooting_star'].iloc[-1] if 'shooting_star' in df_with_patterns.columns else False
-
-            # Rejection if wick is large, close is near open, and/or shooting star pattern
             result["rejection_at_resistance"] = (
                 (upper_wick > wick_threshold and close_location) or shooting_star_luxalgo
             )
@@ -394,25 +469,31 @@ class TrendFollowingStrategy(SignalGenerator):
         self.logger.debug(f"[PriceAcceptance] Results: {result}")
         return result
 
-    def is_valid_volume_spike(self, df: pd.DataFrame) -> bool:
+    def is_valid_volume_spike(self, df: pd.DataFrame, mode: str = 'breakout') -> bool:
+        """
+        Detects a valid volume spike for the given context.
+        Args:
+            df (pd.DataFrame): DataFrame with 'volume', 'open', 'close', 'high', 'low'.
+            mode (str): 'breakout' (default) for strong body, 'rejection' for large wick.
+        Returns:
+            bool: True if valid volume spike for the context.
+        """
         if 'volume' not in df.columns:
-            self.logger.debug("[Volume] 'volume' column missing in DataFrame.")
+            self.logger.debug(f"[Volume] 'volume' column missing in DataFrame. Mode={mode}")
             return False
         current_volume = df['volume'].iloc[-1]
         vol_mean = df['volume'].rolling(20).mean().iloc[-1]
         if vol_mean == 0 or np.isnan(vol_mean):
-            self.logger.debug("[Volume] Rolling mean is zero or NaN.")
+            self.logger.debug(f"[Volume] Rolling mean is zero or NaN. Mode={mode}")
             return False
-        # --- Simple, robust volume spike definition ---
         is_spike = current_volume > 2 * vol_mean
         if not is_spike:
-            self.logger.debug(f"[Volume] No spike: current={current_volume}, mean={vol_mean}")
+            self.logger.debug(f"[Volume] No spike: current={current_volume}, mean={vol_mean}, Mode={mode}")
             return False
-        # --- Candle shape analysis after spike confirmed ---
         body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
         total_range = df['high'].iloc[-1] - df['low'].iloc[-1]
         if total_range == 0:
-            self.logger.debug(f"[Volume] Total range is zero, cannot compute wick ratios.")
+            self.logger.debug(f"[Volume] Total range is zero, cannot compute wick ratios. Mode={mode}")
             return False
         wick = (df['high'].iloc[-1] - df['low'].iloc[-1]) - body
         wick_body_ratio = wick / body if body > 0 else 0
@@ -420,17 +501,14 @@ class TrendFollowingStrategy(SignalGenerator):
         lower_wick = min(df['open'].iloc[-1], df['close'].iloc[-1]) - df['low'].iloc[-1]
         upper_wick_ratio = upper_wick / total_range
         lower_wick_ratio = lower_wick / total_range
-        # --- Simple pattern: prefer small wick/body ratio for conviction ---
-        if wick_body_ratio < 0.5:
-            valid = True
+        if mode == 'breakout':
+            valid = wick_body_ratio < 0.5
+        elif mode == 'rejection':
+            valid = wick_body_ratio > 1
         else:
-            valid = False
-        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, is_spike={is_spike}, wick_body_ratio={wick_body_ratio:.3f}, valid={valid}")
-        # --- VSA-style enhancement (future): ---
-        # High volume + small range + close in middle: possible absorption/indecision
-        # High volume + small range + close near low (in uptrend): selling pressure
-        # Low volume + large range (breakout): weak breakout, likely to fail
-        # These can be added as advanced filters if needed.
+            self.logger.debug(f"[Volume] Unknown mode: {mode}")
+            return False
+        self.logger.debug(f"[Volume] {current_volume=}, {vol_mean=}, is_spike={is_spike}, wick_body_ratio={wick_body_ratio:.3f}, valid={valid}, mode={mode}")
         return valid
 
     def _find_pivot_highs(self, df: pd.DataFrame) -> List[float]:
@@ -553,9 +631,9 @@ class TrendFollowingStrategy(SignalGenerator):
             tol = dynamic_tol
             self.logger.debug(f"Dynamic zone tolerance set to {tol:.5f} (ATR={atr:.5f}, price={latest_price:.5f})")
         
-        levels = sorted(levels)
-        clusters = []
-        current = [levels[0]]
+            levels = sorted(levels)
+            clusters = []
+            current = [levels[0]]
         
         for price in levels[1:]:
             if abs(price - current[-1]) <= current[-1] * tol:
@@ -768,143 +846,131 @@ class TrendFollowingStrategy(SignalGenerator):
             else:
                 self.logger.debug(f"[Data] Invalid data structure for {sym}")
                 continue
-            
             if not isinstance(df_primary, pd.DataFrame) or len(df_primary) < min_bars:
                 self.logger.debug(f"[Data] Not enough data for {sym} (need {min_bars}, got {len(df_primary) if isinstance(df_primary, pd.DataFrame) else 0})")
                 continue
-
-            # Add LuxAlgo-style pattern columns
-            df_primary = add_luxalgo_patterns(df_primary.copy()) # Use .copy() to avoid SettingWithCopyWarning
-
-            # Higher timeframe trend filter
+            df_primary = add_luxalgo_patterns(df_primary.copy())
             ht_trend_ok = True
-            trend_ht = None # Initialize trend_ht
+            trend_ht = None
             if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
                 if df_secondary is None or len(df_secondary) < self.lookback_period:
                     self.logger.warning(f"Insufficient data for {sym} secondary timeframe {self.secondary_timeframe}: Need {self.lookback_period} bars, got {len(df_secondary) if df_secondary is not None else 0}")
                     ht_trend_ok = False
                 else:
-                    trend_ht = self.get_trend_direction(df_secondary, window=self.lookback_period)
-            
-            trend = self.get_trend_direction(df_primary, window=20)
+                    trend_ht = self.get_trend_direction(df_secondary)
+            trend = self.get_trend_direction(df_primary)
             self.logger.debug(f"[Trend] {sym} idx={len(df_primary)-1} trend={trend} HTF trend={trend_ht}")
-            
             if self.secondary_timeframe and self.secondary_timeframe != self.primary_timeframe:
                 if not ht_trend_ok or trend_ht not in ("UP", "DOWN") or trend != trend_ht:
                     self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} HTF trend filter: primary={trend}, secondary={trend_ht}")
                     continue
-            
             if trend not in ("UP", "DOWN"):
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid trend detected.")
                 continue
-            
             price_action = self.check_price_acceptance_rejection(df_primary)
-            
             is_at_pullback_sr = self.is_near_support_resistance(df_primary) 
             is_confirmed_breakout = price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]
-
             if not (is_at_pullback_sr or is_confirmed_breakout):
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Price not near S/R for pullback AND no confirmed breakout. PullbackSR: {is_at_pullback_sr}, ConfBreakout: {is_confirmed_breakout}")
                 continue
-            
-            detected_patterns_list = [] # Stores raw pattern names like 'hammer'
-            
-            # Check for patterns based on trend and context
+            detected_patterns_list = []
             relevant_patterns_for_trend = []
             if trend == "UP":
-                relevant_patterns_for_trend = BULLISH_PATTERNS + NEUTRAL_PATTERNS # Consider neutral patterns too
+                relevant_patterns_for_trend = BULLISH_PATTERNS + NEUTRAL_PATTERNS
             elif trend == "DOWN":
                 relevant_patterns_for_trend = BEARISH_PATTERNS + NEUTRAL_PATTERNS
-
-            # Pullback Scenario
             if is_at_pullback_sr:
                 if trend == "UP" and self.is_near_support(df_primary):
                     for p_col in relevant_patterns_for_trend:
                         if p_col in df_primary.columns and df_primary[p_col].iloc[-1]:
                             detected_patterns_list.append(p_col)
-                    if price_action["rejection_at_support"]: # This is a condition, not a pattern from our lists
-                        detected_patterns_list.append("Support Rejection") # Keep specific condition names simple
+                    if price_action["rejection_at_support"]:
+                        detected_patterns_list.append("Support Rejection")
                 elif trend == "DOWN" and self.is_near_resistance(df_primary):
                     for p_col in relevant_patterns_for_trend:
                         if p_col in df_primary.columns and df_primary[p_col].iloc[-1]:
                             detected_patterns_list.append(p_col)
                     if price_action["rejection_at_resistance"]:
                         detected_patterns_list.append("Resistance Rejection")
-
-            # Breakout Scenario
             if trend == "UP" and price_action["breakout_resistance_confirmed"]:
                 detected_patterns_list.append("Resistance Breakout Confirmed")
-                # Add specific bullish patterns that confirm breakout strength
-                for p_col in ['bullish_engulfing', 'white_marubozu']: # Example strong breakout confirmers
+                for p_col in ['bullish_engulfing', 'white_marubozu']:
                     if p_col in df_primary.columns and df_primary[p_col].iloc[-1]:
-                        detected_patterns_list.append(p_col + "_on_breakout") # e.g. bullish_engulfing_on_breakout
+                        detected_patterns_list.append(p_col + "_on_breakout")
             elif trend == "DOWN" and price_action["breakout_support_confirmed"]:
                 detected_patterns_list.append("Support Breakdown Confirmed")
                 for p_col in ['bearish_engulfing', 'black_marubozu']:
                     if p_col in df_primary.columns and df_primary[p_col].iloc[-1]:
                         detected_patterns_list.append(p_col + "_on_breakdown")
-            
-            # Format pattern names for display and logging
             formatted_patterns = []
             for p_name in detected_patterns_list:
                 if p_name.endswith(("_on_breakout", "_on_breakdown")):
                     base_name, suffix = p_name.rsplit('_', 2)
                     formatted_patterns.append(f"{base_name.replace('_', ' ').title()} on {suffix.capitalize()} (LuxAlgo)")
-                elif p_name in ALL_PATTERNS: # Check if it's a known LuxAlgo pattern
+                elif p_name in ALL_PATTERNS:
                     formatted_patterns.append(f"{p_name.replace('_', ' ').title()} (LuxAlgo)")
-                else: # For custom conditions like "Support Rejection"
+                else:
                     formatted_patterns.append(p_name) 
-            
-            # Remove duplicates while preserving order (important for the final pattern string)
             final_pattern_str_elements = list(dict.fromkeys(formatted_patterns))
-            
             self.logger.debug(f"[Pattern] {sym} idx={len(df_primary)-1} detected_patterns={final_pattern_str_elements}")
             pattern_ok = bool(final_pattern_str_elements) or self.debug_disable_pattern
             if not pattern_ok:
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid pattern or condition detected.")
                 continue
-            
-            vol_ok = self.debug_disable_volume or self.is_valid_volume_spike(df_primary)
+            vol_ok = self.debug_disable_volume or self.is_valid_volume_spike(df_primary, mode='breakout')
             self.logger.debug(f"[VolumeCheck] {sym} idx={len(df_primary)-1} vol_ok={vol_ok}")
             if not vol_ok:
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Volume-wick confirmation failed.")
                 continue
-                
-            pattern_display_string = ", ".join(final_pattern_str_elements) # Use this for the signal
-
+            pattern_display_string = ", ".join(final_pattern_str_elements)
             direction = "buy" if trend == "UP" else "sell"
-
+            # --- Entry and Stop Loss Logic ---
+            # Entry price logic remains as breakout stop order (high/low of signal bar)
             if direction == "buy":
                 entry_price = df_primary['high'].iloc[-1]
-                stop_loss = df_primary['low'].iloc[-1]
-            else: # direction == "sell"
+            else:
                 entry_price = df_primary['low'].iloc[-1]
-                stop_loss = df_primary['high'].iloc[-1]
-            
-            # Original S/R based SL is now only used by TP logic if candle-based SL is not suitable for TP calc, or for S/R TP targets.
-            # For consistency, TP calculation will now use the candle-based entry and SL for its 2R fallback.
+            # S/R-based stop loss (primary)
+            stop_loss_sr = self.calculate_stop_loss(df_primary, direction)
+            # Signal bar's extremity (secondary/tighter SL, for logging)
+            if direction == "buy":
+                stop_loss_signal = df_primary['low'].iloc[-1]
+            else:
+                stop_loss_signal = df_primary['high'].iloc[-1]
+            # Choose SL based on trade reason
+            if (direction == "buy" and ("Support Rejection" in detected_patterns_list or price_action["rejection_at_support"])):
+                stop_loss = stop_loss_sr
+                sl_reason = "S/R-based SL below support (rejection)"
+            elif (direction == "sell" and ("Resistance Rejection" in detected_patterns_list or price_action["rejection_at_resistance"])):
+                stop_loss = stop_loss_sr
+                sl_reason = "S/R-based SL above resistance (rejection)"
+            elif (direction == "buy" and price_action["breakout_resistance_confirmed"]):
+                stop_loss = stop_loss_sr
+                sl_reason = "S/R-based SL below broken resistance (breakout)"
+            elif (direction == "sell" and price_action["breakout_support_confirmed"]):
+                stop_loss = stop_loss_sr
+                sl_reason = "S/R-based SL above broken support (breakout)"
+            else:
+                stop_loss = stop_loss_signal
+                sl_reason = "Signal bar extremity SL (fallback)"
+            self.logger.info(f"[SL] {sym} idx={len(df_primary)-1} SL={stop_loss} Reason: {sl_reason} (SR={stop_loss_sr}, Signal={stop_loss_signal})")
             take_profit = self.calculate_take_profit(df_primary, direction, entry_price_override=entry_price, stop_loss_override=stop_loss)
-
-            if not take_profit or take_profit == 0: # Ensure take_profit is valid
+            if not take_profit or take_profit == 0:
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} No valid take-profit found (TP: {take_profit}), skipping signal.")
                 continue
-            
-            # Ensure stop_loss leads to a positive risk amount
             if direction == "buy" and entry_price <= stop_loss:
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Invalid SL for BUY signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
                 continue
             if direction == "sell" and entry_price >= stop_loss:
                 self.logger.info(f"[Skip] {sym} idx={len(df_primary)-1} Invalid SL for SELL signal (Entry: {entry_price}, SL: {stop_loss}), skipping.")
                 continue
-
-            # --- Position Sizing: Use RiskManager for modular, robust sizing ---
             risk_manager = self.risk_manager if hasattr(self, 'risk_manager') else RiskManager.get_instance()
             account_balance = risk_manager.get_account_balance()
             risk_per_trade = getattr(self, 'risk_per_trade', 0.01)
             try:
                 position_size = risk_manager.calculate_position_size(
                     account_balance=account_balance,
-                    risk_per_trade=risk_per_trade * 100.0,  # RiskManager expects percent, e.g., 1.0 for 1%
+                    risk_per_trade=risk_per_trade * 100.0,
                     entry_price=entry_price,
                     stop_loss_price=stop_loss,
                     symbol=sym
@@ -913,8 +979,7 @@ class TrendFollowingStrategy(SignalGenerator):
                 self.logger.warning(f"[RiskManager] Position sizing failed for {sym}: {e}")
                 position_size = 0.0
             size = position_size
-
-            confidence = 0.7 # Base confidence for LuxAlgo patterns, adjust as needed
+            confidence = 0.7
             reason = f"Trend: {trend}, Patterns: {pattern_display_string}, Vol Conf: {vol_ok}"
             if price_action["breakout_resistance_confirmed"]:
                 reason += ", BreakoutResistanceConfirmed"
@@ -926,10 +991,8 @@ class TrendFollowingStrategy(SignalGenerator):
                 reason += ", RejectionAtSupport"
             if is_at_pullback_sr and not (price_action["breakout_resistance_confirmed"] or price_action["breakout_support_confirmed"]):
                  reason += ", PullbackToSR"
-            
             signal_timestamp = str(df_primary.index[-1])
             self.logger.info(f"[SignalCandidate] {sym} idx={len(df_primary)-1} direction={direction} entry={entry_price} stop={stop_loss} tp={take_profit} pattern={pattern_display_string} vol_ok={vol_ok}")
-            
             signal = self._build_signal(
                 symbol=sym,
                 direction=direction,

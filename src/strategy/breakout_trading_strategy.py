@@ -27,75 +27,129 @@ from src.utils.patterns_luxalgo import add_luxalgo_patterns, BULLISH_PATTERNS, B
 # import custom_patterns as cp # This line was incorrectly added and will be removed
 
 
-def is_consolidating(df: pd.DataFrame, window=10, tolerance=0.02) -> bool:
+def is_consolidating(df: pd.DataFrame, window: int, atr_series: pd.Series, atr_multiplier: float = 2.0, logger_instance=None) -> bool:
     """
-    Simple consolidation detection based on price range.
+    Detects consolidation based on whether the price range is tight relative to ATR.
     
     Args:
-        df: DataFrame with OHLC data
-        window: Number of bars to check for consolidation
-        tolerance: Maximum price range as percentage of min price
+        df: DataFrame with OHLC data.
+        window: Number of bars to check for consolidation.
+        atr_series: Pandas Series containing ATR values aligned with df.
+        atr_multiplier: Max allowed range in terms of ATR multiples (e.g., 2.0 means range < 2*ATR).
+        logger_instance: Optional logger for debug messages.
         
     Returns:
-        bool: True if price is consolidating
+        bool: True if price is consolidating.
     """
-    if len(df) < window:
+    if logger_instance is None:
+        logger_instance = logger # Fallback to global logger if none provided
+
+    if len(df) < window or len(atr_series) < window:
+        logger_instance.debug(f"[is_consolidating] Not enough data: df len {len(df)} (need {window}), atr_series len {len(atr_series)} (need {window})")
         return False
         
-    recent = df.iloc[-window:]
-    max_close = recent['close'].max()
-    min_close = recent['close'].min()
-    return (max_close - min_close) / min_close < tolerance
+    recent_df = df.iloc[-window:]
+    recent_atr = atr_series.iloc[-window:]
+    
+    if recent_df.empty or recent_atr.empty:
+        logger_instance.debug("[is_consolidating] Recent df or atr series is empty.")
+        return False
+        
+    max_high = recent_df['high'].max()
+    min_low = recent_df['low'].min()
+    current_range = max_high - min_low
+    
+    avg_atr_in_window = recent_atr.mean()
+    
+    if pd.isna(avg_atr_in_window) or avg_atr_in_window <= 1e-9: # ATR could be NaN or zero
+        # Fallback: use a small percentage of price if ATR is unusable
+        avg_price_in_window = recent_df['close'].mean()
+        if pd.isna(avg_price_in_window) or avg_price_in_window <= 1e-9:
+            logger_instance.debug("[is_consolidating] Cannot determine ATR or avg price for tolerance. Returning False.")
+            return False
+        # Use 1% of average price as a fallback threshold for a tight range
+        # This is a simple heuristic when ATR is not available or reliable
+        is_tight_range = current_range < (0.01 * avg_price_in_window) 
+        logger_instance.debug(f"[is_consolidating] ATR unusable (avg_atr={avg_atr_in_window}). Fallback to price %: Range={current_range:.5f}, AvgPrice={avg_price_in_window:.5f}, 1% Threshold={(0.01 * avg_price_in_window):.5f}. Tight: {is_tight_range}")
+    else:
+        max_allowed_range = atr_multiplier * avg_atr_in_window
+        is_tight_range = current_range < max_allowed_range
+        logger_instance.debug(f"[is_consolidating] Window={window}, Range={current_range:.5f}, AvgATR={avg_atr_in_window:.5f}, ATR_Mult={atr_multiplier}, MaxAllowedRange={max_allowed_range:.5f}. Tight: {is_tight_range}")
 
-def is_near_support_resistance(df: pd.DataFrame, pivot_window=20, tolerance=0.005) -> bool:
+    return is_tight_range
+
+def is_near_support_resistance(df: pd.DataFrame, pivot_window=10, tolerance=0.005, logger_instance=None) -> bool:
     """
-    Check if price is near any significant support or resistance level.
-    This ensures levels are properly separated and mutually exclusive.
+    Check if price is near any significant S/R level based on fractal pivots.
     
     Args:
         df: DataFrame with OHLC data
-        pivot_window: Window to look for pivot points
-        tolerance: How close price needs to be to S/R (as percentage)
+        pivot_window: N bars on each side for fractal pivot definition (e.g., 10 for a 21-bar window check)
+        tolerance: How close price needs to be to S/R (as percentage of level price)
+        logger_instance: Optional logger for debug messages.
         
     Returns:
         bool: True if price is near any S/R level
     """
-    if len(df) < pivot_window * 2:
+    if logger_instance is None:
+        logger_instance = logger # Fallback to global logger if none provided
+
+    if len(df) < 2 * pivot_window + 1:
+        logger_instance.debug(f"[is_near_S/R] Not enough data for pivot detection: need {2 * pivot_window + 1}, have {len(df)}")
         return False
         
     current_price = df['close'].iloc[-1]
-        
-    # Find pivot highs and lows
-    pivot_highs = []
-    pivot_lows = []
-    
+    highs_values = df['high'].values
+    lows_values = df['low'].values
+    fractal_highs = []
+    fractal_lows = []
+
+    # Find fractal pivot highs
     for i in range(pivot_window, len(df) - pivot_window):
-        window_high = df['high'].iloc[i-pivot_window:i+pivot_window+1]
-        window_low = df['low'].iloc[i-pivot_window:i+pivot_window+1]
-        
-        if df['high'].iloc[i] == window_high.max():
-            pivot_highs.append(df['high'].iloc[i])
-            
-        if df['low'].iloc[i] == window_low.min():
-            pivot_lows.append(df['low'].iloc[i])
-    
+        is_pivot = True
+        current_val = highs_values[i]
+        for j in range(i - pivot_window, i):
+            if highs_values[j] >= current_val:
+                is_pivot = False
+                break
+        if not is_pivot: continue
+        for j in range(i + 1, i + pivot_window + 1):
+            if highs_values[j] >= current_val:
+                is_pivot = False
+                break
+        if is_pivot:
+            fractal_highs.append(current_val)
+
+    # Find fractal pivot lows
+    for i in range(pivot_window, len(df) - pivot_window):
+        is_pivot = True
+        current_val = lows_values[i]
+        for j in range(i - pivot_window, i):
+            if lows_values[j] <= current_val:
+                is_pivot = False
+                break
+        if not is_pivot: continue
+        for j in range(i + 1, i + pivot_window + 1):
+            if lows_values[j] <= current_val:
+                is_pivot = False
+                break
+        if is_pivot:
+            fractal_lows.append(current_val)
+
+    logger_instance.debug(f"[is_near_S/R] Current Price: {current_price:.5f}, Pivot Window: {pivot_window}")
+    logger_instance.debug(f"[is_near_S/R] Fractal Highs Found: {fractal_highs}")
+    logger_instance.debug(f"[is_near_S/R] Fractal Lows Found: {fractal_lows}")
+
     # Separate levels by current price (support below, resistance above)
-    support_levels = []
-    resistance_levels = []
-    
-    for level in pivot_lows:
-        # Support must be below current price
-        if level < current_price:
-            support_levels.append(level)
-            
-    for level in pivot_highs:
-        # Resistance must be above current price
-        if level > current_price:
-            resistance_levels.append(level)
+    support_levels = [level for level in fractal_lows if level < current_price]
+    resistance_levels = [level for level in fractal_highs if level > current_price]
     
     # Check proximity to properly separated levels
-    near_support = any(abs(current_price - pl) / pl < tolerance for pl in support_levels)
-    near_resistance = any(abs(ph - current_price) / ph < tolerance for ph in resistance_levels)
+    near_support = any(abs(current_price - pl) <= pl * tolerance for pl in support_levels)
+    near_resistance = any(abs(ph - current_price) <= ph * tolerance for ph in resistance_levels)
+    
+    logger_instance.debug(f"[is_near_S/R] Support levels (<price): {support_levels}, Near Support: {near_support}")
+    logger_instance.debug(f"[is_near_S/R] Resistance levels (>price): {resistance_levels}, Near Resistance: {near_resistance}")
     
     # Return True if near any properly separated level
     return near_support or near_resistance
@@ -250,70 +304,130 @@ class BreakoutTradingStrategy(SignalGenerator):
         
         # Dynamic window based on volatility (more volatile = shorter window)
         # Adjusted calculation for dynamic_window for more sensitivity
+        min_dynamic_window_fallback = self.params.get("min_dynamic_window_fallback", 5)
+        max_dynamic_window_cap = self.params.get("max_dynamic_window_cap", self.min_consolidation_bars * 2) # Cap at 2x min_consol_bars or 60, whichever is higher
+        max_dynamic_window_cap = max(max_dynamic_window_cap, 60) # Ensure at least 60 if 2x min_consol_bars is less
+
         if volatility_ratio == 0: # Avoid issues if ATR is zero
             dynamic_window = self.min_consolidation_bars # Fallback to configured min
         elif volatility_ratio < 0.005: # Very low volatility
             dynamic_window = int(self.min_consolidation_bars * 1.5) # Longer window for very tight ranges
         elif volatility_ratio > 0.02: # High volatility
-            dynamic_window = max(5, int(self.min_consolidation_bars * 0.5)) # Shorter window
+            dynamic_window = max(min_dynamic_window_fallback, int(self.min_consolidation_bars * 0.75)) # Shorter window, but not less than fallback
         else: # Normal volatility
             dynamic_window = self.min_consolidation_bars
         
-        dynamic_window = max(5, min(dynamic_window, len(df) -1, 30)) # Clamp window size
+        # Clamp window size: ensure it's at least min_dynamic_window_fallback, not more than max_dynamic_window_cap, and not more than available data
+        dynamic_window = max(min_dynamic_window_fallback, min(dynamic_window, len(df) -1, max_dynamic_window_cap))
 
-        logger.debug(f"[{self.name}/_detect_consolidation] ATR={atr_value:.5f}, Close={close_value:.5f}, VolatilityRatio={volatility_ratio:.5f}, DynamicWindowForConsolidation={dynamic_window}")
+        logger.debug(f"[{self.name}/_detect_consolidation] ATR={atr_value:.5f}, Close={close_value:.5f}, VolatilityRatio={volatility_ratio:.5f}, DynamicWindowForConsolidation={dynamic_window} (min_fallback={min_dynamic_window_fallback}, max_cap={max_dynamic_window_cap})")
         
-        # Ensure dynamic_window doesn't exceed available data
-        if len(df) < dynamic_window:
-            logger.warning(f"[{self.name}/_detect_consolidation] Dynamic window ({dynamic_window}) exceeds available data ({len(df)}). Adjusting window to {len(df)}.")
-            dynamic_window = len(df)
-            if dynamic_window < 5 : # If still too small
-                 logger.warning(f"[{self.name}/_detect_consolidation] Adjusted dynamic window ({dynamic_window}) is less than 5. No consolidation detected.")
+        # Ensure dynamic_window doesn't exceed available data (already handled by clamp) or become too small
+        # if len(df) < dynamic_window: # This check is now part of the clamp
+        #     logger.warning(f"[{self.name}/_detect_consolidation] Dynamic window ({dynamic_window}) exceeds available data ({len(df)}). Adjusting window to {len(df)}.")
+        #     dynamic_window = len(df)
+        if dynamic_window < min_dynamic_window_fallback : # If still too small after all adjustments
+                 logger.warning(f"[{self.name}/_detect_consolidation] Adjusted dynamic window ({dynamic_window}) is less than {min_dynamic_window_fallback}. No consolidation detected.")
                  return result
 
+        recent_df_for_range = df.iloc[-dynamic_window:] # Define for use in setting breakout_high/low
         
-        # Use simpler consolidation detection
-        is_consolidating_simple = is_consolidating(df, window=dynamic_window, tolerance=0.02) # is_consolidating uses tolerance on min_close, so 0.02 means 2% range
-        is_near_sr = is_near_support_resistance(df, pivot_window=self.pivot_window, tolerance=0.005) # is_near_support_resistance uses tolerance on level itself
+        # Use simpler consolidation detection based on ATR-relative range
+        atr_col_for_is_consolidating = f"ATR_{self.atr_period_consolidation}"
+        if atr_col_for_is_consolidating not in df.columns or df[atr_col_for_is_consolidating].iloc[-dynamic_window:].isnull().all():
+            logger.warning(f"[{self.name}/_detect_consolidation] ATR series for is_consolidating is missing or all NaN. Cannot detect consolidation.")
+            return result
+            
+        is_consolidating_atr_based = is_consolidating(
+            df, 
+            window=dynamic_window, 
+            atr_series=df[atr_col_for_is_consolidating],
+            atr_multiplier=2.0, # Default, can be parameterized if needed
+            logger_instance=self.logger
+        )
         
-        # Combined criteria - must be consolidating AND near S/R for good breakout setup
-        is_in_breakout_zone = is_consolidating_simple and is_near_sr
+        # Consolidation is now solely based on the ATR-relative range tightness
+        is_in_breakout_zone = is_consolidating_atr_based 
         
-        # Get S/R zones for breakout levels
-        sr_zones = self.get_sr_zones(df)
-        support_zone = max([z for z in sr_zones.get('support', []) if z <= close_value], default=None) if sr_zones.get('support') else None
-        resistance_zone = min([z for z in sr_zones.get('resistance', []) if z >= close_value], default=None) if sr_zones.get('resistance') else None
-        
-        logger.info(f"[{self.name}/_detect_consolidation] SimpleConsolidating={is_consolidating_simple}, NearSR={is_near_sr}, BreakoutZoneCandidate={is_in_breakout_zone}, NearestSupport={support_zone}, NearestResistance={resistance_zone}")
+        logger.info(f"[{self.name}/_detect_consolidation] ATR-Based Consolidating={is_consolidating_atr_based}, BreakoutZoneCandidate={is_in_breakout_zone}")
 
         result['dynamic_min_bars'] = dynamic_window
-        result['inside_sr'] = is_near_sr
-        result['bars_in_consolidation'] = dynamic_window if is_consolidating_simple else 0
+        result['bars_in_consolidation'] = dynamic_window if is_consolidating_atr_based else 0
         result['is_consolidating'] = is_in_breakout_zone
-        result['consolidation_start'] = df.index[-dynamic_window] if is_in_breakout_zone else None
-        result['consolidation_end'] = df.index[-1] if is_in_breakout_zone else None
-        result['breakout_high'] = resistance_zone
-        result['breakout_low'] = support_zone
+        
+        if is_in_breakout_zone:
+            result['consolidation_start'] = df.index[-dynamic_window]
+            result['consolidation_end'] = df.index[-1]
+            # Breakout levels are now the high/low of the consolidation window itself
+            result['breakout_high'] = recent_df_for_range['high'].max()
+            result['breakout_low'] = recent_df_for_range['low'].min()
+            logger.info(f"[{self.name}/_detect_consolidation] Consolidation detected. Range High: {result['breakout_high']:.5f}, Range Low: {result['breakout_low']:.5f}")
+        else:
+            result['consolidation_start'] = None
+            result['consolidation_end'] = None
+            result['breakout_high'] = None
+            result['breakout_low'] = None
+
         return result
 
     def _find_pivot_highs(self, df: pd.DataFrame) -> list:
-        """Find pivot highs over the configured window."""
+        """Find true fractal/pivot highs using proper pivot point logic (N bars left/right)."""
         pivots = []
-        w = self.pivot_window
+        w = self.pivot_window # N bars to check on each side
+        if len(df) < 2 * w + 1:
+            self.logger.debug(f"[{self.name}/_find_pivot_highs] Not enough data for pivot detection: need {2 * w + 1}, have {len(df)}")
+            return []
+
+        highs_values = df['high'].values
+
         for i in range(w, len(df) - w):
-            window = df['high'].iloc[i-w:i+w+1]
-            if df['high'].iloc[i] == window.max():
-                pivots.append(df['high'].iloc[i])
+            current_high = highs_values[i]
+            is_pivot = True
+            # Check left side
+            for j in range(i - w, i):
+                if highs_values[j] >= current_high:
+                    is_pivot = False
+                    break
+            if not is_pivot:
+                continue
+            # Check right side
+            for j in range(i + 1, i + w + 1):
+                if highs_values[j] >= current_high:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                pivots.append(current_high)
+                self.logger.debug(f"[{self.name}/_find_pivot_highs] Found pivot high at index {df.index[i]}: {current_high:.5f}")
         return pivots
 
     def _find_pivot_lows(self, df: pd.DataFrame) -> list:
-        """Find pivot lows over the configured window."""
+        """Find true fractal/pivot lows using proper pivot point logic (N bars left/right)."""
         pivots = []
-        w = self.pivot_window
+        w = self.pivot_window # N bars to check on each side
+        if len(df) < 2 * w + 1:
+            self.logger.debug(f"[{self.name}/_find_pivot_lows] Not enough data for pivot detection: need {2 * w + 1}, have {len(df)}")
+            return []
+
+        lows_values = df['low'].values
+
         for i in range(w, len(df) - w):
-            window = df['low'].iloc[i-w:i+w+1]
-            if df['low'].iloc[i] == window.min():
-                pivots.append(df['low'].iloc[i])
+            current_low = lows_values[i]
+            is_pivot = True
+            # Check left side
+            for j in range(i - w, i):
+                if lows_values[j] <= current_low:
+                    is_pivot = False
+                    break
+            if not is_pivot:
+                continue
+            # Check right side
+            for j in range(i + 1, i + w + 1):
+                if lows_values[j] <= current_low:
+                    is_pivot = False
+                    break
+            if is_pivot:
+                pivots.append(current_low)
+                self.logger.debug(f"[{self.name}/_find_pivot_lows] Found pivot low at index {df.index[i]}: {current_low:.5f}")
         return pivots
 
     def _cluster_levels(self, levels: list, tol: float = 0.003, df: Optional[pd.DataFrame] = None) -> list:
@@ -422,14 +536,15 @@ class BreakoutTradingStrategy(SignalGenerator):
 
             logger.debug(f"[{self.name}/{sym}] Initial DataFrame shape for {self.primary_timeframe}: {df.shape}")
 
+            current_symbol_has_true_volume = True # Assume true volume is available initially
             if 'tick_volume' not in df.columns:
                 if 'volume' in df.columns:
                     logger.debug(f"[{self.name}/{sym}] Using 'volume' column as 'tick_volume'.")
                     df['tick_volume'] = df['volume']
                 else:
-                    logger.warning(f"[{self.name}/{sym}] Neither 'tick_volume' nor 'volume' column found. Volume-based checks might be unreliable. Using price-based proxy.")
-                    # Using a rolling mean of close as a proxy if no volume data is available
-                    df['tick_volume'] = df['close'].rolling(self.volume_avg_period, min_periods=1).mean().bfill()
+                    logger.warning(f"[{self.name}/{sym}] Neither 'tick_volume' nor 'volume' column found. Volume-based checks will be skipped/fail as true volume is unavailable.")
+                    df['tick_volume'] = 0 # Assign a dummy column to prevent downstream errors, but it won't be used meaningfully
+                    current_symbol_has_true_volume = False # Mark that true volume is NOT available
 
             required_lookback = self.lookback_periods.get(self.primary_timeframe, self.lookback_period)
             if len(df) < required_lookback:
@@ -456,35 +571,54 @@ class BreakoutTradingStrategy(SignalGenerator):
                 sample_log_cols = [col for col in indicator_cols_to_log if col in df.columns]
                 logger.debug(f"[{self.name}/{sym}] Latest data with indicators: {df[sample_log_cols].iloc[-1].to_dict()}")
                 
-            # Use LuxAlgo pattern columns
-            hammer_series = df['hammer']
-            shooting_star_series = df['shooting_star']
-            bullish_engulfing_series = df['bullish_engulfing']
-            bearish_engulfing_series = df['bearish_engulfing']
-            bullish_harami_series = df['bullish_harami']
-            bearish_harami_series = df['bearish_harami']
-            morning_star_series = df['morning_star']
-            evening_star_series = df['evening_star']
-            white_marubozu_series = df['white_marubozu']
-            black_marubozu_series = df['black_marubozu']
-            pin_bar_series = df['pin_bar']
-            inside_bar_series = df['inside_bar']
-
+            # Define idx early for use in pattern detection
             idx = len(df) - 1 # Current bar index for decision making
+            
+            # Use LuxAlgo pattern columns - organize by directional bias
+            patterns_to_check_bullish = []
+            patterns_to_check_bearish = []
+            patterns_to_check_neutral = []
+            
+            if 'BUY' in ['BUY', 'SELL']:  # For upside breakout rejection, check bearish patterns
+                patterns_to_check_bearish = BEARISH_PATTERNS + NEUTRAL_PATTERNS
+            if 'SELL' in ['BUY', 'SELL']:  # For downside breakout rejection, check bullish patterns  
+                patterns_to_check_bullish = BULLISH_PATTERNS + NEUTRAL_PATTERNS
+
+            # Store pattern states for easy access
+            pattern_states = {}
+            for pattern in ALL_PATTERNS:
+                if pattern in df.columns:
+                    pattern_states[pattern] = df[pattern].iloc[idx] if idx < len(df[pattern]) else False
+                else:
+                    pattern_states[pattern] = False
+
+            # Check for any bullish reversal patterns (for downside breakout rejection)
+            bullish_reversal_detected = any(pattern_states.get(pattern, False) for pattern in BULLISH_PATTERNS)
+            
+            # Check for any bearish reversal patterns (for upside breakout rejection)  
+            bearish_reversal_detected = any(pattern_states.get(pattern, False) for pattern in BEARISH_PATTERNS)
+
+            logger.debug(f"[{self.name}/{sym}] Pattern Summary at idx {idx}: BullishReversal={bullish_reversal_detected}, BearishReversal={bearish_reversal_detected}")
+            logger.debug(f"[{self.name}/{sym}] Active Patterns: {[p for p, state in pattern_states.items() if state]}")
 
             # Get current pattern status
-            current_hammer = hammer_series.iloc[idx] if idx < len(hammer_series) else False
-            current_shooting_star = shooting_star_series.iloc[idx] if idx < len(shooting_star_series) else False
-            current_bullish_engulfing = bullish_engulfing_series.iloc[idx] if idx < len(bullish_engulfing_series) else False
-            current_bearish_engulfing = bearish_engulfing_series.iloc[idx] if idx < len(bearish_engulfing_series) else False
-            current_morning_star = morning_star_series.iloc[idx] if idx < len(morning_star_series) else False
-            current_evening_star = evening_star_series.iloc[idx] if idx < len(evening_star_series) else False
-            current_white_marubozu = white_marubozu_series.iloc[idx] if idx < len(white_marubozu_series) else False
-            current_black_marubozu = black_marubozu_series.iloc[idx] if idx < len(black_marubozu_series) else False
-            current_pin_bar = pin_bar_series.iloc[idx] if idx < len(pin_bar_series) else False
-            current_inside_bar = inside_bar_series.iloc[idx] if idx < len(inside_bar_series) else False
+            current_hammer = df['hammer'].iloc[idx] if idx < len(df['hammer']) else False
+            current_shooting_star = df['shooting_star'].iloc[idx] if idx < len(df['shooting_star']) else False
+            current_bullish_engulfing = df['bullish_engulfing'].iloc[idx] if idx < len(df['bullish_engulfing']) else False
+            current_bearish_engulfing = df['bearish_engulfing'].iloc[idx] if idx < len(df['bearish_engulfing']) else False
+            current_bullish_harami = df['bullish_harami'].iloc[idx] if idx < len(df['bullish_harami']) else False
+            current_bearish_harami = df['bearish_harami'].iloc[idx] if idx < len(df['bearish_harami']) else False
+            
+            current_morning_star = df['morning_star'].iloc[idx] if idx < len(df['morning_star']) else False
+            current_evening_star = df['evening_star'].iloc[idx] if idx < len(df['evening_star']) else False
+            current_white_marubozu = df['white_marubozu'].iloc[idx] if idx < len(df['white_marubozu']) else False
+            current_black_marubozu = df['black_marubozu'].iloc[idx] if idx < len(df['black_marubozu']) else False
+            current_pin_bar_bullish = df['pin_bar_bullish'].iloc[idx] if idx < len(df['pin_bar_bullish']) else False
+            current_pin_bar_bearish = df['pin_bar_bearish'].iloc[idx] if idx < len(df['pin_bar_bearish']) else False
 
-            logger.debug(f"[{self.name}/{sym}] Patterns at idx {idx}: Hammer={current_hammer}, SS={current_shooting_star}, BullEng={current_bullish_engulfing}, BearEng={current_bearish_engulfing}, Inside={current_inside_bar}, MS={current_morning_star}, ES={current_evening_star}, WM={current_white_marubozu}, BM={current_black_marubozu}, PB={current_pin_bar}")
+            current_inside_bar = df['inside_bar'].iloc[idx] if idx < len(df['inside_bar']) else False
+
+            logger.debug(f"[{self.name}/{sym}] Patterns at idx {idx}: Hammer={current_hammer}, SS={current_shooting_star}, BullEng={current_bullish_engulfing}, BearEng={current_bearish_engulfing}, BullHarami={current_bullish_harami}, BearHarami={current_bearish_harami}, Inside={current_inside_bar}, MS={current_morning_star}, ES={current_evening_star}, WM={current_white_marubozu}, BM={current_black_marubozu}, PB_bullish={current_pin_bar_bullish}, PB_bearish={current_pin_bar_bearish}")
             
             # Determine entry bar and confirmation bar indices
             # Adaptive wait_for_confirmation_candle based on volatility
@@ -550,7 +684,7 @@ class BreakoutTradingStrategy(SignalGenerator):
             entry_price, stop_loss, take_profit = None, None, None
             signal_direction = None
             
-            logger.debug(f"[{self.name}/{sym}] Confirmation Candle ({df.index[confirmation_bar_idx]}): O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}, V={candle['tick_volume'] if 'tick_volume' in candle else 'N/A'}")
+            logger.debug(f"[{self.name}/{sym}] Confirmation Candle ({df.index[confirmation_bar_idx]}): O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}, V={candle['tick_volume'] if 'tick_volume' in candle and current_symbol_has_true_volume else 'N/A (no true volume)' if current_symbol_has_true_volume else 'N/A (no true volume)'}")
 
 
             # --- Liquidity Check: Volume Z-Score ---
@@ -593,10 +727,16 @@ class BreakoutTradingStrategy(SignalGenerator):
 
             logger.debug(f"[{self.name}/{sym}] Volume multiplier determination: Base={base_volume_mult}, VolRatio={volatility_ratio_entry:.4f}, FinalMult={current_vol_mult:.2f}")
 
-            high_buying_volume = up_close and candle['tick_volume'] > volume_ma_value * current_vol_mult
-            high_selling_volume = down_close and candle['tick_volume'] > volume_ma_value * current_vol_mult
+            high_buying_volume = False
+            high_selling_volume = False
+
+            if current_symbol_has_true_volume:
+                high_buying_volume = up_close and candle['tick_volume'] > volume_ma_value * current_vol_mult
+                high_selling_volume = down_close and candle['tick_volume'] > volume_ma_value * current_vol_mult
+            else:
+                logger.warning(f"[{self.name}/{sym}] Volume confirmation skipped because true volume data is not available. high_buying_volume/high_selling_volume will be False.")
             
-            logger.debug(f"[{self.name}/{sym}] Volume Confirmation: CandleVol={candle['tick_volume'] if 'tick_volume' in candle else 'N/A'}, VolMA={volume_ma_value:.2f}, RequiredVol={volume_ma_value * current_vol_mult:.2f}, HighBuyingVol={high_buying_volume}, HighSellingVol={high_selling_volume}")
+            logger.debug(f"[{self.name}/{sym}] Volume Confirmation (True Volume Available: {current_symbol_has_true_volume}): CandleVol={candle['tick_volume'] if 'tick_volume' in candle and current_symbol_has_true_volume else 'N/A (no true volume)'}, VolMA={volume_ma_value:.2f}, RequiredVol={volume_ma_value * current_vol_mult:.2f}, HighBuyingVol={high_buying_volume}, HighSellingVol={high_selling_volume}")
 
 
             # Inline dynamic ATR multiplier logic (formerly _get_dynamic_atr_multiplier)
@@ -644,23 +784,38 @@ class BreakoutTradingStrategy(SignalGenerator):
                 f"ATR={atr_val:.5f}, breakout_mult={threshold_multiplier}"
             )
 
-            pinbar_rejection = False
-            if breakout_high is not None and current_hammer and consolidation['breakout_low'] is not None and candle['low'] < consolidation['breakout_low']:
-                pinbar_rejection = True
-                self.logger.info(f"[Signal] {sym}: Pin bar/hammer detected at resistance breakout level outside consolidation. Filtering out false breakout.")
-            if (
-                breakout_low is not None and
-                current_shooting_star and
-                consolidation['breakout_high'] is not None and
-                candle['high'] > consolidation['breakout_high']
-            ):
-                pinbar_rejection = True
-                self.logger.info(f"[Signal] {sym}: Shooting star detected at support breakout level outside consolidation. Filtering out false breakout.")
-            if pinbar_rejection:
-                self.logger.info(f"[Signal] {sym}: Pinbar rejection filter triggered. Skipping signal.")
+            pinbar_rejection_filter_active = False # Renamed for clarity
+
+            # --- False Breakout Rejection Filter --- 
+            # Focus: Does the breakout candle ITSELF show strong rejection AT the breakout level?
+
+            # Check for rejection on an attempted UPSIDE breakout
+            if breakout_high is not None and candle["close"] >= breakout_high: # Attempting to breakout or did breakout high
+                # Check for any bearish reversal patterns on upside breakout attempt
+                if bearish_reversal_detected and ((candle['close'] - candle['low']) / (candle['high'] - candle['low'] + 1e-9)) < 0.33:
+                    pinbar_rejection_filter_active = True
+                    active_bearish_patterns = [p for p in BEARISH_PATTERNS if pattern_states.get(p, False)]
+                    self.logger.info(f"[{self.name}/{sym}] False Breakout (Up): Bearish reversal pattern(s) {active_bearish_patterns} with close in lower third on breakout candle at/above {breakout_high:.5f}. Filtering signal.")
+            
+            # Check for rejection on an attempted DOWNSIDE breakout
+            # Ensure this block is only entered if the upside rejection didn't already trigger the filter
+            if not pinbar_rejection_filter_active and breakout_low is not None and candle["close"] <= breakout_low: # Attempting to breakout or did breakout low
+                # Check for any bullish reversal patterns on downside breakout attempt
+                if bullish_reversal_detected and ((candle['high'] - candle['close']) / (candle['high'] - candle['low'] + 1e-9)) < 0.33:
+                    pinbar_rejection_filter_active = True
+                    active_bullish_patterns = [p for p in BULLISH_PATTERNS if pattern_states.get(p, False)]
+                    self.logger.info(f"[{self.name}/{sym}] False Breakout (Down): Bullish reversal pattern(s) {active_bullish_patterns} with close in upper third on breakout candle at/below {breakout_low:.5f}. Filtering signal.")
+
+            if pinbar_rejection_filter_active:
+                self.logger.info(f"[{self.name}/{sym}] Pinbar rejection filter triggered. Skipping signal.")
+                # Ensure bar is marked as processed before continuing to next symbol
+                self.processed_bars[(sym, self.primary_timeframe)] = current_bar_ts
                 continue
+            
             # Upside breakout
-            if breakout_high is not None and candle["close"] >= breakout_high + (threshold_multiplier * atr_val):
+            # The actual breakout check (candle["close"] >= threshold_high) remains further down.
+            # This section is only for the pinbar rejection filter based on the breakout candle itself.
+            if breakout_high is not None and candle["close"] >= threshold_high: # Condition for a valid breakout signal attempt
                 # Hybrid retest logic: only require retest for add-ons, not initial breakout
                 retest_satisfied = True if not self.require_retest else False
                 if self.require_retest:
@@ -690,10 +845,16 @@ class BreakoutTradingStrategy(SignalGenerator):
                     # Volume confirmation relaxation for crypto/volatile indices
                     volume_confirmation_multiplier = 1.1 if volatility_ratio_entry > 0.01 else 1.3
                     if strong_break:
-                        vol_ok = candle["tick_volume"] >= avg_vol * current_vol_mult
+                        # Ensure current_symbol_has_true_volume is checked before accessing tick_volume
+                        vol_ok = current_symbol_has_true_volume and candle["tick_volume"] >= avg_vol * current_vol_mult
                     else:
-                        vol_ok = candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
-                    self.logger.debug(f"[Signal] {sym}: Volume check: tick_volume={candle['tick_volume']}, avg_vol={avg_vol}, required={avg_vol * (volume_confirmation_multiplier if strong_break else max(volume_confirmation_multiplier, 1.3))}, strong_break={strong_break}, vol_ok={vol_ok}")
+                        vol_ok = current_symbol_has_true_volume and candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
+                    
+                    if not current_symbol_has_true_volume:
+                        logger.warning(f"[{self.name}/{sym}] BUY Breakout: Volume check (vol_ok) is False because true volume data is not available.")
+                        vol_ok = False # Explicitly set to false if true volume is missing, overriding any other calculation
+
+                    self.logger.debug(f"[{self.name}/{sym}] BUY Breakout: Volume check: tick_volume={candle['tick_volume'] if current_symbol_has_true_volume else 'N/A'}, avg_vol={avg_vol:.2f}, required_mult={(current_vol_mult if strong_break else max(volume_confirmation_multiplier, 1.3)):.2f}, strong_break={strong_break}, vol_ok={vol_ok}, true_volume_available={current_symbol_has_true_volume}")
                     
                     # Price action confirmation (bullish close above S/R)
                     price_action_ok = candle["close"] > candle["open"]
@@ -729,7 +890,7 @@ class BreakoutTradingStrategy(SignalGenerator):
                 else:
                     self.logger.info(f"[Signal] {sym}: Upside breakout waiting for retest of level {breakout_high:.5f}")
             # Downside breakout
-            elif breakout_low is not None and candle["close"] <= breakout_low - (threshold_multiplier * atr_val):
+            elif breakout_low is not None and candle["close"] <= breakout_low:
                 retest_satisfied = True if not self.require_retest else False
                 if self.require_retest:
                     breakout_key = (sym, "SELL", breakout_low)
@@ -758,10 +919,15 @@ class BreakoutTradingStrategy(SignalGenerator):
                     # Volume confirmation relaxation for crypto/volatile indices
                     volume_confirmation_multiplier = 1.1 if volatility_ratio_entry > 0.01 else 1.3
                     if strong_break:
-                        vol_ok = candle["tick_volume"] >= avg_vol * current_vol_mult
+                        vol_ok = current_symbol_has_true_volume and candle["tick_volume"] >= avg_vol * current_vol_mult
                     else:
-                        vol_ok = candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
-                    self.logger.debug(f"[Signal] {sym}: Volume check: tick_volume={candle['tick_volume']}, avg_vol={avg_vol}, required={avg_vol * (volume_confirmation_multiplier if strong_break else max(volume_confirmation_multiplier, 1.3))}, strong_break={strong_break}, vol_ok={vol_ok}")
+                        vol_ok = current_symbol_has_true_volume and candle["tick_volume"] >= avg_vol * max(volume_confirmation_multiplier, 1.3)
+
+                    if not current_symbol_has_true_volume:
+                        logger.warning(f"[{self.name}/{sym}] SELL Breakout: Volume check (vol_ok) is False because true volume data is not available.")
+                        vol_ok = False # Explicitly set to false if true volume is missing
+
+                    self.logger.debug(f"[{self.name}/{sym}] SELL Breakout: Volume check: tick_volume={candle['tick_volume'] if current_symbol_has_true_volume else 'N/A'}, avg_vol={avg_vol:.2f}, required_mult={(current_vol_mult if strong_break else max(volume_confirmation_multiplier, 1.3)):.2f}, strong_break={strong_break}, vol_ok={vol_ok}, true_volume_available={current_symbol_has_true_volume}")
                     
                     # Price action confirmation (bearish close below S/R)
                     price_action_ok = candle["close"] < candle["open"]
