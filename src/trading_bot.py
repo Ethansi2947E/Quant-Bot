@@ -2,6 +2,8 @@ import asyncio
 import traceback
 import pytz
 import time
+import importlib.util
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Type, Optional
@@ -41,9 +43,7 @@ class SignalGenerator:
             logger.info(f"SignalGenerator {self.name} using MT5Handler instance: {id(self.mt5_handler)}")
         else:
             logger.warning(f"No MT5Handler passed to {self.name} - this might cause connection issues")
-        
-        # Timeframe configuration
-        # self.required_timeframes = []  # Subclasses must override
+       
         self.primary_timeframe = None  # Subclasses must override
         
     async def initialize(self):
@@ -99,8 +99,7 @@ class TradingBot:
         self.telegram_config = copy.deepcopy(DEFAULT_TELEGRAM_CONFIG)
         self.mt5_config = copy.deepcopy(DEFAULT_MT5_CONFIG)
 
-        # If a config was passed, override defaults with its values
-        # .update() is used to merge dictionaries, prioritizing keys from passed_config
+        
         if passed_config:
             logger.info("External config provided, merging with defaults.")
             if "trading" in passed_config and isinstance(passed_config["trading"], dict):
@@ -361,91 +360,45 @@ class TradingBot:
                 logger.error(f"Error in tick_event_loop: {str(e)}\n{tb.format_exc()}")
                 await asyncio.sleep(2)
 
-    def _normalize_strategy_key(self, key: str) -> str:
-        """Normalize strategy key to handle different naming conventions."""
-        # Convert to lowercase
-        key = key.lower()
-        
-        # Print debug info to help troubleshoot
-        logger.info(f"Normalizing strategy key: '{key}'")
-        
-        # Handle both underscore and camel case formats
-        if '_strategy' in key:
-            key = key.replace('_strategy', '')
-        elif 'strategy' in key:
-            key = key.replace('strategy', '')
-            
-        # Remove any remaining underscores
-        key = key.replace('_', '')
-        
-        logger.info(f"Normalized strategy key: '{key}'")
-        return key
-
     async def _initialize_signal_generators(self):
         logger.info(f"[TRACE] _initialize_signal_generators called. trading_config signal_generators: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
-        import traceback as tb
-        logger.debug(f"[TRACE] Call stack for _initialize_signal_generators:\n{''.join(tb.format_stack(limit=5))}")
         try:
-            # Get active generator names from config
-            # Check if config is missing, if so load directly from config.py
             active_generator_names = self.trading_config.get("signal_generators")
-            if active_generator_names is None:
-                # Try to get directly from config.py
+            if not active_generator_names:
+                # Fallback logic
                 try:
                     from config.config import TRADING_CONFIG
-                    active_generator_names = TRADING_CONFIG.get("signal_generators", ["breakout_reversal"])
+                    active_generator_names = TRADING_CONFIG.get("signal_generators", [])
                     logger.info(f"Loaded signal generators directly from config.py: {active_generator_names}")
-                    # Update trading_config for future use
                     self.trading_config["signal_generators"] = active_generator_names
                 except Exception as e:
                     logger.error(f"Failed to import from config.py: {str(e)}")
-                    active_generator_names = ["breakout_reversal"]
-            
-            # Fallback to default if still None
-            if not active_generator_names:
-                active_generator_names = ["breakout_reversal", "confluence_price_action"]
-                logger.warning(f"Using default signal generators: {active_generator_names}")
+                
+                if not active_generator_names:
+                    active_generator_names = ["breakout_reversal"] # Minimal default
+                    logger.warning(f"Using default signal generators: {active_generator_names}")
 
-            # Load generators from the strategies directory
+            # Dynamically load all available strategies from the directory
             self._load_available_signal_generators()
 
-            # Build a normalized lookup for available strategies
-            normalized_available = {}
-            normalized_key_to_original_key = {} # To track which original key maps to a normalized key
-
-            for k, v in self.available_signal_generators.items():
-                norm_key = self._normalize_strategy_key(k)
-                if norm_key not in normalized_available:
-                    normalized_available[norm_key] = v
-                    normalized_key_to_original_key[norm_key] = k
-                else:
-                    logger.warning(
-                        f"Normalized key collision: '{norm_key}' from original key '{k}' conflicts with existing original key "
-                        f"'{normalized_key_to_original_key[norm_key]}'. '{k}' will be ignored. "
-                        f"Please ensure unique normalized strategy names by renaming strategy files/classes."
-                    )
-            
-            # Debug logging for normalized keys
-            logger.info(f"Available signal generators (original keys): {list(self.available_signal_generators.keys())}")
-            logger.info(f"Normalized available keys (after collision check): {list(normalized_available.keys())}")
+            logger.info(f"Available signal generators: {list(self.available_signal_generators.keys())}")
+            logger.info(f"Attempting to activate generators from config: {active_generator_names}")
             
             # Initialize active generators from config
             for generator_name in active_generator_names:
-                norm_key = self._normalize_strategy_key(generator_name)
-                logger.info(f"Looking for generator: {generator_name} (normalized: {norm_key})")
-                
-                if norm_key in normalized_available:
-                    generator_class = normalized_available[norm_key]
-                    logger.info(f"Found generator class: {generator_class.__name__}")
+                # The keys should now match directly
+                if generator_name in self.available_signal_generators:
+                    generator_class = self.available_signal_generators[generator_name]
+                    logger.info(f"Found generator class for '{generator_name}': {generator_class.__name__}")
                     
-                    # Ensure we're passing the SAME MT5Handler instance
                     generator = generator_class(
-                        mt5_handler=self.mt5_handler,  # Use the shared instance
+                        mt5_handler=self.mt5_handler,
                         risk_manager=self.risk_manager
                     )
                     self.signal_generators.append(generator)
                     logger.info(f"Initialized signal generator: {generator_name} ({generator.__class__.__name__})")
-                    # --- NEW: Register data requirements with DataManager ---
+                    
+                    # Register data requirements with DataManager
                     required_timeframes = getattr(generator, 'required_timeframes', [])
                     lookback_periods = getattr(generator, 'lookback_periods', {})
                     default_lookback = getattr(generator, 'lookback_period', 100)
@@ -454,10 +407,14 @@ class TradingBot:
                             lookback = lookback_periods.get(tf, default_lookback)
                             self.data_manager.register_timeframe(symbol, tf, lookback)
                 else:
-                    logger.warning(f"Unknown signal generator: {generator_name} (normalized: {norm_key})")
-            logger.info(f"[TRACE] active_generator_names used: {active_generator_names}")
+                    logger.warning(f"Unknown signal generator specified in config: '{generator_name}'")
+
+            if not self.signal_generators:
+                raise RuntimeError("No signal generators were successfully initialized. Check config and strategy files.")
+                
             logger.info(f"[TRACE] Final signal_generators order: {[gen.__class__.__name__ for gen in self.signal_generators]}")
-            # --- NEW: Log requirements for all loaded strategies ---
+            
+            # Log requirements for all loaded strategies
             for gen in self.signal_generators:
                 logger.info(f"[StrategyLoad] {gen.__class__.__name__}: required_timeframes={getattr(gen, 'required_timeframes', None)}, lookback_periods={getattr(gen, 'lookback_periods', None)}")
                 if not getattr(gen, 'required_timeframes', []):
@@ -1329,125 +1286,44 @@ class TradingBot:
     
     def _load_available_signal_generators(self):
         """
-        Load and register all available signal generators from the strategy module.
+        Dynamically load and register all available signal generators from the src/strategy directory.
+        Strategies are identified by filenames ending in '_strategy.py'.
+        The key for the strategy is derived from its filename.
         """
-        try:
-            # Store all found signal generators
-            self.available_signal_generators = {}
-            logger.info("[LOAD_STRAT] Initialized self.available_signal_generators.")
+        self.available_signal_generators = {}
+        strategy_dir = BASE_DIR / "src" / "strategy"
+        logger.info(f"[LOAD_STRAT] Scanning for strategies in: {strategy_dir}")
 
-            # Try to import the main breakout reversal strategy
-            try:
-                # Try importing from strategy module first
-                try:
-                    from src.strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
-                    self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
-                    logger.info("[LOAD_STRAT] Successfully imported BreakoutReversalStrategy from strategy module")
-                except ImportError:
-                    # Fallback to direct import
-                    from src.strategy.breakout_reversal_strategy import BreakoutReversalStrategy  # type: ignore # pyright: ignore[reportAttributeAccessIssue]
-                    self.available_signal_generators["breakout_reversal"] = BreakoutReversalStrategy
-                    logger.info("[LOAD_STRAT] Imported BreakoutReversalStrategy directly from file")
-                logger.info(f"[LOAD_STRAT] After BreakoutReversal: {list(self.available_signal_generators.keys())}")
-
-                # Try importing the new price action SR strategy
-                try:
-                    from src.strategy.price_action_sr_strategy import PriceActionSRStrategy
-                    self.available_signal_generators["price_action_sr"] = PriceActionSRStrategy
-                    logger.info("[LOAD_STRAT] Successfully imported PriceActionSRStrategy")
-                except ImportError as e:
-                    logger.warning(f"[LOAD_STRAT] PriceActionSRStrategy not found in strategy module: {str(e)}")
-                logger.info(f"[LOAD_STRAT] After PriceActionSR: {list(self.available_signal_generators.keys())}")
-
-                # Try importing the confluence strategy
-                try:
-                    from src.strategy.confluence_price_action_strategy import ConfluencePriceActionStrategy  # type: ignore
-                    self.available_signal_generators["confluence_price_action"] = ConfluencePriceActionStrategy
-                    logger.info("[LOAD_STRAT] Successfully imported ConfluencePriceActionStrategy")
-                except ImportError as e:
-                    logger.warning(f"[LOAD_STRAT] ConfluencePriceActionStrategy not found in strategy module: {str(e)}")
-                logger.info(f"[LOAD_STRAT] After ConfluencePriceAction: {list(self.available_signal_generators.keys())}")
-
-                # Import the new BreakoutTradingStrategy
-                try:
-                    logger.info("[LOAD_STRAT] Attempting to import BreakoutTradingStrategy")
-                    from src.strategy.breakout_trading_strategy import BreakoutTradingStrategy
-                    self.available_signal_generators["breakout_trading"] = BreakoutTradingStrategy
-                    logger.info("[LOAD_STRAT] Successfully imported BreakoutTradingStrategy")
-                except ImportError as e:
-                    logger.error(f"[LOAD_STRAT] Error importing BreakoutTradingStrategy: {str(e)}")
-                    logger.error(traceback.format_exc())
-                logger.info(f"[LOAD_STRAT] After BreakoutTrading: {list(self.available_signal_generators.keys())}")
-
-                # Import the new TrendFollowingStrategy
-                try:
-                    logger.info("[LOAD_STRAT] Attempting to import TrendFollowingStrategy")
-                    from src.strategy.trend_following_strategy import TrendFollowingStrategy
-                    self.available_signal_generators["trend_following"] = TrendFollowingStrategy
-                    logger.info("[LOAD_STRAT] Successfully imported TrendFollowingStrategy")
-                except ImportError as e:
-                    logger.error(f"[LOAD_STRAT] Error importing TrendFollowingStrategy: {str(e)}")
-                    logger.error(traceback.format_exc())
-                logger.info(f"[LOAD_STRAT] After TrendFollowing: {list(self.available_signal_generators.keys())}")
-
-            except ImportError as e:
-                logger.warning(f"[LOAD_STRAT] Could not import BreakoutReversalStrategy (outer try-except): {str(e)}")
+        for file_path in strategy_dir.glob("*_strategy.py"):
+            module_name = file_path.stem  # e.g., 'confluence_price_action_strategy'
+            # The key used in config.py is the filename without '_strategy.py'
+            strategy_key = module_name.replace('_strategy', '') # e.g., 'confluence_price_action'
             
-            logger.info(f"[LOAD_STRAT] After all explicit imports: {list(self.available_signal_generators.keys())}")
-
-            # Try to import other available strategies
             try:
-                # Import strategy directory
-                import src.strategy as strategy_module
-                
-                # Check if it has a __all__ attribute listing available strategies
-                strategy_names = []
-                try:
-                    all_attr = getattr(strategy_module, '__all__', [])
-                    if all_attr:
-                        strategy_names = all_attr
-                except AttributeError:
-                    # Strategy module doesn't have __all__, try other methods to find strategies
-                    pass
-                
-                # If no strategy names found, look for classes ending with 'Strategy'
-                if not strategy_names:
-                    for attr_name in dir(strategy_module):
-                        if attr_name.endswith('Strategy') and attr_name != 'SignalGenerator':
-                            strategy_names.append(attr_name)
-                
-                # Process the found strategy names
-                for strategy_name in strategy_names:
-                    if strategy_name in ['BreakoutReversalStrategy', 'ConfluencePriceActionStrategy']:
-                        # Already imported
-                        continue
-                        
-                    try:
-                        # Get the strategy class dynamically
-                        strategy_class = getattr(strategy_module, strategy_name)
-                        
-                        # Convert CamelCase to snake_case
-                        snake_case_name = ''.join(['_'+c.lower() if c.isupper() else c for c in strategy_name]).lstrip('_')
-                        # Remove 'strategy' suffix if present
-                        snake_case_name = snake_case_name.replace('_strategy', '')
-                        
-                        # Add it to the available strategies
-                        self.available_signal_generators[snake_case_name] = strategy_class
-                        logger.info(f"Loaded signal generator: {strategy_name}")
-                    except Exception as strat_error:
-                        logger.warning(f"Error loading strategy {strategy_name}: {str(strat_error)}")
-            
-            except Exception as dir_error:
-                logger.warning(f"Could not scan strategy directory: {str(dir_error)}")
-                
-            # Log successful loading
-            if self.available_signal_generators:
-                logger.info(f"[LOAD_STRAT] Finally loaded {len(self.available_signal_generators)} signal generators: {list(self.available_signal_generators.keys())}")
-            else:
-                logger.warning("[LOAD_STRAT] No signal generators were loaded by _load_available_signal_generators")
-                
-        except Exception as e:
-            logger.error(f"[LOAD_STRAT] Error in _load_available_signal_generators: {str(e)}")
+                # Dynamically import the module
+                module_spec = importlib.util.spec_from_file_location(f"src.strategy.{module_name}", file_path)
+                if module_spec and module_spec.loader:
+                    module = importlib.util.module_from_spec(module_spec)
+                    module_spec.loader.exec_module(module)
+
+                    # Find the class that inherits from SignalGenerator
+                    for name, obj in inspect.getmembers(module, inspect.isclass):
+                        if issubclass(obj, SignalGenerator) and obj is not SignalGenerator:
+                            self.available_signal_generators[strategy_key] = obj
+                            logger.info(f"[LOAD_STRAT] Successfully loaded strategy '{strategy_key}' -> class '{name}'")
+                            # Stop after finding the first strategy class in the file
+                            break 
+                else:
+                    logger.warning(f"[LOAD_STRAT] Could not create module spec for {file_path}")
+
+            except Exception as e:
+                logger.error(f"[LOAD_STRAT] Error loading strategy from {file_path}: {e}")
+                logger.error(traceback.format_exc())
+
+        if self.available_signal_generators:
+            logger.info(f"[LOAD_STRAT] Finished loading. Found {len(self.available_signal_generators)} generators: {list(self.available_signal_generators.keys())}")
+        else:
+            logger.warning("[LOAD_STRAT] No signal generators were loaded dynamically.")
     
     async def send_notification_task(self):
         """Periodically send status notifications to the Telegram bot."""
@@ -1483,5 +1359,3 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error in notification task: {str(e)}")
             logger.error(traceback.format_exc())
-    
-    
