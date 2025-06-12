@@ -61,6 +61,7 @@ class OrderBlock:
     bar_index: int
     direction: int  # BULLISH or BEARISH
     is_swing: bool
+    ob_type: str  # NEW: 'Extreme' or 'Decisional'
     mitigated: bool = False
     
 @dataclass
@@ -91,6 +92,17 @@ class Liquidity:
     bar_index: int
     direction: int  # LIQUIDITY_BUYSIDE or LIQUIDITY_SELLSIDE
     num_pivots: int # How many pivots form this pool
+    mitigated: bool = False
+
+@dataclass
+class BreakerMitigationBlock:
+    """Represents a Breaker Block (BB) or Mitigation Block (MB)."""
+    high: float
+    low: float
+    time: pd.Timestamp
+    bar_index: int
+    direction: int  # BULLISH or BEARISH
+    block_type: str # 'BB' or 'MB'
     mitigated: bool = False
 
 @dataclass
@@ -141,6 +153,7 @@ class SmartMoneyConcepts:
             "fvg_auto_threshold": True,
             "atr_period": 200,
             "internal_filter_confluence": False,
+            "decisional_ob_search_length": 10,
         }
 
     def _reset_state(self):
@@ -166,6 +179,7 @@ class SmartMoneyConcepts:
         self.structures: List[Structure] = []
         self.equal_highs_lows: List[EqualHighLow] = []
         self.liquidity_pools: List[Liquidity] = []
+        self.breaker_mitigation_blocks: List[BreakerMitigationBlock] = []
 
     def analyze(self, df: pd.DataFrame) -> Dict:
         """
@@ -222,6 +236,7 @@ class SmartMoneyConcepts:
             self._check_ob_mitigation(i, df_copy)
             self._check_fvg_mitigation(i, df_copy)
             self._check_liquidity_mitigation(i, df_copy)
+            self._check_bb_mb_mitigation(i, df_copy)
             self._process_bar(i, df_copy, swing_pivots, internal_pivots)
             self._update_trailing_extremes(i, df_copy)
             self._find_fair_value_gaps(i, df_copy, volatility_measure)
@@ -240,6 +255,7 @@ class SmartMoneyConcepts:
         unmitigated_internal_obs = [ob for ob in self.internal_order_blocks if not ob.mitigated]
         unmitigated_fvgs = [fvg for fvg in self.fair_value_gaps if fvg.state != FVG_STATE_MITIGATED]
         unmitigated_liquidity = [pool for pool in self.liquidity_pools if not pool.mitigated]
+        unmitigated_bb_mb = [b for b in self.breaker_mitigation_blocks if not b.mitigated]
 
         analysis_result = {
             "structures": self.structures,
@@ -248,6 +264,7 @@ class SmartMoneyConcepts:
             "fair_value_gaps": unmitigated_fvgs,
             "equal_highs_lows": self.equal_highs_lows,
             "liquidity_pools": unmitigated_liquidity,
+            "breaker_mitigation_blocks": unmitigated_bb_mb,
             "premium_discount_zones": zones,
             "strong_weak_highs_lows": strong_weak_pivots
         }
@@ -341,38 +358,44 @@ class SmartMoneyConcepts:
         close = df['close'][i]
         prev_close = df['close'][i-1]
         
-        # Swing Structure (check for crossover)
-        if self.swing_high.price > 0 and not self.swing_high.crossed and close > self.swing_high.price and prev_close < self.swing_high.price:
+        # Swing Structure (check for body close above/below)
+        if self.swing_high.price > 0 and not self.swing_high.crossed and close > self.swing_high.price:
             structure_type = 'CHoCH' if self.swing_trend == BEARISH else 'BOS'
             self.structures.append(Structure(self.swing_high, i, df['time'][i], structure_type, BULLISH))
             self.swing_high.crossed = True
             self.swing_trend = BULLISH
-            self._store_order_block(self.swing_high, i, df, is_swing=True, direction=BULLISH)
+            self._store_extreme_order_block(self.swing_high, i, df, is_swing=True, direction=BULLISH)
+            self._store_decisional_order_block(self.swing_high, i, df, is_swing=True, direction=BULLISH)
+            self._store_breaker_or_mitigation_block(df, BULLISH)
 
-        if self.swing_low.price > 0 and not self.swing_low.crossed and close < self.swing_low.price and prev_close > self.swing_low.price:
+        if self.swing_low.price > 0 and not self.swing_low.crossed and close < self.swing_low.price:
             structure_type = 'CHoCH' if self.swing_trend == BULLISH else 'BOS'
             self.structures.append(Structure(self.swing_low, i, df['time'][i], structure_type, BEARISH))
             self.swing_low.crossed = True
             self.swing_trend = BEARISH
-            self._store_order_block(self.swing_low, i, df, is_swing=True, direction=BEARISH)
+            self._store_extreme_order_block(self.swing_low, i, df, is_swing=True, direction=BEARISH)
+            self._store_decisional_order_block(self.swing_low, i, df, is_swing=True, direction=BEARISH)
+            self._store_breaker_or_mitigation_block(df, BEARISH)
 
-        # Internal Structure (check for crossover)
-        if self.internal_high.price > 0 and not self.internal_high.crossed and close > self.internal_high.price and prev_close < self.internal_high.price:
+        # Internal Structure (check for body close above/below)
+        if self.internal_high.price > 0 and not self.internal_high.crossed and close > self.internal_high.price:
             structure_type = 'CHoCH' if self.internal_trend == BEARISH else 'BOS'
             self.structures.append(Structure(self.internal_high, i, df['time'][i], structure_type, BULLISH))
             self.internal_high.crossed = True
             self.internal_trend = BULLISH
-            self._store_order_block(self.internal_high, i, df, is_swing=False, direction=BULLISH)
+            self._store_extreme_order_block(self.internal_high, i, df, is_swing=False, direction=BULLISH)
+            self._store_decisional_order_block(self.internal_high, i, df, is_swing=False, direction=BULLISH)
             
-        if self.internal_low.price > 0 and not self.internal_low.crossed and close < self.internal_low.price and prev_close > self.internal_low.price:
+        if self.internal_low.price > 0 and not self.internal_low.crossed and close < self.internal_low.price:
             structure_type = 'CHoCH' if self.internal_trend == BULLISH else 'BOS'
             self.structures.append(Structure(self.internal_low, i, df['time'][i], structure_type, BEARISH))
             self.internal_low.crossed = True
             self.internal_trend = BEARISH
-            self._store_order_block(self.internal_low, i, df, is_swing=False, direction=BEARISH)
+            self._store_extreme_order_block(self.internal_low, i, df, is_swing=False, direction=BEARISH)
+            self._store_decisional_order_block(self.internal_low, i, df, is_swing=False, direction=BEARISH)
 
-    def _store_order_block(self, pivot: Pivot, break_index: int, df: pd.DataFrame, is_swing: bool, direction: int):
-        """Finds and stores an order block after a structure break."""
+    def _store_extreme_order_block(self, pivot: Pivot, break_index: int, df: pd.DataFrame, is_swing: bool, direction: int):
+        """Finds and stores an Extreme Order Block after a structure break."""
         
         # Define the search range from the pivot to the break
         search_range = df.iloc[pivot.bar_index : break_index + 1]
@@ -394,13 +417,60 @@ class SmartMoneyConcepts:
             time=ob_candle['time'],
             bar_index=ob_candle_idx,
             direction=ob_direction,
-            is_swing=is_swing
+            is_swing=is_swing,
+            ob_type='Extreme'
         )
         
         if is_swing:
             self.swing_order_blocks.append(new_ob)
         else:
             self.internal_order_blocks.append(new_ob)
+
+    def _store_decisional_order_block(self, break_pivot: Pivot, break_index: int, df: pd.DataFrame, is_swing: bool, direction: int):
+        """Finds and stores a Decisional Order Block."""
+        search_range_length = self.config.get('decisional_ob_search_length', 10)
+        search_start = max(0, break_index - search_range_length)
+        search_range = df.iloc[search_start:break_index]
+
+        if direction == BULLISH:  # Bullish break, look for the last BEARISH candle
+            opposing_candles = search_range[search_range['open'] > search_range['close']]
+            if not opposing_candles.empty:
+                ob_candle = opposing_candles.iloc[-1]
+                ob_direction = BEARISH
+
+                new_ob = OrderBlock(
+                    high=ob_candle['high'],
+                    low=ob_candle['low'],
+                    time=ob_candle['time'],
+                    bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
+                    direction=ob_direction,
+                    is_swing=is_swing,
+                    ob_type='Decisional'
+                )
+                if is_swing:
+                    self.swing_order_blocks.append(new_ob)
+                else:
+                    self.internal_order_blocks.append(new_ob)
+
+        elif direction == BEARISH:  # Bearish break, look for the last BULLISH candle
+            opposing_candles = search_range[search_range['open'] < search_range['close']]
+            if not opposing_candles.empty:
+                ob_candle = opposing_candles.iloc[-1]
+                ob_direction = BULLISH
+
+                new_ob = OrderBlock(
+                    high=ob_candle['high'],
+                    low=ob_candle['low'],
+                    time=ob_candle['time'],
+                    bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
+                    direction=ob_direction,
+                    is_swing=is_swing,
+                    ob_type='Decisional'
+                )
+                if is_swing:
+                    self.swing_order_blocks.append(new_ob)
+                else:
+                    self.internal_order_blocks.append(new_ob)
 
     def _check_ob_mitigation(self, i: int, df: pd.DataFrame):
         """Checks and flags mitigated order blocks."""
@@ -614,6 +684,82 @@ class SmartMoneyConcepts:
             # Sellside liquidity is taken if price moves below it
             if pool.direction == LIQUIDITY_SELLSIDE and df['low'][i] < pool.price:
                 pool.mitigated = True
+
+    def _store_breaker_or_mitigation_block(self, df: pd.DataFrame, direction: int):
+        """
+        Identifies and stores a Breaker or Mitigation Block after a structure break.
+        This is triggered when a major swing high/low is broken.
+        """
+        if direction == BULLISH:
+            # We just had a bullish MSB, breaking swing_high.
+            # The relevant pivots are the two most recent swing lows.
+            # l0 = self.swing_low, l1 = self.prev_swing_low
+            if self.swing_low.price == 0.0 or self.prev_swing_low.price == 0.0:
+                return
+
+            # Determine if it's a Breaker or Mitigation block
+            block_type = 'BB' if self.swing_low.price < self.prev_swing_low.price else 'MB'
+            
+            # Find the last bearish candle (down-candle) before the swing_low (l0) was formed.
+            # A simple approach is to look back a fixed number of candles from the low.
+            search_start = max(0, self.swing_low.bar_index - self.config['internal_length'])
+            search_end = self.swing_low.bar_index + 1
+            
+            search_range = df.iloc[search_start:search_end]
+            down_candles = search_range[search_range['open'] > search_range['close']]
+            
+            if not down_candles.empty:
+                block_candle = down_candles.iloc[-1] # The last down-candle
+                new_block = BreakerMitigationBlock(
+                    high=block_candle['high'],
+                    low=block_candle['low'],
+                    time=block_candle['time'],
+                    bar_index=int(block_candle.name) if isinstance(block_candle.name, (int, float)) else 0,
+                    direction=BULLISH, # A bullish BB/MB acts as support
+                    block_type=block_type
+                )
+                self.breaker_mitigation_blocks.append(new_block)
+
+        elif direction == BEARISH:
+            # We just had a bearish MSB, breaking swing_low.
+            # The relevant pivots are the two most recent swing highs.
+            # h0 = self.swing_high, h1 = self.prev_swing_high
+            if self.swing_high.price == 0.0 or self.prev_swing_high.price == 0.0:
+                return
+
+            block_type = 'BB' if self.swing_high.price > self.prev_swing_high.price else 'MB'
+
+            search_start = max(0, self.swing_high.bar_index - self.config['internal_length'])
+            search_end = self.swing_high.bar_index + 1
+            
+            search_range = df.iloc[search_start:search_end]
+            up_candles = search_range[search_range['open'] < search_range['close']]
+            
+            if not up_candles.empty:
+                block_candle = up_candles.iloc[-1] # The last up-candle
+                new_block = BreakerMitigationBlock(
+                    high=block_candle['high'],
+                    low=block_candle['low'],
+                    time=block_candle['time'],
+                    bar_index=int(block_candle.name) if isinstance(block_candle.name, (int, float)) else 0,
+                    direction=BEARISH, # A bearish BB/MB acts as resistance
+                    block_type=block_type
+                )
+                self.breaker_mitigation_blocks.append(new_block)
+
+    def _check_bb_mb_mitigation(self, i: int, df: pd.DataFrame):
+        """Checks if a Breaker or Mitigation Block has been mitigated."""
+        for block in self.breaker_mitigation_blocks:
+            if block.mitigated:
+                continue
+            
+            # A bullish block is mitigated if price trades below its low
+            if block.direction == BULLISH and df['low'][i] < block.low:
+                block.mitigated = True
+                
+            # A bearish block is mitigated if price trades above its high
+            if block.direction == BEARISH and df['high'][i] > block.high:
+                block.mitigated = True
 
     def _update_trailing_extremes(self, i: int, df: pd.DataFrame):
         """Updates the highest high and lowest low of the current swing leg."""
