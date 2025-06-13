@@ -15,7 +15,7 @@ OHLCV data to identify various market structures and patterns, including:
 - Premium & Discount Zones
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
