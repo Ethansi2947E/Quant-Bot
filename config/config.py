@@ -43,7 +43,6 @@ TRADING_CONFIG = {
     "max_daily_risk": 0.06,
     "spread_factor": 1.5,
     "allow_position_additions": False,
-    "max_position_size": 2.0,
     "position_addition_threshold": 0.5,
 
     # --- Enhanced Data Management ---
@@ -58,11 +57,7 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        "confluence_price_action",
-        "breakout_reversal",
-        "breakout_trading",
-        "trend_following",
-        "price_action_sr"
+        "smc"
     ],
 }
 

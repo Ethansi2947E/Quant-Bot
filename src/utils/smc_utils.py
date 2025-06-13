@@ -57,6 +57,7 @@ class OrderBlock:
     """Represents an order block."""
     high: float
     low: float
+    open: float
     time: pd.Timestamp
     bar_index: int
     direction: int  # BULLISH or BEARISH
@@ -200,14 +201,29 @@ class SmartMoneyConcepts:
         
         df_copy = df.copy().reset_index()
 
+        # --- FIX for KeyError: 'time' ---
+        # After reset_index(), the timestamp column might be named 'index' instead of 'time'.
+        # We'll rename it here to ensure compatibility.
+        logger.debug(f"DataFrame columns after reset_index: {list(df_copy.columns)}")
+        if 'time' not in df_copy.columns:
+            if 'index' in df_copy.columns:
+                df_copy.rename(columns={'index': 'time'}, inplace=True)
+                logger.debug("Renamed 'index' column to 'time'")
+            else:
+                # If neither 'time' nor 'index' exists, use the first column as time
+                first_col = df_copy.columns[0]
+                df_copy.rename(columns={first_col: 'time'}, inplace=True)
+                logger.debug(f"Renamed '{first_col}' column to 'time'")
+
         # --- 1. Pre-calculate Indicators & Pivots ---
         if self.config['ob_filter_mode'] == 'ATR':
-            df_copy['atr'] = talib.ATR(
-                np.array(df_copy['high']),
-                np.array(df_copy['low']),
-                np.array(df_copy['close']),
-                timeperiod=self.config['atr_period']
-            )
+            if 'atr' not in df_copy.columns:
+                df_copy['atr'] = talib.ATR(
+                    np.array(df_copy['high']),
+                    np.array(df_copy['low']),
+                    np.array(df_copy['close']),
+                    timeperiod=self.config['atr_period']
+                )
             volatility_measure = df_copy['atr']
         else:  # 'RANGE' mode
             true_range_np = talib.TRANGE(
@@ -414,6 +430,7 @@ class SmartMoneyConcepts:
         new_ob = OrderBlock(
             high=ob_candle['high'],
             low=ob_candle['low'],
+            open=ob_candle['open'],
             time=ob_candle['time'],
             bar_index=ob_candle_idx,
             direction=ob_direction,
@@ -441,6 +458,7 @@ class SmartMoneyConcepts:
                 new_ob = OrderBlock(
                     high=ob_candle['high'],
                     low=ob_candle['low'],
+                    open=ob_candle['open'],
                     time=ob_candle['time'],
                     bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
                     direction=ob_direction,
@@ -461,6 +479,7 @@ class SmartMoneyConcepts:
                 new_ob = OrderBlock(
                     high=ob_candle['high'],
                     low=ob_candle['low'],
+                    open=ob_candle['open'],
                     time=ob_candle['time'],
                     bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
                     direction=ob_direction,

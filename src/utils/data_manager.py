@@ -19,7 +19,6 @@ import numpy as np
 from loguru import logger
 import asyncio
 from datetime import datetime
-from src.mt5_handler import MT5Handler
 import copy
 
 class DataManager:
@@ -35,7 +34,7 @@ class DataManager:
     - Validating cached data against real-time MT5 ticks
     """
     
-    def __init__(self, mt5_handler: MT5Handler, config: Dict):
+    def __init__(self, mt5_handler: Any, config: Dict):
         """
         Initialize the DataManager.
         
