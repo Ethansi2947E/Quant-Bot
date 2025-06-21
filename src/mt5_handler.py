@@ -577,6 +577,101 @@ class MT5Handler:
         logger.error("Failed to place order after trying all filling modes and retries")
         return None
 
+    def place_limit_order(
+        self,
+        symbol: str,
+        order_type: str,
+        volume: float,
+        limit_price: float,
+        stop_loss: float,
+        take_profit: float,
+        comment: str = ""
+    ) -> Optional[Dict[str, Any]]:
+        """Place a limit order (BUY_LIMIT or SELL_LIMIT)."""
+        if not self.connected:
+            logger.error("MT5 not connected")
+            return None
+
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Failed to get symbol info for {symbol}")
+            return None
+
+        if not symbol_info.visible:
+            logger.warning(f"{symbol} not visible, trying to add it")
+            if not mt5.symbol_select(symbol, True):
+                logger.error(f"Failed to add {symbol} to MarketWatch")
+                return None
+
+        if order_type == "BUY":
+            action = mt5.ORDER_TYPE_BUY_LIMIT
+        elif order_type == "SELL":
+            action = mt5.ORDER_TYPE_SELL_LIMIT
+        else:
+            logger.error(f"Invalid order type for limit order: {order_type}")
+            return None
+
+        try:
+            digits = int(getattr(symbol_info, "digits", 2))
+            limit_price = round(limit_price, digits)
+            if stop_loss != 0:
+                stop_loss = round(stop_loss, digits)
+            if take_profit != 0:
+                take_profit = round(take_profit, digits)
+            logger.debug(f"Rounded prices to {digits} digits -> Price: {limit_price}, SL: {stop_loss}, TP: {take_profit}")
+        except Exception as e:
+            logger.warning(f"Failed to round prices for {symbol}: {e}")
+
+        adjusted_volume = self._adjust_volume_to_broker_limits(symbol, volume)
+        if adjusted_volume == 0:
+            logger.error(f"Cannot place order: volume is zero after adjustments for {symbol}")
+            return None
+
+        filling_mode = self.get_symbol_filling_mode(symbol)
+
+        if comment is None or not isinstance(comment, str):
+            comment = f"MT5Bot-{symbol}"
+        comment = comment[:31]
+        comment = re.sub(r'[^a-zA-Z0-9_\\-\\.]', '', comment)
+        if not comment:
+            comment = f"MT5Bot{symbol.replace(' ', '')}"
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": adjusted_volume,
+            "type": action,
+            "price": limit_price,
+            "sl": stop_loss if stop_loss != 0 else 0.0,
+            "tp": take_profit if take_profit != 0 else 0.0,
+            "magic": 234000,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling_mode,
+        }
+
+        result = mt5.order_send(request)
+
+        if result is None:
+            error_info = mt5.last_error()
+            logger.error(f"Failed to send limit order: {error_info}")
+            return None
+
+        logger.debug(f"Limit order result: {json.dumps(result._asdict(), default=str)}")
+
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Limit order placed successfully: Ticket {result.order}")
+            return {
+                "ticket": result.order,
+                "volume": result.volume,
+                "price": result.price,
+                "comment": comment
+            }
+        else:
+            error_description = self.get_error_info(result.retcode)
+            logger.error(f"Limit order failed with error code {result.retcode}: {error_description}")
+            return None
+
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Get all open positions."""
         if not self.connected:

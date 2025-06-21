@@ -564,31 +564,21 @@ class SignalProcessor:
                 
     async def execute_trade_from_signal(self, signal, symbol_info=None, is_addition=False):
         """
-        Execute a trade based on a validated signal.
+        Execute a trade based on a validated signal. This can be a market or limit order.
         """
-        # Start timing
         execution_start = time.time()
-        logger.debug(f"[TIMING] 💰 Starting trade execution for {signal['symbol']} at {execution_start}")
-        
-        # Enhanced debugging for position addition logic
         symbol = signal.get('symbol', 'Unknown')
         direction = signal.get('direction', 'Unknown')
-        logger.warning(f"⚠️ TRADE EXECUTION: Symbol={symbol}, Direction={direction}, is_addition={is_addition}")
+        order_type = signal.get('order_type', 'market') # Default to market for backward compatibility
+
+        logger.debug(f"[TIMING] 💰 Starting {order_type.upper()} trade execution for {symbol} at {execution_start}")
+        logger.warning(f"⚠️ {order_type.upper()} EXECUTION: Symbol={symbol}, Direction={direction}, is_addition={is_addition}")
 
         # --- Perform trade validation (calls RiskManager.validate_trade) ---
         account_info_for_validation = self.mt5_handler.get_account_info() if self.mt5_handler else None
         validation_result = self.validate_trade(signal, account_info=account_info_for_validation)
 
-        # --- Add intensive debug log here ---
-        logger.debug(f"[execute_trade_from_signal] Raw validation_result: {validation_result}")
-        is_valid_value = validation_result.get('valid')
-        logger.debug(f"[execute_trade_from_signal] validation_result.get('valid'): {is_valid_value}")
-        logger.debug(f"[execute_trade_from_signal] type of validation_result.get('valid'): {type(is_valid_value)}")
-        if not is_valid_value:
-            logger.debug(f"[execute_trade_from_signal] Traceback if 'valid' is False or None: {traceback.format_exc()}")
-        # --- End intensive debug log ---
-
-        if not is_valid_value:
+        if not validation_result.get('valid'):
             logger.warning(f"Signal for {symbol} {direction} failed validation: {validation_result.get('reason')}")
             return {
                 'status': 'error',
@@ -605,262 +595,117 @@ class SignalProcessor:
                 'code': 'INVALID_SIZE_POST_VALIDATION'
             }
         logger.info(f"Using position size {position_size} for {symbol} {direction} from validation result.")
-        # --- End of critical position size handling ---
-        
-        # Get existing positions for this symbol
-        all_positions = self.mt5_handler.get_open_positions() if self.mt5_handler else []
-        symbol_positions = [p for p in all_positions if p.get("symbol") == symbol]
-        same_direction_positions = [p for p in symbol_positions if 
-                                  (p.get("type") == 0 and (direction or "").lower() == "buy") or 
-                                  (p.get("type") == 1 and (direction or "").lower() == "sell")]
-        
-        # Log existing positions information
-        logger.warning(f"⚠️ TRADE EXECUTION: Found {len(all_positions)} total positions")
-        logger.warning(f"⚠️ TRADE EXECUTION: Found {len(symbol_positions)} positions for {symbol}")
-        logger.warning(f"⚠️ TRADE EXECUTION: Found {len(same_direction_positions)} positions in same direction")
-        
-        # List position tickets
-        if same_direction_positions:
-            tickets = [p.get("ticket", "unknown") for p in same_direction_positions]
-            logger.warning(f"⚠️ TRADE EXECUTION: Existing position tickets in same direction: {tickets}")
-        
-        # CRITICAL FIX: If this is an addition, always re-check the setting
-        if is_addition:
-            from config.config import TRADING_CONFIG
-            self.allow_position_additions = TRADING_CONFIG.get("allow_position_additions", False)
-            
-            # Log if this is a position addition
-            logger.warning(f"⚠️ POSITION ADDITION CHECK: Requested for {symbol} {direction} (allow_position_additions={self.allow_position_additions})")
-            
-            # Check if there really are positions in the same direction 
-            # This provides an extra safety check
-            if not same_direction_positions:
-                logger.warning(f"⚠️ INCONSISTENCY DETECTED: Marked as addition but no existing positions found in same direction")
-            
-            # Safety check: verify allow_position_additions one more time
-            if not self.allow_position_additions:
-                logger.warning(f"❌ POSITION ADDITION BLOCKED: Attempt when additions are disabled! Skipping execution for {symbol}")
-                return {
-                    'status': 'error',
-                    'message': 'Position additions are disabled in settings',
-                    'code': 'ADDITIONS_DISABLED'
-                }
-        else:
-            # Not marked as an addition, but check if it should be
-            if same_direction_positions:
-                logger.warning(f"⚠️ POTENTIAL ISSUE: Trade not marked as addition but {len(same_direction_positions)} positions exist in same direction")
-                # FINAL FAILSAFE: If additions are disabled, block this trade
-                if not self.allow_position_additions:
-                    logger.warning(f"🚫 ADDITION FAILSAFE TRIGGERED: Blocking trade for {symbol} {direction} as it would create an additional position")
+
+        # For market orders, we must ensure we aren't creating unwanted additional positions
+        if order_type == 'market':
+            all_positions = self.mt5_handler.get_open_positions() if self.mt5_handler else []
+            symbol_positions = [p for p in all_positions if p.get("symbol") == symbol]
+            same_direction_positions = [p for p in symbol_positions if
+                                      (p.get("type") == 0 and (direction or "").lower() == "buy") or
+                                      (p.get("type") == 1 and (direction or "").lower() == "sell")]
+
+            if same_direction_positions and not is_addition:
+                 if not self.allow_position_additions:
+                    logger.warning(f"🚫 ADDITION FAILSAFE TRIGGERED: Blocking market order for {symbol} {direction} as it would create an additional position")
                     return {
                         'status': 'error',
                         'message': 'Blocked unmarked position addition - positions exist but additions disabled',
                         'code': 'UNMARKED_ADDITION_BLOCKED'
                     }
-        
+
         try:
-            # Basic parameter validation
-            if 'symbol' not in signal or 'direction' not in signal:
-                logger.error(f"Invalid signal format: {signal}")
-                return {
-                    'status': 'error',
-                    'message': 'Invalid signal format'
-                }
-            param_validation_time = time.time() - execution_start
-            logger.debug(f"[TIMING] 💰 Basic parameter validation took {param_validation_time:.4f}s")
-            
-            # Check MT5 connection
             if not self.mt5_handler.is_connected():
                 logger.error("MT5 not connected for trade execution")
-                return {
-                    'status': 'error',
-                    'message': 'MT5 not connected'
-                }
-            logger.debug("MT5 connection is active")
-            connection_check_time = time.time() - execution_start - param_validation_time
-            logger.debug(f"[TIMING] 💰 MT5 connection check took {connection_check_time:.4f}s")
-            
-            # Get symbol information
-            symbol = signal.get('symbol')
-            direction = signal.get('direction')
+                return {'status': 'error', 'message': 'MT5 not connected'}
 
-            # Check if we're using fixed lot size from config
-            from config.config import TRADING_CONFIG
-            use_fixed_lot_size = TRADING_CONFIG.get('use_fixed_lot_size', False)
-            fixed_lot_size = TRADING_CONFIG.get('fixed_lot_size', 0.01)
-            
-            # Only retrieve account info if not using fixed lot size
-            account_info = None
-            account_info_time = 0
-            
-            if use_fixed_lot_size:
-                logger.info(f"Using fixed lot size of {fixed_lot_size} from config (bypassing account info check)")
-            else:
-                # Attempt to get account info (with retries)
-                account_info_start = time.time()
-                max_attempts = 3
-                attempt = 1
-                
-                while attempt <= max_attempts:
-                    logger.debug(f"Attempting to retrieve account info (attempt {attempt}/{max_attempts})")
-                    account_info = self.mt5_handler.get_account_info()
-                    
-                    # Check if account info is valid
-                    if account_info and isinstance(account_info, dict) and 'balance' in account_info:
-                        break
-                    
-                    logger.warning(f"Retrieved invalid account info on attempt {attempt}, retrying...")
-                    
-                    # If this is not the last attempt, reinitialize MT5 connection
-                    if attempt < max_attempts:
-                        logger.info(f"Reinitializing MT5 connection before account info retry #{attempt+1}...")
-                        self.mt5_handler.initialize()
-                        await asyncio.sleep(attempt * 2)  # Exponential backoff
-                    
-                    attempt += 1
-                
-                account_info_time = time.time() - account_info_start
-                logger.debug(f"[TIMING] 💰 Account info retrieval took {account_info_time:.4f}s")
-                
-                if not account_info or 'balance' not in account_info:
-                    logger.error("Could not retrieve valid account info for position sizing after multiple attempts")
-                    # Only return error if fixed lot size is not being used
-                    return {
-                        'status': 'error',
-                        'message': 'Could not retrieve account info, MT5 connection issues',
-                        'code': 'Unknown code'
-                    }
-
-            # Continue with the rest of the method...
-            # Extract signal parameters
+            # --- Extract signal parameters ---
             entry_price = signal.get('entry_price', 0)
             stop_loss = signal.get('stop_loss', 0)
             take_profit = signal.get('take_profit', 0)
-            
-            # Default to current market price if no entry price specified
-            if entry_price == 0:
-                current_tick = self.mt5_handler.get_last_tick(symbol)
-                if current_tick:
-                    entry_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
-                    
-            # Get current market price for price deviation check
-            current_tick = self.mt5_handler.get_last_tick(symbol)
-            if current_tick:
-                current_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
-                # Check for significant price deviation (> 0.5%)
-                original_entry = signal.get('entry_price', 0)
-                if original_entry > 0 and abs(current_price - original_entry) / original_entry > 0.005:
-                    # Recalculate TP and SL based on current price
-                    signal = self._recalculate_tp_sl_for_price_deviation(signal, current_price)
-                    # Update local variables with new values
-                    entry_price = signal.get('entry_price', entry_price)
-                    stop_loss = signal.get('stop_loss', stop_loss)
-                    take_profit = signal.get('take_profit', take_profit)
-            
-            # OLD POSITION SIZING LOGIC IS REMOVED BELOW. position_size is now taken from validation_result
-            # # Get position size (from signal or calculate) 
-            # position_size = signal.get(\'position_size\', 0)
-            # 
-            # # If no position size in signal, calculate based on risk parameters
-            # if position_size <= 0:
-            #     if use_fixed_lot_size:
-            #         # ... (removed code for fixed lot size calculation) ...
-            #     else:
-            #         # ... (removed code for risk-based calculation) ...
-            #         logger.info(f"Calculated risk-based position size: {position_size} lots")
-            
-            # Ensure position size meets symbol's minimum requirements (still useful as a final check)
-            if self.mt5_handler: 
-                min_lot_size = self.mt5_handler.get_symbol_min_lot_size(symbol)
-                if position_size < min_lot_size:
-                    logger.warning(f"Validated position size {position_size} is below symbol minimum {min_lot_size} for {symbol}. Adjusting to min_lot_size.")
-                    position_size = min_lot_size
-            
-                # Normalize volume according to symbol's volume_step (still useful as a final check)
+            comment = signal.get('reason') or signal.get('description') or f"{signal.get('strategy_name', 'BOT')} trade"
+
+            # --- Final normalization of position size ---
+            if self.mt5_handler:
                 position_size = self.mt5_handler.normalize_volume(symbol, position_size)
                 logger.info(f"Final normalized position size for {symbol}: {position_size} lots (after validation and final checks).")
+            
+            # --- ROUTE TO CORRECT ORDER FUNCTION ---
+            order_result = None
+            if order_type == 'limit':
+                logger.info(f"Placing LIMIT order for {symbol}...")
+                order_result = self.mt5_handler.place_limit_order(
+                    symbol=symbol,
+                    order_type=(direction or "").upper(),
+                    volume=position_size,
+                    limit_price=entry_price, # For a limit order, this is the target price
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    comment=comment
+                )
+            elif order_type == 'market':
+                logger.info(f"Placing MARKET order for {symbol}...")
+                # For market orders, if the price has deviated significantly, we might want to recalculate SL/TP
+                current_tick = self.mt5_handler.get_last_tick(symbol)
+                if current_tick:
+                    current_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
+                    original_entry = signal.get('entry_price', 0)
+                    if original_entry > 0 and abs(current_price - original_entry) / original_entry > 0.005:
+                        signal = self._recalculate_tp_sl_for_price_deviation(signal, current_price)
+                        entry_price = signal.get('entry_price', entry_price)
+                        stop_loss = signal.get('stop_loss', stop_loss)
+                        take_profit = signal.get('take_profit', take_profit)
+
+                order_result = self.mt5_handler.place_market_order(
+                    symbol=symbol,
+                    order_type=(direction or "").upper(),
+                    volume=position_size,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    comment=comment
+                )
             else:
-                logger.warning("MT5 Handler not available for final min_lot and normalization checks.")
-            
-            # Execute the trade
-            trade_params = {
-                'symbol': symbol,
-                'volume': position_size,
-                'price': entry_price,
-                'sl': stop_loss,
-                'tp': take_profit,
-                'type': (direction or "").upper(),
-                'comment': signal.get('reason', 'Signal trade'),
-                'position_id': signal.get('position_id', 0),  # For position modifications
-                'is_addition': is_addition
-            }
-            
-            # Add the validated signal to processed signals to prevent duplicates
-            self._add_processed_signal(signal)
-            
-            # MT5Handler doesn't have place_order but has place_market_order
-            order_result = self.mt5_handler.place_market_order(
-                symbol=symbol,
-                order_type=(direction or "").upper(),
-                volume=position_size,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                comment=signal.get('reason', 'Signal trade')
-            )
-            
-            # Log execution time
+                logger.error(f"Unsupported order type: {order_type}")
+                return {'status': 'error', 'message': f"Unsupported order type: {order_type}"}
+
             execution_time = time.time() - execution_start
             logger.debug(f"[TIMING] 💰 Total trade execution took {execution_time:.4f}s")
-            
+
             if order_result:
-                # Success
-                logger.info(f"✅ Trade executed: {symbol} {(direction or "")} {position_size} lots")
-                # --- RiskManager state update: trade opened ---
+                logger.info(f"✅ {order_type.upper()} order processed successfully: {symbol} {(direction or '')} {position_size} lots")
                 if self.risk_manager:
                     self.risk_manager.on_trade_opened(signal)
                 
-                # Build comprehensive notification
                 trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, take_profit, position_size)
                 
-                # Send notification
-                await self.telegram_bot.send_message(f"✅ Trade Executed\n\n{trade_details}")
+                await self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
                 
                 return {
                     'status': 'success',
                     'order': order_result.get('ticket', 0),
-                    'message': 'Trade executed successfully',
+                    'message': f'{order_type.capitalize()} order placed successfully',
                     'time_taken': execution_time
                 }
             else:
-                # Failed
-                error_message = 'Failed to place order'
-                error_code = 'MT5 Error'
-                
-                logger.error(f"❌ Trade execution failed: {error_message} ({error_code})")
-                
-                # Send alert if configured
+                error_message = f'Failed to place {order_type} order'
+                logger.error(f"❌ {order_type.upper()} execution failed: {error_message}")
                 if self.telegram_bot:
                     await self.telegram_bot.send_message(
-                        f"❌ Trade Execution Failed\n\n"
+                        f"❌ {order_type.upper()} Execution Failed\n\n"
                         f"Symbol: {symbol}\n"
-                        f"Direction: {(direction or "").upper()}\n"
-                        f"Error: {error_message}\n"
-                        f"Code: {error_code}"
+                        f"Direction: {(direction or '').upper()}\n"
+                        f"Error: {error_message}"
                     )
-                
                 return {
                     'status': 'error',
                     'message': error_message,
-                    'code': error_code,
+                    'code': 'MT5_EXECUTION_ERROR',
                     'time_taken': execution_time
                 }
                 
         except Exception as e:
-            logger.error(f"Exception during trade execution: {str(e)}")
+            logger.error(f"Exception during {order_type} trade execution: {str(e)}")
             logger.error(traceback.format_exc())
-            
             execution_time = time.time() - execution_start
-            
             return {
                 'status': 'error',
                 'message': str(e),
@@ -941,7 +786,7 @@ class SignalProcessor:
             # return await self.execute_trade_from_signal(signal)
             return {"success": False, "error": "Preventing position in both directions"}
             
-    async def _notify_trade_action(self, message: str) -> None:
+    async def notify_trade_action(self, message: str) -> None:
         """
         Send notification about a trade action.
         

@@ -487,7 +487,7 @@ class TradingBot:
             
             # Send notification directly through signal processor instead of using the wrapper method
             if self.signal_processor:
-                await self.signal_processor._notify_trade_action(startup_message)
+                await self.signal_processor.notify_trade_action(startup_message)
             self.startup_notification_sent = True
             
             # Add log to confirm config order and which strategy will be used as primary

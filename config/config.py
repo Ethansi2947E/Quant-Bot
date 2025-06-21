@@ -99,7 +99,7 @@ TRADE_EXIT_CONFIG = {
         {'ratio': 1.5, 'size': 0.3}
     ],
     'trailing_stop': {
-        'enabled': True, # General enable/disable for trailing stops
+        'enabled': False, # General enable/disable for trailing stops
         # --- Instrument Category Rules (processed in order, first match wins) ---
         'instrument_category_rules': [
             # Specific Symbols (highest priority)

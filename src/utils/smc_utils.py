@@ -16,7 +16,7 @@ OHLCV data to identify various market structures and patterns, including:
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 from loguru import logger
@@ -51,6 +51,7 @@ class Structure:
     break_time: pd.Timestamp
     type: str  # 'BOS' or 'CHoCH'
     direction: int  # BULLISH or BEARISH
+    originating_ob: Optional['OrderBlock'] = None
     
 @dataclass
 class OrderBlock:
@@ -129,7 +130,7 @@ class SmartMoneyConcepts:
     A utility class to detect Smart Money Concepts from OHLCV data.
     """
 
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initializes the SmartMoneyConcepts utility.
 
@@ -140,6 +141,7 @@ class SmartMoneyConcepts:
         if config:
             self.config.update(config)
         
+        self.df: pd.DataFrame = pd.DataFrame()
         self._reset_state()
 
     def _get_default_config(self) -> Dict:
@@ -155,6 +157,12 @@ class SmartMoneyConcepts:
             "atr_period": 200,
             "internal_filter_confluence": False,
             "decisional_ob_search_length": 10,
+            # --- NEW: Result Count Configuration ---
+            "swing_ob_count": 2,
+            "internal_ob_count": 2,
+            "fvg_count": 3,
+            "liquidity_count": 2,
+            "bb_mb_count": 2
         }
 
     def _reset_state(self):
@@ -257,11 +265,6 @@ class SmartMoneyConcepts:
             self._update_trailing_extremes(i, df_copy)
             self._find_fair_value_gaps(i, df_copy, volatility_measure)
 
-        logger.info(f"SMC analysis completed. Found {len(self.structures)} structures, "
-                    f"{len(self.swing_order_blocks) + len(self.internal_order_blocks)} OBs, "
-                    f"{len(self.fair_value_gaps)} FVGs, "
-                    f"{len(self.equal_highs_lows)} EQH/EQL, {len(self.liquidity_pools)} liquidity pools.")
-        
         # --- 3. Finalize results ---
         zones = self._get_premium_discount_zones()
         strong_weak_pivots = self._get_strong_weak_highs_lows()
@@ -273,14 +276,32 @@ class SmartMoneyConcepts:
         unmitigated_liquidity = [pool for pool in self.liquidity_pools if not pool.mitigated]
         unmitigated_bb_mb = [b for b in self.breaker_mitigation_blocks if not b.mitigated]
 
+        # --- NEW: Default Filtering Logic ---
+        # Sort each list by bar_index in descending order (most recent first)
+        unmitigated_swing_obs.sort(key=lambda x: x.bar_index, reverse=True)
+        unmitigated_internal_obs.sort(key=lambda x: x.bar_index, reverse=True)
+        unmitigated_fvgs.sort(key=lambda x: x.bar_index, reverse=True)
+        unmitigated_liquidity.sort(key=lambda x: x.bar_index, reverse=True)
+        unmitigated_bb_mb.sort(key=lambda x: x.bar_index, reverse=True)
+        
+        # Slice the lists to keep only the N most recent items
+        swing_obs_to_keep = unmitigated_swing_obs[:self.config['swing_ob_count']]
+        internal_obs_to_keep = unmitigated_internal_obs[:self.config['internal_ob_count']]
+        fvgs_to_keep = unmitigated_fvgs[:self.config['fvg_count']]
+        liquidity_to_keep = unmitigated_liquidity[:self.config['liquidity_count']]
+        bb_mb_to_keep = unmitigated_bb_mb[:self.config['bb_mb_count']]
+
+        logger.info(f"SMC analysis completed. Returning {len(swing_obs_to_keep) + len(internal_obs_to_keep)} OBs, "
+                    f"{len(fvgs_to_keep)} FVGs, {len(liquidity_to_keep)} liquidity pools.")
+
         analysis_result = {
             "structures": self.structures,
-            "swing_order_blocks": unmitigated_swing_obs,
-            "internal_order_blocks": unmitigated_internal_obs,
-            "fair_value_gaps": unmitigated_fvgs,
+            "swing_order_blocks": swing_obs_to_keep,
+            "internal_order_blocks": internal_obs_to_keep,
+            "fair_value_gaps": fvgs_to_keep,
             "equal_highs_lows": self.equal_highs_lows,
-            "liquidity_pools": unmitigated_liquidity,
-            "breaker_mitigation_blocks": unmitigated_bb_mb,
+            "liquidity_pools": liquidity_to_keep,
+            "breaker_mitigation_blocks": bb_mb_to_keep,
             "premium_discount_zones": zones,
             "strong_weak_highs_lows": strong_weak_pivots
         }
@@ -372,59 +393,91 @@ class SmartMoneyConcepts:
         if i == 0: return # Need previous bar for crossover check
         
         close = df['close'][i]
-        prev_close = df['close'][i-1]
         
         # Swing Structure (check for body close above/below)
         if self.swing_high.price > 0 and not self.swing_high.crossed and close > self.swing_high.price:
             structure_type = 'CHoCH' if self.swing_trend == BEARISH else 'BOS'
-            self.structures.append(Structure(self.swing_high, i, df['time'][i], structure_type, BULLISH))
+            new_structure = Structure(
+                pivot=self.swing_high,
+                break_bar_index=i,
+                break_time=df['time'][i],
+                type=structure_type,
+                direction=BULLISH
+            )
+            # Find the OB and assign it directly
+            origin_ob = self._find_and_store_order_block_for_leg(new_structure, df, is_swing=True)
+            new_structure.originating_ob = origin_ob
+            self.structures.append(new_structure)
+
             self.swing_high.crossed = True
             self.swing_trend = BULLISH
-            self._store_extreme_order_block(self.swing_high, i, df, is_swing=True, direction=BULLISH)
-            self._store_decisional_order_block(self.swing_high, i, df, is_swing=True, direction=BULLISH)
             self._store_breaker_or_mitigation_block(df, BULLISH)
 
         if self.swing_low.price > 0 and not self.swing_low.crossed and close < self.swing_low.price:
             structure_type = 'CHoCH' if self.swing_trend == BULLISH else 'BOS'
-            self.structures.append(Structure(self.swing_low, i, df['time'][i], structure_type, BEARISH))
+            new_structure = Structure(
+                pivot=self.swing_low,
+                break_bar_index=i,
+                break_time=df['time'][i],
+                type=structure_type,
+                direction=BEARISH
+            )
+            origin_ob = self._find_and_store_order_block_for_leg(new_structure, df, is_swing=True)
+            new_structure.originating_ob = origin_ob
+            self.structures.append(new_structure)
+
             self.swing_low.crossed = True
             self.swing_trend = BEARISH
-            self._store_extreme_order_block(self.swing_low, i, df, is_swing=True, direction=BEARISH)
-            self._store_decisional_order_block(self.swing_low, i, df, is_swing=True, direction=BEARISH)
             self._store_breaker_or_mitigation_block(df, BEARISH)
 
         # Internal Structure (check for body close above/below)
         if self.internal_high.price > 0 and not self.internal_high.crossed and close > self.internal_high.price:
             structure_type = 'CHoCH' if self.internal_trend == BEARISH else 'BOS'
-            self.structures.append(Structure(self.internal_high, i, df['time'][i], structure_type, BULLISH))
+            new_structure = Structure(
+                pivot=self.internal_high,
+                break_bar_index=i,
+                break_time=df['time'][i],
+                type=structure_type,
+                direction=BULLISH
+            )
+            origin_ob = self._find_and_store_order_block_for_leg(new_structure, df, is_swing=False)
+            new_structure.originating_ob = origin_ob
+            self.structures.append(new_structure)
+
             self.internal_high.crossed = True
             self.internal_trend = BULLISH
-            self._store_extreme_order_block(self.internal_high, i, df, is_swing=False, direction=BULLISH)
-            self._store_decisional_order_block(self.internal_high, i, df, is_swing=False, direction=BULLISH)
             
         if self.internal_low.price > 0 and not self.internal_low.crossed and close < self.internal_low.price:
             structure_type = 'CHoCH' if self.internal_trend == BULLISH else 'BOS'
-            self.structures.append(Structure(self.internal_low, i, df['time'][i], structure_type, BEARISH))
+            new_structure = Structure(
+                pivot=self.internal_low,
+                break_bar_index=i,
+                break_time=df['time'][i],
+                type=structure_type,
+                direction=BEARISH
+            )
+            origin_ob = self._find_and_store_order_block_for_leg(new_structure, df, is_swing=False)
+            new_structure.originating_ob = origin_ob
+            self.structures.append(new_structure)
+
             self.internal_low.crossed = True
             self.internal_trend = BEARISH
-            self._store_extreme_order_block(self.internal_low, i, df, is_swing=False, direction=BEARISH)
-            self._store_decisional_order_block(self.internal_low, i, df, is_swing=False, direction=BEARISH)
 
-    def _store_extreme_order_block(self, pivot: Pivot, break_index: int, df: pd.DataFrame, is_swing: bool, direction: int):
-        """Finds and stores an Extreme Order Block after a structure break."""
+    def _find_and_store_order_block_for_leg(self, structure: Structure, df: pd.DataFrame, is_swing: bool) -> Optional[OrderBlock]:
+        """Finds the extreme order block for a given leg, stores it, and returns it."""
         
-        # Define the search range from the pivot to the break
-        search_range = df.iloc[pivot.bar_index : break_index + 1]
+        # Search range from the start of the leg to the break
+        search_range = df.iloc[structure.pivot.bar_index : structure.break_bar_index + 1]
         
-        if direction == BULLISH: # Bullish break, look for bearish OB
-            # Find the highest high candle in the leg before the break
-            ob_candle_idx = int(search_range['parsed_high'].idxmax())
+        if structure.direction == BULLISH: # Bullish break, look for bearish OB
+            # We want the lowest point of the leg that started the move
+            ob_candle_idx = int(search_range['low'].idxmin())
             ob_direction = BEARISH
         else: # Bearish break, look for bullish OB
-            # Find the lowest low candle in the leg before the break
-            ob_candle_idx = int(search_range['parsed_low'].idxmin())
+            # We want the highest point of the leg that started the move
+            ob_candle_idx = int(search_range['high'].idxmax())
             ob_direction = BULLISH
-            
+
         ob_candle = df.iloc[ob_candle_idx]
         
         new_ob = OrderBlock(
@@ -435,61 +488,15 @@ class SmartMoneyConcepts:
             bar_index=ob_candle_idx,
             direction=ob_direction,
             is_swing=is_swing,
-            ob_type='Extreme'
+            ob_type='Extreme' # We can simplify to just find the extreme for now
         )
         
         if is_swing:
             self.swing_order_blocks.append(new_ob)
         else:
             self.internal_order_blocks.append(new_ob)
-
-    def _store_decisional_order_block(self, break_pivot: Pivot, break_index: int, df: pd.DataFrame, is_swing: bool, direction: int):
-        """Finds and stores a Decisional Order Block."""
-        search_range_length = self.config.get('decisional_ob_search_length', 10)
-        search_start = max(0, break_index - search_range_length)
-        search_range = df.iloc[search_start:break_index]
-
-        if direction == BULLISH:  # Bullish break, look for the last BEARISH candle
-            opposing_candles = search_range[search_range['open'] > search_range['close']]
-            if not opposing_candles.empty:
-                ob_candle = opposing_candles.iloc[-1]
-                ob_direction = BEARISH
-
-                new_ob = OrderBlock(
-                    high=ob_candle['high'],
-                    low=ob_candle['low'],
-                    open=ob_candle['open'],
-                    time=ob_candle['time'],
-                    bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
-                    direction=ob_direction,
-                    is_swing=is_swing,
-                    ob_type='Decisional'
-                )
-                if is_swing:
-                    self.swing_order_blocks.append(new_ob)
-                else:
-                    self.internal_order_blocks.append(new_ob)
-
-        elif direction == BEARISH:  # Bearish break, look for the last BULLISH candle
-            opposing_candles = search_range[search_range['open'] < search_range['close']]
-            if not opposing_candles.empty:
-                ob_candle = opposing_candles.iloc[-1]
-                ob_direction = BULLISH
-
-                new_ob = OrderBlock(
-                    high=ob_candle['high'],
-                    low=ob_candle['low'],
-                    open=ob_candle['open'],
-                    time=ob_candle['time'],
-                    bar_index=int(ob_candle.name) if isinstance(ob_candle.name, (int, float)) else 0,
-                    direction=ob_direction,
-                    is_swing=is_swing,
-                    ob_type='Decisional'
-                )
-                if is_swing:
-                    self.swing_order_blocks.append(new_ob)
-                else:
-                    self.internal_order_blocks.append(new_ob)
+            
+        return new_ob
 
     def _check_ob_mitigation(self, i: int, df: pd.DataFrame):
         """Checks and flags mitigated order blocks."""
