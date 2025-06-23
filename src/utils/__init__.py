@@ -18,4 +18,3 @@ __all__ = [
 
 # Import only what doesn't cause circular imports
 from .market_utils import calculate_pip_value, convert_pips_to_price, convert_price_to_pips
-from .smc_utils import SmartMoneyConcepts 

@@ -1287,18 +1287,17 @@ class TradingBot:
     def _load_available_signal_generators(self):
         """
         Dynamically load and register all available signal generators from the src/strategy directory.
-        Strategies are identified by filenames ending in '_strategy.py'.
-        The key for the strategy is derived from its filename.
+        The key for the strategy is the class name itself.
         """
         self.available_signal_generators = {}
         strategy_dir = BASE_DIR / "src" / "strategy"
         logger.info(f"[LOAD_STRAT] Scanning for strategies in: {strategy_dir}")
 
-        for file_path in strategy_dir.glob("*_strategy.py"):
-            module_name = file_path.stem  # e.g., 'confluence_price_action_strategy'
-            # The key used in config.py is the filename without '_strategy.py'
-            strategy_key = module_name.replace('_strategy', '') # e.g., 'confluence_price_action'
-            
+        for file_path in strategy_dir.glob("*.py"):
+            if file_path.name == "__init__.py":
+                continue
+
+            module_name = file_path.stem
             try:
                 # Dynamically import the module
                 module_spec = importlib.util.spec_from_file_location(f"src.strategy.{module_name}", file_path)
@@ -1306,13 +1305,13 @@ class TradingBot:
                     module = importlib.util.module_from_spec(module_spec)
                     module_spec.loader.exec_module(module)
 
-                    # Find the class that inherits from SignalGenerator
+                    # Find all classes that inherit from SignalGenerator
                     for name, obj in inspect.getmembers(module, inspect.isclass):
                         if issubclass(obj, SignalGenerator) and obj is not SignalGenerator:
+                            # Use the class name as the key
+                            strategy_key = name
                             self.available_signal_generators[strategy_key] = obj
                             logger.info(f"[LOAD_STRAT] Successfully loaded strategy '{strategy_key}' -> class '{name}'")
-                            # Stop after finding the first strategy class in the file
-                            break 
                 else:
                     logger.warning(f"[LOAD_STRAT] Could not create module spec for {file_path}")
 
