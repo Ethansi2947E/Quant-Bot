@@ -19,23 +19,29 @@ MT5_CONFIG = {
 # ================= Trading Configuration =================
 TRADING_CONFIG = {
     "symbols": [
-        "Volatility 10 Index",
-        "Crash 500 Index",
-        "Crash 1000 Index",
-        "Boom 300 Index",
-        "XAUUSD",
+        # "Volatility 10 Index",
+        # "Crash 500 Index",
+        # "Crash 1000 Index",
+        # "Boom 300 Index",
+        # "XAUUSD",
         "BTCUSD",
-        "Boom 1000 Index",
-        "Jump 50 Index",
-        "Jump 75 Index",
-        "Step Index",
-        "Range Break 200 Index",
-        "GBPUSD",
-        "EURUSD",
-        "USDJPY",
-        "USDCAD",
-        "AUDUSD",
-        "NZDUSD",
+        "ETHUSD",
+        "XRPUSD",
+        "SOLUSD",
+        "DOGUSD",
+        "ADAUSD",
+        "DOTUSD",
+        # "Boom 1000 Index",
+        # "Jump 50 Index",
+        # "Jump 75 Index",
+        # "Step Index",
+        # "Range Break 200 Index",
+        # "GBPUSD",
+        # "EURUSD",
+        # "USDJPY",
+        # "USDCAD",
+        # "AUDUSD",
+        # "NZDUSD",
     ],
     "fixed_lot_size": 1.0,
     "use_fixed_lot_size": False,
@@ -57,7 +63,8 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        "LuxAlgoPremiumStrategy"
+        #"LuxAlgoPremiumStrategy",
+        "LuxAlgoPremiumStrategy2"
     ],
 }
 
