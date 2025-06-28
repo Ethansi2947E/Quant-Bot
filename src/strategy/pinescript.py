@@ -35,6 +35,10 @@ class PremiumLuxAlgo:
         """Calculate SMA"""
         return series.rolling(window=period).mean()
     
+    def rma(self, series: pd.Series, period: int) -> pd.Series:
+        """Calculate RMA (Wilder's Moving Average)"""
+        return series.ewm(alpha=1/period, adjust=False).mean()
+    
     def atr(self, period: int) -> pd.Series:
         """Calculate ATR"""
         high = self.data['high']
@@ -45,55 +49,66 @@ class PremiumLuxAlgo:
         tr2 = np.abs(high - close.shift(1))
         tr3 = np.abs(low - close.shift(1))
         
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr_series = pd.Series(tr, index=self.data.index).fillna(0)
-        return tr_series.ewm(alpha=1/period, adjust=False).mean()
+        tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+        return self.rma(tr, period) # PineScript's ta.atr uses RMA
     
     def supertrend(self, factor: float = 5.5, atr_period: int = 11) -> Tuple[pd.Series, pd.Series]:
-        """Calculate Supertrend"""
+        """
+        Calculates Supertrend, ported from the stateful PineScript logic.
+        """
         close = self.data['close']
+        high = self.data['high']
+        low = self.data['low']
         atr = self.atr(atr_period)
+
+        # PineScript's direction logic is a bit unusual.
+        # We'll use 1 for uptrend and -1 for downtrend.
+        direction = pd.Series(1, index=close.index) 
+        supertrend = pd.Series(np.nan, index=close.index)
         
-        # Calculate basic upper and lower bands
-        upper_band = close + (factor * atr)
-        lower_band = close - (factor * atr)
+        # Initial ATR value is needed for the first calculation
+        first_valid_atr_index = atr.first_valid_index()
+        if first_valid_atr_index is None:
+            return supertrend, direction # Not enough data
         
-        # Initialize arrays
-        final_upper = pd.Series(index=close.index, dtype=float)
-        final_lower = pd.Series(index=close.index, dtype=float)
-        supertrend = pd.Series(index=close.index, dtype=float)
-        direction = pd.Series(index=close.index, dtype=int)
-        
-        for i in range(len(close)):
+        # Robustly get the integer position for the first valid ATR value.
+        first_valid_loc = int(np.atleast_1d(atr.index.searchsorted(first_valid_atr_index))[0])
+
+        # Vectorized calculation of upper/lower bands
+        upper_band = high + factor * atr
+        lower_band = low - factor * atr
+
+        # Start the stateful calculation loop
+        for i in range(first_valid_loc, len(close)):
+            # On the first bar, we can't look back. Initialize based on close vs upper band.
             if i == 0:
-                final_upper.iloc[i] = upper_band.iloc[i]
-                final_lower.iloc[i] = lower_band.iloc[i]
-                direction.iloc[i] = 1
-            else:
-                # Final upper band
-                if upper_band.iloc[i] < final_upper.iloc[i-1] or close.iloc[i-1] > final_upper.iloc[i-1]:
-                    final_upper.iloc[i] = upper_band.iloc[i]
-                else:
-                    final_upper.iloc[i] = final_upper.iloc[i-1]
-                
-                # Final lower band
-                if lower_band.iloc[i] > final_lower.iloc[i-1] or close.iloc[i-1] < final_lower.iloc[i-1]:
-                    final_lower.iloc[i] = lower_band.iloc[i]
-                else:
-                    final_lower.iloc[i] = final_lower.iloc[i-1]
-                
-                # Direction
-                if direction.iloc[i-1] == -1 and close.iloc[i] > final_lower.iloc[i]:
+                if close.iloc[i] > upper_band.iloc[i]:
                     direction.iloc[i] = 1
-                elif direction.iloc[i-1] == 1 and close.iloc[i] < final_upper.iloc[i]:
-                    direction.iloc[i] = -1
                 else:
-                    direction.iloc[i] = direction.iloc[i-1]
-        
-        # Supertrend line
-        supertrend = np.where(direction == 1, final_lower, final_upper)
-        
-        return pd.Series(supertrend, index=close.index), pd.Series(direction, index=close.index)
+                    direction.iloc[i] = -1
+                continue
+
+            # Carry over the previous direction
+            direction.iloc[i] = direction.iloc[i-1]
+
+            # Determine the previous supertrend value to compare against
+            prev_supertrend = supertrend.iloc[i-1]
+
+            # Main state logic from PineScript
+            if direction.iloc[i-1] == 1: # Previous was an uptrend
+                if close.iloc[i] < prev_supertrend:
+                    direction.iloc[i] = -1 # Flip to downtrend
+            else: # Previous was a downtrend
+                if close.iloc[i] > prev_supertrend:
+                    direction.iloc[i] = 1 # Flip to uptrend
+
+            # Update the supertrend value for the current bar
+            if direction.iloc[i] == 1:
+                supertrend.iloc[i] = max(lower_band.iloc[i], supertrend.iloc[i-1]) if not pd.isna(supertrend.iloc[i-1]) else lower_band.iloc[i]
+            else:
+                supertrend.iloc[i] = min(upper_band.iloc[i], supertrend.iloc[i-1]) if not pd.isna(supertrend.iloc[i-1]) else upper_band.iloc[i]
+                
+        return supertrend, direction
     
     def calculate_tp_points(self, maj_qual: int = 13, maj_len: int = 40, 
                            min_qual: int = 5, min_len: int = 5) -> Tuple[pd.Series, pd.Series]:
@@ -109,23 +124,14 @@ class PremiumLuxAlgo:
             ret = pd.Series(0, index=close.index)
             
             for i in range(4, len(close)):
-                if close.iloc[i] > close.iloc[i-4]:
-                    bindex.iloc[i] = bindex.iloc[i-1] + 1
-                else:
-                    bindex.iloc[i] = bindex.iloc[i-1]
+                bindex.iloc[i] = bindex.iloc[i-1] + 1 if close.iloc[i] > close.iloc[i-4] else bindex.iloc[i-1]
+                sindex.iloc[i] = sindex.iloc[i-1] + 1 if close.iloc[i] < close.iloc[i-4] else sindex.iloc[i-1]
                 
-                if close.iloc[i] < close.iloc[i-4]:
-                    sindex.iloc[i] = sindex.iloc[i-1] + 1
-                else:
-                    sindex.iloc[i] = sindex.iloc[i-1]
-                
-                # Check for sell signal
                 if (bindex.iloc[i] > qual and close.iloc[i] < open_price.iloc[i] and 
                     high.iloc[i] >= high.iloc[max(0, i-length):i].max()):
                     bindex.iloc[i] = 0
                     ret.iloc[i] = -1
                 
-                # Check for buy signal
                 if (sindex.iloc[i] > qual and close.iloc[i] > open_price.iloc[i] and 
                     low.iloc[i] <= low.iloc[max(0, i-length):i].min()):
                     sindex.iloc[i] = 0
@@ -149,7 +155,7 @@ class PremiumLuxAlgo:
         xhaopen = (o + c) / 2
         haopen = pd.Series(index=self.data.index, dtype=float)
         
-        haopen.iloc[0] = xhaopen.iloc[0]
+        haopen.iloc[0] = xhaopen.iloc[0] if not xhaopen.empty else np.nan
         for i in range(1, len(haopen)):
             haopen.iloc[i] = (haopen.iloc[i-1] + haclose.iloc[i-1]) / 2
         
@@ -315,16 +321,15 @@ class PremiumLuxAlgo:
         high = self.data['high']
         low = self.data['low']
         close = self.data['close']
+        close_prev = close.shift(1)
+        high_prev = high.shift(1)
+
+        hilo = high - low
+        href = np.where(low <= high_prev, high - close_prev, high - close_prev - 0.5 * (low - high_prev))
+        lref = np.where(high >= low.shift(1), close_prev - low, close_prev - low - 0.5 * (low.shift(1) - high))
+        true_range = pd.DataFrame({'hilo': hilo, 'href': href, 'lref': lref}).max(axis=1)
         
-        # Calculate True Range (Wilder's method)
-        tr = pd.concat([
-            pd.Series(high - low, index=close.index),
-            pd.Series(np.abs(high - close.shift(1)), index=close.index),
-            pd.Series(np.abs(low - close.shift(1)), index=close.index)
-        ], axis=1).max(axis=1)
-        
-        # Wilder's moving average
-        wild_atr = tr.ewm(alpha=1/atr_period, adjust=False).mean()
+        wild_atr = self.rma(true_range, atr_period)
         loss = atr_factor * wild_atr
         
         up = close - loss
@@ -338,22 +343,15 @@ class PremiumLuxAlgo:
         trend_down.iloc[0] = dn.iloc[0]
         
         for i in range(1, len(close)):
-            if close.iloc[i-1] > trend_up.iloc[i-1]:
-                trend_up.iloc[i] = max(up.iloc[i], trend_up.iloc[i-1])
-            else:
-                trend_up.iloc[i] = up.iloc[i]
+            if close.iloc[i-1] > trend_up.iloc[i-1]: trend_up.iloc[i] = max(up.iloc[i], trend_up.iloc[i-1])
+            else: trend_up.iloc[i] = up.iloc[i]
             
-            if close.iloc[i-1] < trend_down.iloc[i-1]:
-                trend_down.iloc[i] = min(dn.iloc[i], trend_down.iloc[i-1])
-            else:
-                trend_down.iloc[i] = dn.iloc[i]
+            if close.iloc[i-1] < trend_down.iloc[i-1]: trend_down.iloc[i] = min(dn.iloc[i], trend_down.iloc[i-1])
+            else: trend_down.iloc[i] = dn.iloc[i]
             
-            if close.iloc[i] > trend_down.iloc[i-1]:
-                trend.iloc[i] = 1
-            elif close.iloc[i] < trend_up.iloc[i-1]:
-                trend.iloc[i] = -1
-            else:
-                trend.iloc[i] = trend.iloc[i-1]
+            if close.iloc[i] > trend_down.iloc[i-1]: trend.iloc[i] = 1
+            elif close.iloc[i] < trend_up.iloc[i-1]: trend.iloc[i] = -1
+            else: trend.iloc[i] = trend.iloc[i-1]
         
         trail = np.where(trend == 1, trend_up, trend_down)
         return self.sma(pd.Series(trail, index=close.index), smoothing)
@@ -363,15 +361,13 @@ class PremiumLuxAlgo:
         """Calculate Reversal Signals"""
         close = self.data['close']
         
-        # Calculate RSI manually
-        delta = close.diff().astype(float)
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
+        delta = close.diff()
+        up = delta.clip(lower=0)
+        down = -delta.clip(upper=0)
         
-        avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False).mean()
+        avg_gain = self.rma(up, rsi_period)
+        avg_loss = self.rma(down, rsi_period)
         
-        # Avoid division by zero
         rs = avg_gain / avg_loss.replace(0, 1)
         rsi = 100 - (100 / (1 + rs))
         
@@ -384,74 +380,64 @@ class PremiumLuxAlgo:
         """Calculate Support and Resistance levels"""
         high = self.data['high']
         low = self.data['low']
-        close = self.data['close']
-        
-        # Find pivot highs and lows
-        pivot_high = pd.Series(index=high.index, dtype=float)
-        pivot_low = pd.Series(index=low.index, dtype=float)
-        
         rb = 10  # bars left and right
         
-        for i in range(rb, len(high) - rb):
-            if high.iloc[i] == high.iloc[i-rb:i+rb+1].max():
-                pivot_high.iloc[i] = high.iloc[i]
-            if low.iloc[i] == low.iloc[i-rb:i+rb+1].min():
-                pivot_low.iloc[i] = low.iloc[i]
+        is_pivot_high = (high == high.rolling(2 * rb + 1, center=True).max())
+        is_pivot_low = (low == low.rolling(2 * rb + 1, center=True).min())
         
-        # Calculate support and resistance levels
+        pivot_high_vals = high[is_pivot_high].dropna()
+        pivot_low_vals = low[is_pivot_low].dropna()
+
+        all_pivots = pd.concat([pivot_high_vals, pivot_low_vals]).sort_index().iloc[-lookback:]
+        
+        if all_pivots.empty:
+            return {'levels': [], 'pivot_highs': high[is_pivot_high], 'pivot_lows': low[is_pivot_low]}
+
+        tolerance = (high.max() - low.min()) * 0.01
+        
         sr_levels = []
-        recent_pivots = []
+        pivots_list = all_pivots.to_list()
         
-        for i in range(len(pivot_high)):
-            if not pd.isna(pivot_high.iloc[i]):
-                recent_pivots.append(pivot_high.iloc[i])
-            if not pd.isna(pivot_low.iloc[i]):
-                recent_pivots.append(pivot_low.iloc[i])
-        
-        # Group similar levels
-        tolerance = (high.max() - low.min()) * 0.01  # 1% tolerance
-        
-        for level in recent_pivots[-50:]:  # Consider last 50 pivots
-            count = sum(1 for p in recent_pivots if abs(p - level) <= tolerance)
-            if count >= strength:
-                sr_levels.append(level)
-        
+        while len(pivots_list) > 0:
+            level_group = [p for p in pivots_list if abs(p - pivots_list[0]) <= tolerance]
+            if len(level_group) >= strength:
+                sr_levels.append(np.mean(level_group))
+            
+            pivots_list = [p for p in pivots_list if p not in level_group]
+
         return {
-            'levels': list(set(sr_levels)),  # Remove duplicates
-            'pivot_highs': pivot_high,
-            'pivot_lows': pivot_low
+            'levels': sorted(list(set(sr_levels))),
+            'pivot_highs': high[is_pivot_high],
+            'pivot_lows': low[is_pivot_low]
         }
     
     def reversal_cloud(self, length: int = 50, bd1: int = 9, bd2: int = 11, bd3: int = 14, kama_fast: int = 2, kama_slow: int = 30) -> dict:
         """Calculate Reversal Cloud (Lux Algo style)"""
         close = self.data['close']
         
-        # KAMA calculation
         def kama(src, length, fast, slow):
-            change = np.abs(src.diff())
+            change = np.abs(src.diff(1))
             volatility = change.rolling(window=length).sum()
             direction = np.abs(src - src.shift(length))
             
-            efficiency = (direction / volatility.replace(0, 1)).fillna(0)
+            efficiency_ratio = (direction / volatility.replace(0, 1)).fillna(0)
             
-            fast_sc = 2.0 / (fast + 1)
-            slow_sc = 2.0 / (slow + 1)
-            sc = (efficiency * (fast_sc - slow_sc) + slow_sc) ** 2
+            fast_alpha = 2.0 / (fast + 1)
+            slow_alpha = 2.0 / (slow + 1)
+            smoothing_constant = (efficiency_ratio * (fast_alpha - slow_alpha) + slow_alpha) ** 2
             
             kama_val = pd.Series(index=src.index, dtype=float)
             kama_val.iloc[0] = src.iloc[0]
             
             for i in range(1, len(src)):
-                kama_val.iloc[i] = kama_val.iloc[i-1] + sc.iloc[i] * (src.iloc[i] - kama_val.iloc[i-1])
-            
+                kama_val.iloc[i] = kama_val.iloc[i-1] + smoothing_constant.iloc[i] * (src.iloc[i] - kama_val.iloc[i-1])
             return kama_val
         
-        # Calculate True Range and KAMA
-        tr = pd.concat([
-            pd.Series(self.data['high'] - self.data['low'], index=close.index),
-            pd.Series(np.abs(self.data['high'] - close.shift(1)), index=close.index),
-            pd.Series(np.abs(self.data['low'] - close.shift(1)), index=close.index)
-        ], axis=1).max(axis=1)
+        tr = pd.DataFrame({
+            'a': self.data['high'] - self.data['low'],
+            'b': np.abs(self.data['high'] - close.shift(1)),
+            'c': np.abs(self.data['low'] - close.shift(1))
+        }).max(axis=1)
         
         rg = kama(tr, length, kama_fast, kama_slow)
         basis = kama(close, length, kama_fast, kama_slow)
@@ -470,41 +456,47 @@ class PremiumLuxAlgo:
             'lower1': lower1, 'lower2': lower2, 'lower3': lower3
         }
     
-    def macd_candle_coloring(self, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
-        """Calculate MACD-based candle coloring"""
-        close = self.data['close']
+    def psar(self, initial_af=0.02, max_af=0.2, af_step=0.02) -> pd.Series:
+        high, low = self.data['high'], self.data['low']
+        psar = low.copy()
+        bull = True
+        af = initial_af
+        ep = high.iloc[0]
+
+        for i in range(2, len(self.data)):
+            if bull:
+                psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
+                if low.iloc[i] < psar.iloc[i]:
+                    bull = False
+                    psar.iloc[i] = ep
+                    ep = low.iloc[i]
+                    af = initial_af
+                else:
+                    if high.iloc[i] > ep:
+                        ep = high.iloc[i]
+                        af = min(af + af_step, max_af)
+            else:
+                psar.iloc[i] = psar.iloc[i-1] - af * (psar.iloc[i-1] - ep)
+                if high.iloc[i] > psar.iloc[i]:
+                    bull = True
+                    psar.iloc[i] = ep
+                    ep = high.iloc[i]
+                    af = initial_af
+                else:
+                    if low.iloc[i] < ep:
+                        ep = low.iloc[i]
+                        af = min(af + af_step, max_af)
+        return psar
+
+    def calculate_all_indicators(self, sensitivity: float = 5.5) -> dict:
+        """
+        Calculate all indicators and return a dictionary with the results dataframe
+        and other metadata like S/R levels.
+        """
         
-        # Calculate MACD
-        exp1 = close.ewm(span=fast).mean()
-        exp2 = close.ewm(span=slow).mean()
-        macd = exp1 - exp2
-        signal_line = macd.ewm(span=signal).mean()
-        histogram = macd - signal_line
-        
-        # Color classification
-        colors = pd.Series('yellow', index=close.index)  # Default
-        
-        # Green conditions
-        green_condition = (histogram > 0) & (histogram > histogram.shift(1)) & (histogram.shift(1) > 0)
-        colors[green_condition] = 'green'
-        
-        # Red conditions
-        red_condition = (histogram < 0) & (histogram < histogram.shift(1)) & (histogram.shift(1) < 0)
-        colors[red_condition] = 'red'
-        
-        # Stronger green
-        strong_green = (macd > 0) & (histogram > 0) & (histogram > histogram.shift(1))
-        colors[strong_green] = 'strong_green'
-        
-        # Stronger red
-        strong_red = (macd < 0) & (histogram < 0) & (histogram < histogram.shift(1))
-        colors[strong_red] = 'strong_red'
-        
-        return colors
-    
-    def calculate_all_indicators(self, sensitivity: float = 5.5) -> pd.DataFrame:
-        """Calculate all indicators and return results dataframe"""
-        
+        # Initialize the sr_data attribute to None
+        self.sr_data = None
+
         # Basic calculations
         self.results['oc_avg'] = (self.data['open'] + self.data['close']) / 2
         
@@ -515,15 +507,23 @@ class PremiumLuxAlgo:
         
         # SMA calculations
         close = self.data['close']
-        self.results['sma9'] = self.sma(close, 9)
+        sma13 = self.sma(close, 13)
+        self.results['sma_filter'] = sma13
         
-        # Buy/Sell signals
-        bull_signal = (close > supertrend) & (close.shift(1) <= supertrend.shift(1)) & (close >= self.results['sma9'])
-        bear_signal = (close < supertrend) & (close.shift(1) >= supertrend.shift(1)) & (close <= self.results['sma9'])
+        # --- NEW ROBUST SIGNAL LOGIC ---
+        # A signal is a CHANGE in the trend direction.
+        prev_direction = st_direction.shift(1)
         
-        self.results['bull_signal'] = bull_signal
-        self.results['bear_signal'] = bear_signal
+        # A Bull signal is when the direction flips from -1 (or 0) to 1.
+        just_flipped_bull = (st_direction == 1) & (prev_direction <= 0)
         
+        # A Bear signal is when the direction flips from 1 (or 0) to -1.
+        just_flipped_bear = (st_direction == -1) & (prev_direction >= 0)
+
+        # Now, combine the flip with the SMA filter.
+        self.results['bull_signal'] = just_flipped_bull & (close >= sma13)
+        self.results['bear_signal'] = just_flipped_bear & (close <= sma13)
+
         # TP Points
         major_tp, minor_tp = self.calculate_tp_points()
         self.results['major_tp'] = major_tp
@@ -556,22 +556,20 @@ class PremiumLuxAlgo:
         
         # Reversal Signals
         rev_up, rev_down = self.reversal_signals()
-        self.results['reversal_up'] = rev_up
-        self.results['reversal_down'] = rev_down
+        self.results['reversal_up'], self.results['reversal_down'] = rev_up, rev_down
         
         # Support/Resistance
-        sr_data = self.support_resistance()
-        self.results['sr_levels'] = sr_data['levels']
+        self.sr_data = self.support_resistance()
+        self.results['sr_pivot_highs'] = self.sr_data['pivot_highs']
+        self.results['sr_pivot_lows'] = self.sr_data['pivot_lows']
         
         # Reversal Cloud
         cloud = self.reversal_cloud()
-        for key, value in cloud.items():
-            self.results[f'cloud_{key}'] = value
+        for key, value in cloud.items(): self.results[f'cloud_{key}'] = value
         
-        # MACD Candle Colors
-        self.results['candle_color'] = self.macd_candle_coloring()
+        self.results['psar'] = self.psar()
         
-        return self.results
+        return {"dataframe": self.results}
     
     def get_signals(self) -> pd.DataFrame:
         """Get clean signals summary"""
@@ -603,231 +601,125 @@ DEFAULT_PROFILE = {"lookback": 284}
 
 
 class PremiumLuxAlgoStrategy(SignalGenerator):
-    """
-    Strategy based on a Python port of a popular PineScript indicator set.
-    This strategy uses the PremiumLuxAlgo class to calculate a variety of indicators
-    and generates trading signals based on their confluence.
-    """
-
     def __init__(self,
-                 primary_timeframe: str = "M1",
-                 risk_percent: float = 0.01,
-                 min_risk_reward: float = 2.0,
-                 atr_multiplier: float = 2.0,
-                 # --- Indicator Parameters (with defaults from PremiumLuxAlgo) ---
-                 use_major_tp: bool = True,
-                 use_minor_tp: bool = False,
-                 supertrend_factor: float = 5.5,
-                 supertrend_atr_period: int = 11,
-                 tp_maj_qual: int = 13,
-                 tp_maj_len: int = 40,
-                 tp_min_qual: int = 5,
-                 tp_min_len: int = 5,
-                 ha_len: int = 100,
-                 rng_qty: float = 2.618,
-                 rng_per: int = 14,
-                 rng_smooth_per: int = 27,
-                 sr_strength: int = 4,
-                 sr_lookback: int = 284,
+                 primary_timeframe: str = "M1", risk_percent: float = 0.01,
+                 min_risk_reward: float = 2.0, atr_multiplier: float = 2.0,
+                 use_major_tp: bool = True, use_minor_tp: bool = False,
+                 supertrend_factor: float = 5.5, supertrend_atr_period: int = 11,
                  **kwargs):
-        """
-        Initializes the PineScript-based strategy.
-        """
         super().__init__(**kwargs)
-
         self.name = "PremiumLuxAlgoStrategy"
         self.description = "A strategy using a collection of PineScript-ported indicators."
-        self.version = "1.0.0"
-
+        self.version = "1.1.0" # Updated version
         self.primary_timeframe = primary_timeframe
         self.min_risk_reward = min_risk_reward
         self.atr_multiplier = atr_multiplier
-
-        # --- Store Indicator Parameters ---
         self.params = {
-            'use_major_tp': use_major_tp,
-            'use_minor_tp': use_minor_tp,
+            'use_major_tp': use_major_tp, 'use_minor_tp': use_minor_tp,
             'supertrend_factor': supertrend_factor,
             'supertrend_atr_period': supertrend_atr_period,
-            'tp_maj_qual': tp_maj_qual,
-            'tp_maj_len': tp_maj_len,
-            'tp_min_qual': tp_min_qual,
-            'tp_min_len': tp_min_len,
-            'ha_len': ha_len,
-            'rng_qty': rng_qty,
-            'rng_per': rng_per,
-            'rng_smooth_per': rng_smooth_per,
-            'sr_strength': sr_strength,
-            'sr_lookback': sr_lookback,
         }
-
         rm_conf = get_risk_manager_config()
         self.risk_percent = rm_conf.get('max_risk_per_trade', risk_percent)
-
         self.lookback = None
         self._load_timeframe_profile()
-
         self.processed_bars = {}
 
     def _load_timeframe_profile(self):
-        """
-        Loads parameters from TIMEFRAME_PROFILES based on the primary timeframe.
-        """
         profile = TIMEFRAME_PROFILES.get(self.primary_timeframe, DEFAULT_PROFILE)
         self.lookback = profile.get('lookback', DEFAULT_PROFILE['lookback'])
-        self.params['sr_lookback'] = self.lookback # Sync lookback with SR lookback
-
-        logger.info(
-            f"🔄 [{self.name}] Profile loaded for {self.primary_timeframe}: lookback={self.lookback}"
-        )
+        logger.info(f"🔄 [{self.name}] Profile loaded for {self.primary_timeframe}: lookback={self.lookback}")
 
     @property
+    def lookback_periods(self) -> Dict[str, int]:
+        """
+        Exposes the lookback period required for each timeframe.
+        The trading_bot uses this to fetch the correct amount of historical data.
+        """
+        assert self.lookback is not None, "Lookback must be initialized before being accessed."
+        return {self.primary_timeframe: self.lookback}
+        
+    @property
     def required_timeframes(self) -> List[str]:
-        """
-        Specifies the timeframes this strategy needs. Since we are only using
-        a primary timeframe, this list contains just one element.
-        """
         return [self.primary_timeframe]
 
     async def generate_signals(
-        self,
-        market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
-        **kwargs
+        self, market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None, **kwargs
     ) -> List[Dict]:
-        """
-        The core method where trading signals are generated.
-        This will be implemented in the next step.
-        """
-        if market_data is None:
-            market_data = {}
+        if market_data is None: market_data = {}
 
         signals = []
         rm = RiskManager.get_instance()
-        balance = kwargs.get("balance", rm.daily_stats.get('starting_balance', 10000))
-
+        
         for sym, frames in market_data.items():
             primary_df = frames.get(self.primary_timeframe)
-
             if not isinstance(primary_df, pd.DataFrame) or primary_df.empty or self.lookback is None or len(primary_df) < self.lookback:
-                logger.debug(f"[{sym}] Missing, empty, or insufficient market data for {self.primary_timeframe}.")
+                logger.debug(f"[{sym}] Insufficient data for {self.primary_timeframe}.")
                 continue
-
-            # --- Prevent Re-processing the Same Bar ---
+            
             try:
                 last_timestamp = str(primary_df.index[-1])
-                bar_key = (sym, self.primary_timeframe)
-                if self.processed_bars.get(bar_key) == last_timestamp:
-                    continue
-                self.processed_bars[bar_key] = last_timestamp
-            except IndexError:
-                logger.warning(f"[{sym}] Could not get last timestamp from primary_df.")
-                continue
-            
-            # 1. Instantiate PremiumLuxAlgo and calculate indicators
+                if self.processed_bars.get((sym, self.primary_timeframe)) == last_timestamp: continue
+                self.processed_bars[(sym, self.primary_timeframe)] = last_timestamp
+            except IndexError: continue
+
             try:
                 lux_algo = PremiumLuxAlgo(primary_df.copy())
-                # Use a simplified signal set for clarity
-                st, st_dir = lux_algo.supertrend(
-                    factor=self.params['supertrend_factor'],
-                    atr_period=self.params['supertrend_atr_period']
-                )
-                major_tp, minor_tp = lux_algo.calculate_tp_points(
-                    maj_qual=self.params['tp_maj_qual'],
-                    maj_len=self.params['tp_maj_len'],
-                    min_qual=self.params['tp_min_qual'],
-                    min_len=self.params['tp_min_len']
-                )
+                all_results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
+                results = all_results["dataframe"]
             except Exception as e:
-                logger.error(f"[{sym}] Error calculating indicators: {e}")
+                logger.error(f"[{sym}] Error calculating indicators: {e}", exc_info=True)
+                continue
+            
+            last = results.iloc[-1]
+            
+            # The full condition is now calculated once in the `PremiumLuxAlgo` class.
+            bull_cond = last['bull_signal']
+            bear_cond = last['bear_signal']
+            
+            logger.debug(
+                f"[{sym}] Analysis for {last.name}: Close={last.close:.5f}, "
+                f"ST_Dir={int(last.st_direction)}, Prev_ST_Dir={int(results.iloc[-2]['st_direction'])}, "
+                f"SMA13={last.sma_filter:.5f}, "
+                f"==> Bull Signal: {bull_cond}, Bear Signal: {bear_cond}"
+            )
+
+            direction = 'buy' if bull_cond else 'sell' if bear_cond else None
+            if not direction:
                 continue
 
-            # 2. Define entry conditions based on indicator confluence
-            last_close = primary_df['close'].iloc[-1]
-            prev_close = primary_df['close'].iloc[-2]
-            
-            last_st = st.iloc[-1]
-            prev_st = st.iloc[-2]
-            sma9 = lux_algo.sma(primary_df['close'], 9).iloc[-1]
-
-            # Bullish crossover: close crosses above Supertrend and is above SMA(9)
-            bull_cond = (last_close > last_st) and (prev_close <= prev_st) and (last_close >= sma9)
-            # Bearish crossover: close crosses below Supertrend and is below SMA(9)
-            bear_cond = (last_close < last_st) and (prev_close >= prev_st) and (last_close <= sma9)
-
-            direction = None
-            if bull_cond:
-                direction = 'buy'
-            elif bear_cond:
-                direction = 'sell'
-            
-            if direction is None:
-                continue # No signal
-
-            # 3. Calculate TP score and confidence
-            last_major_tp = major_tp.iloc[-1]
-            last_minor_tp = minor_tp.iloc[-1]
             tp_score = 0
-            
             if direction == 'buy':
-                if self.params['use_minor_tp'] and last_minor_tp == 1:
-                    tp_score = 1
-                if self.params['use_major_tp'] and last_major_tp == 1:
-                    tp_score = 2
-                if (self.params['use_major_tp'] and last_major_tp == 1) and \
-                   (self.params['use_minor_tp'] and last_minor_tp == 1):
-                    tp_score = 3
-            elif direction == 'sell':
-                if self.params['use_minor_tp'] and last_minor_tp == -1:
-                    tp_score = 1
-                if self.params['use_major_tp'] and last_major_tp == -1:
-                    tp_score = 2
-                if (self.params['use_major_tp'] and last_major_tp == -1) and \
-                   (self.params['use_minor_tp'] and last_minor_tp == -1):
-                    tp_score = 3
+                if self.params['use_minor_tp'] and last['minor_tp'] == 1: tp_score += 1
+                if self.params['use_major_tp'] and last['major_tp'] == 1: tp_score += 2
+            else: # sell
+                if self.params['use_minor_tp'] and last['minor_tp'] == -1: tp_score += 1
+                if self.params['use_major_tp'] and last['major_tp'] == -1: tp_score += 2
             
-            confidence = 0.75  # Base confidence
-            if tp_score == 2:
-                confidence = 0.85
-            elif tp_score == 3:
-                confidence = 0.95
-
-            # 4. Construct and validate signal dictionary
-            last_candle = primary_df.iloc[-1]
-            entry = last_candle['close']
+            confidence = min(0.95, 0.75 + (tp_score * 0.1))
+            entry = last['close']
             atr = lux_algo.atr(period=self.params['supertrend_atr_period']).iloc[-1]
             
-            if direction == 'buy':
-                stop_loss = entry - (atr * self.atr_multiplier)
-                take_profit = entry + ((entry - stop_loss) * self.min_risk_reward)
-            else: # sell
-                stop_loss = entry + (atr * self.atr_multiplier)
-                take_profit = entry - ((stop_loss - entry) * self.min_risk_reward)
+            stop_loss = entry - (atr * self.atr_multiplier) if direction == 'buy' else entry + (atr * self.atr_multiplier)
+            take_profit = entry + (abs(entry - stop_loss) * self.min_risk_reward) if direction == 'buy' else entry - (abs(entry - stop_loss) * self.min_risk_reward)
 
             signal_details = {
-                "symbol": sym,
-                "direction": direction,
-                "entry_price": entry,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "timeframe": self.primary_timeframe,
-                "strategy_name": self.name,
-                "confidence": confidence,
-                "description": f"Signal based on Supertrend crossover and SMA(9) confirmation.",
+                "symbol": sym, "direction": direction, "entry_price": entry,
+                "stop_loss": stop_loss, "take_profit": take_profit,
+                "timeframe": self.primary_timeframe, "strategy_name": self.name,
+                "confidence": confidence, "signal_timestamp": str(last.name),
                 "detailed_reasoning": [
-                    f"Supertrend Crossover: {direction.upper()}",
-                    f"SMA(9) Confirmation: Close ({last_close:.5f}) >= SMA(9) ({sma9:.5f})" if direction == 'buy' else f"SMA(9) Confirmation: Close ({last_close:.5f}) <= SMA(9) ({sma9:.5f})",
+                    f"Supertrend Flipped: {direction.upper()}",
+                    f"SMA(13) Filter Met: Close ({last.close:.5f}) vs SMA ({last.sma_filter:.5f})",
                     f"TP Score: {tp_score}"
-                ],
-                "signal_timestamp": str(last_candle.name),
+                ]
             }
 
-            # 5. Validate the Trade with the RiskManager
             validation_result = rm.validate_and_size_trade(signal_details)
 
             if validation_result['is_valid']:
-                logger.info(f"✅ [{sym}] Valid signal generated. Direction: {direction}, Entry: {entry:.5f}")
-                final_trade_params = validation_result['final_trade_params']
-                signals.append(final_trade_params)
+                logger.info(f"✅ [{sym}] Valid signal generated. Dir: {direction}, Entry: {entry:.5f}, Conf: {confidence:.2f}")
+                signals.append(validation_result['final_trade_params'])
             else:
                 logger.warning(f"Signal for {sym} rejected by RiskManager: {validation_result['reason']}")
 

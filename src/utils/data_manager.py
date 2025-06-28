@@ -136,98 +136,104 @@ class DataManager:
     def perform_warmup(self, symbols: List[str]) -> bool:
         """
         Perform initial data loading warmup phase.
-        
+
         Args:
             symbols: List of symbols to load data for
-            
+
         Returns:
             True if warmup completed successfully
         """
         logger.info("Starting warmup phase to collect sufficient historical data...")
         warmup_success = True
-        
+
         for symbol in symbols:
             logger.info(f"Loading warmup data for {symbol}")
-            
+
             for tf in self.required_timeframes:
                 # Only direct fetch data for each timeframe - no resampling
                 logger.info(f"Directly fetching {tf} data for {symbol}")
                 tf_data = self.mt5_handler.get_market_data(
                     symbol, tf, self.warmup_bars_required.get(tf, 100)
                 )
-                
+
                 if tf_data is None or len(tf_data) < self.warmup_bars_required.get(tf, 100):
                     logger.warning(f"Failed to get enough {tf} data for {symbol}. "
-                                  f"Got {0 if tf_data is None else len(tf_data)} bars, "
-                                  f"needed {self.warmup_bars_required.get(tf, 100)}")
+                                   f"Got {0 if tf_data is None else len(tf_data)} bars, "
+                                   f"needed {self.warmup_bars_required.get(tf, 100)}")
                     continue
-                
+
                 logger.info(f"Loaded {len(tf_data)} {tf} bars for {symbol}")
-                
+
                 # Store the data
                 if symbol not in self.data_cache:
                     self.data_cache[symbol] = {}
-                
+
                 # Preprocess the data
                 tf_data = self._preprocess_data(tf_data, symbol, tf)
                 self.data_cache[symbol][tf] = tf_data
                 self.last_update[f"{symbol}_{tf}"] = time.time()
-                
+
                 # NO RESAMPLING - removed resampling code completely
-        
+
         # Set warmup status
         self.warmup_complete = True
         logger.info("✅ Warmup phase completed successfully")
-            
+
         return warmup_success
-    
-    def update_data(self, symbol: str, timeframe: str, force: bool = False) -> Optional[pd.DataFrame]:
+
+    def update_data(self, symbol: str, timeframe: str, force: bool = False, num_candles: Optional[int] = None) -> Optional[pd.DataFrame]:
         """
         Update data for a specific symbol and timeframe, using direct MT5 fetching only.
-        
+
         Args:
             symbol: Trading symbol
             timeframe: Timeframe to update
             force: Force update regardless of last update time
-            
+            num_candles: The number of candles to fetch, overriding defaults.
+
         Returns:
             Updated DataFrame or None if update failed
         """
-        logger.debug(f"[DataManager] update_data: symbol={symbol}, timeframe={timeframe}, force={force}")
         now = time.time()
         key = f"{symbol}_{timeframe}"
-        
+
         # Check if update is needed
-        if not force and key in self.last_update:
-            update_frequency = self.update_frequencies.get(timeframe, 60)
-            if now - self.last_update[key] < update_frequency:
-                return self._get_cached_data(symbol, timeframe)
-        
-        try:
-            # ONLY use direct fetch from MT5 - never resample
-            lookback = self.max_lookback.get(timeframe, 1000)
-            data = self.mt5_handler.get_market_data(symbol, timeframe, lookback)
-            
-            if data is not None:
-                # Apply preprocessing
-                data = self._preprocess_data(data, symbol, timeframe)
-                
-                # Update cache
-                if symbol not in self.data_cache:
-                    self.data_cache[symbol] = {}
-                
-                self.data_cache[symbol][timeframe] = data
-                self.last_update[key] = now
-                
-                logger.debug(f"Updated data for {symbol} {timeframe} via direct fetch")
-                return data
-            else:
-                logger.error(f"Failed to fetch {timeframe} data for {symbol}")
-                return None
-        
-        except Exception as e:
-            logger.error(f"Error updating data for {symbol} {timeframe}: {str(e)}")
+        last_update_time = self.last_update.get(key)
+        update_freq = self.update_frequencies.get(timeframe, 60)  # Default 1 min
+
+        if not force and last_update_time and (now - last_update_time) < update_freq:
+            logger.debug(f"Skipping update for {key}, last updated {now - last_update_time:.2f}s ago")
+            return self._get_cached_data(symbol, timeframe)
+
+        # Determine number of candles to fetch
+        lookback = num_candles
+        if lookback is None:
+            lookback = self.requirements.get((symbol, timeframe))
+        if lookback is None:
+            lookback = self.max_lookback.get(timeframe, 10000)
+            logger.debug(f"No specific lookback registered for {symbol}/{timeframe}, falling back to default: {lookback}")
+
+        logger.debug(f"[DataManager] update_data: symbol={symbol}, timeframe={timeframe}, force={force}, num_candles={lookback}")
+
+        # If update is needed, fetch new data from MT5
+        new_data = self.mt5_handler.get_market_data(symbol, timeframe, num_candles=lookback)
+
+        if new_data is None:
+            logger.warning(f"No data returned from MT5 for {symbol}/{timeframe}")
             return None
+
+        # Preprocess and store in cache
+        processed_data = self._preprocess_data(new_data, symbol, timeframe)
+
+        if symbol not in self.data_cache:
+            self.data_cache[symbol] = {}
+
+        self.data_cache[symbol][timeframe] = processed_data
+        self.last_update[key] = now
+
+        logger.debug(f"Updated data for {symbol} {timeframe} via direct fetch")
+        return processed_data
+
     
     def update_resampled_timeframes(self, symbol: str) -> Dict[str, bool]:
         """
@@ -622,29 +628,27 @@ class DataManager:
         window = df.iloc[-lookback:] if lookback > 0 else df.copy()
         return copy.deepcopy(window)
 
-    async def get_market_data_for_symbol(self, symbol: str, timeframes: List[str]) -> Optional[Dict[str, pd.DataFrame]]:
+    def get_market_data_for_symbol(self, symbol: str, timeframes: List[str]) -> Optional[Dict[str, Dict[str, pd.DataFrame]]]:
         """
-        Asynchronously fetches and returns market data for all specified timeframes for a single symbol.
+        Synchronously retrieves market data for all specified timeframes for a single symbol from the cache.
+        This method assumes that the data has already been updated by `update_data`.
 
         Args:
             symbol: The trading symbol to fetch data for.
             timeframes: A list of timeframes required for the symbol.
 
         Returns:
-            A dictionary where keys are timeframes and values are pandas DataFrames
-            of market data, or None if data fetching fails for any timeframe.
+            A dictionary of shape {symbol: {timeframe: DataFrame}}, or None if data is missing.
         """
         market_data_for_symbol = {}
-        
         try:
             for tf in timeframes:
-                # Use the existing (now synchronous) update_data method
-                data = self.update_data(symbol, tf, force=True)
+                data = self._get_cached_data(symbol, tf)
                 if data is None or data.empty:
-                    logger.warning(f"Could not retrieve data for {symbol}/{tf}.")
+                    logger.warning(f"Could not retrieve cached data for {symbol}/{tf}. Update might have failed.")
                     return None 
                 market_data_for_symbol[tf] = data
             return {symbol: market_data_for_symbol}
         except Exception as e:
-            logger.error(f"Error fetching market data for {symbol}: {e}")
+            logger.error(f"Error retrieving market data from cache for {symbol}: {e}")
             return None 

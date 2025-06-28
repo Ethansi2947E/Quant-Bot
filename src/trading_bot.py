@@ -331,50 +331,57 @@ class TradingBot:
         Runs the full analysis pipeline for a single symbol.
         Fetches data, generates signals, and processes them.
         """
-        if not self.trading_enabled:
+        logger.debug(f"Running analysis cycle for {symbol}...")
+        
+        # 1. Collect all required timeframes and lookbacks for this symbol
+        required_timeframes: set[str] = set()
+        for sg in self.signal_generators:
+            if hasattr(sg, 'required_timeframes'):
+                required_timeframes.update(getattr(sg, 'required_timeframes'))
+        
+        if not required_timeframes:
+            logger.warning(f"No required timeframes found for symbol {symbol}. Skipping analysis.")
             return
 
         try:
-            logger.debug(f"Running analysis cycle for {symbol}...")
-            logger.info(f"New candle detected, re-fetching market data for {symbol} to run analysis.")
-            
-            required_timeframes = set()
-            for sg in self.signal_generators:
-                if hasattr(sg, 'required_timeframes'):
-                    for tf in sg.required_timeframes:
-                        required_timeframes.add(tf)
-            
-            market_data_response = await self.data_manager.get_market_data_for_symbol(symbol, list(required_timeframes))
+            logger.trace(f"[{symbol}] Starting data refetch for {len(required_timeframes)} timeframes: {list(required_timeframes)}")
+            # 2. Update data for each required timeframe with the correct lookback
+            for timeframe in required_timeframes:
+                lookback = self.data_manager.requirements.get((symbol, timeframe))
+                logger.trace(f"[{symbol}/{timeframe}] Updating data with lookback: {lookback}")
+                self.data_manager.update_data(symbol, timeframe, force=True, num_candles=lookback)
 
-            if not market_data_response or symbol not in market_data_response:
-                logger.warning(f"Could not fetch market data for {symbol} to run analysis.")
+            # 3. Get all updated market data from the cache
+            market_data_for_symbol = self.data_manager.get_market_data_for_symbol(
+                symbol, timeframes=list(required_timeframes)
+            )
+            
+            if not market_data_for_symbol:
+                logger.warning(f"No market data available for {symbol} after update.")
                 return
 
-            market_data = market_data_response
-            # Populate the last known timestamps from the fetched data, primarily for startup
-            for tf, df in market_data[symbol].items():
-                if not df.empty and isinstance(df.index, pd.DatetimeIndex):
-                    key = (symbol, tf)
-                    timestamp = int(df.index[-1].timestamp())
-                    self.last_candle_timestamps[key] = timestamp
-
-            all_signals = []
+            logger.trace(f"[{symbol}] Data refetch complete. Retrieved data for {len(market_data_for_symbol)} timeframes.")
+            
+            all_signals: list[dict] = []
             for sg in self.signal_generators:
+                logger.debug(f"Executing signal generator '{sg.name}' for {symbol}...")
                 try:
-                    logger.debug(f"Executing signal generator '{sg.name}' for {symbol}...")
-                    symbol_specific_data = {symbol: market_data[symbol]}
-                    signals = await sg.generate_signals(market_data=symbol_specific_data)
+                    # Pass only the data for the current symbol to the generator
+                    signals = await sg.generate_signals(
+                        market_data=market_data_for_symbol,
+                        balance=self.risk_manager.get_account_balance()
+                    )
                     if signals:
                         all_signals.extend(signals)
                 except Exception as e:
-                    logger.error(f"Error generating signals from {sg.name} for {symbol}: {e}")
+                    logger.error(f"Error executing signal generator '{sg.name}' for {symbol}: {e}")
                     logger.error(traceback.format_exc())
             
             if all_signals:
                 await self.process_signals(all_signals)
 
         except Exception as e:
-            logger.error(f"Error in analysis cycle for symbol {symbol}: {e}")
+            logger.error(f"Error during analysis cycle for {symbol}: {e}")
             logger.error(traceback.format_exc())
 
     async def _initialize_signal_generators(self):
@@ -504,6 +511,7 @@ class TradingBot:
                 logger.info("Telegram commands registered")
             
             # --- REPLACE OLD MAIN LOOP WITH TICK EVENT LOOP ---
+            await self._prime_last_candle_timestamps()
             self.main_task = asyncio.create_task(self.tick_event_loop())
             self.trade_monitor_task = asyncio.create_task(self._monitor_trades_loop())
             self.shutdown_monitor_task = asyncio.create_task(self._monitor_shutdown())
@@ -1363,3 +1371,14 @@ class TradingBot:
             logger.info(f"[LOAD_STRAT] Finished loading. Found {len(self.available_signal_generators)} generators: {list(self.available_signal_generators.keys())}")
         else:
             logger.warning("[LOAD_STRAT] No signal generators were loaded dynamically.")
+
+    async def _prime_last_candle_timestamps(self) -> None:
+        """Fill last_candle_timestamps so the live loop starts without warnings."""
+        for sg in self.signal_generators:
+            if not hasattr(sg, "required_timeframes"):
+                continue
+            for symbol in self.symbols:
+                for tf in sg.required_timeframes:
+                    ts = self.mt5_handler.get_latest_candle_time(symbol, tf)
+                    if ts:
+                        self.last_candle_timestamps[(symbol, tf)] = ts
