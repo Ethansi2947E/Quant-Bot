@@ -63,8 +63,9 @@ TRADING_CONFIG = {
 
     "close_positions_on_shutdown": False,
     "signal_generators": [
-        #"LuxAlgoPremiumStrategy",
-        "LuxAlgoPremiumStrategy2"
+       # "MintAlgoStrategy",
+        "PremiumLuxAlgoStrategy",
+        #"LuxAlgoPremiumStrategy"
     ],
 }
 

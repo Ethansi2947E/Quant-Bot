@@ -28,13 +28,7 @@ logging.info("LOGGING CONFIGURED WITH CONSOLE OUTPUT ONLY")
 logging.info("NO LOG FILES WILL BE CREATED")
 logging.info("============================================")
 
-# --- Quiet noisy third-party libraries ---
-for lib in ['telegram', 'telegram.ext', 'httpx', 'urllib3', 'requests']:
-    logging.getLogger(lib).setLevel(logging.INFO)
 
-# --- Set log level for strategy modules ---
-logging.getLogger('src.signal_generators').setLevel(logging.WARNING)
-logging.getLogger('src.strategy').setLevel(logging.DEBUG)
 
 # --- Intercept standard logging to loguru ---
 class InterceptHandler(logging.Handler):
@@ -53,7 +47,7 @@ logger.remove()
 logger.add(
     sys.stderr,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="DEBUG",
+    level="TRACE",
     colorize=True,
     diagnose=False,
     backtrace=False

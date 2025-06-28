@@ -68,7 +68,7 @@ class DataManager:
             "W1": 604800  # Update every week
         })
         
-        # Initialize max lookback periods from config
+        # Initialize max lookback periods from config, ensuring a minimum of 500
         self.max_lookback = timeframe_config.get("max_lookback_bars", {
             "M1": 10000,
             "M5": 5000,
@@ -77,7 +77,7 @@ class DataManager:
             "H1": 1500,
             "H4": 1000,
             "D1": 500,
-            "W1": 200
+            "W1": 500  # Increased from 200 to 500
         })
         
         # Warmup configuration
@@ -620,4 +620,31 @@ class DataManager:
             return pd.DataFrame()
         # Get the latest N bars
         window = df.iloc[-lookback:] if lookback > 0 else df.copy()
-        return copy.deepcopy(window) 
+        return copy.deepcopy(window)
+
+    async def get_market_data_for_symbol(self, symbol: str, timeframes: List[str]) -> Optional[Dict[str, pd.DataFrame]]:
+        """
+        Asynchronously fetches and returns market data for all specified timeframes for a single symbol.
+
+        Args:
+            symbol: The trading symbol to fetch data for.
+            timeframes: A list of timeframes required for the symbol.
+
+        Returns:
+            A dictionary where keys are timeframes and values are pandas DataFrames
+            of market data, or None if data fetching fails for any timeframe.
+        """
+        market_data_for_symbol = {}
+        
+        try:
+            for tf in timeframes:
+                # Use the existing (now synchronous) update_data method
+                data = self.update_data(symbol, tf, force=True)
+                if data is None or data.empty:
+                    logger.warning(f"Could not retrieve data for {symbol}/{tf}.")
+                    return None 
+                market_data_for_symbol[tf] = data
+            return {symbol: market_data_for_symbol}
+        except Exception as e:
+            logger.error(f"Error fetching market data for {symbol}: {e}")
+            return None 

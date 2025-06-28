@@ -10,6 +10,8 @@ from typing import Dict, List, Any, Type, Optional
 
 from loguru import logger
 import copy
+import pandas as pd
+from pandas import DatetimeIndex
 
 from src.mt5_handler import MT5Handler
 from src.risk_manager import RiskManager
@@ -232,7 +234,8 @@ class TradingBot:
         self.signals: List[Dict] = []
         self.trade_counter = 0
         self.last_signal = {}  # Dictionary to track last signal timestamp and direction per symbol
-        self.check_interval = 60  # Set check interval to exactly 60 seconds
+        self.last_candle_timestamps = {} # Tracks the last seen candle timestamp for each symbol/timeframe
+        self.check_interval = 1  # Set check interval to 1 second for high-frequency polling
         
         # Timezone handling
         self.ny_timezone = pytz.timezone('America/New_York')
@@ -254,113 +257,131 @@ class TradingBot:
         # Log config order at the very start
         logger.info(f"[TRACE INIT] Initial trading_config signal_generators order: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
 
-    # --- NEW: Tick listener/dispatcher ---
     async def tick_event_loop(self):
         """
-        Background task: For each registered symbol, call update_on_tick every 2 seconds.
-        Trigger ALL strategies in self.signal_generators for each symbol/timeframe.
-        Adds detailed diagnostic logging for debugging.
+        High-frequency loop that checks for new candle events.
         """
-        import traceback as tb
-        if not self.signal_generators:
-            logger.error("No signal generators loaded! Cannot start tick_event_loop.")
+        logger.info("🚀 Starting tick event loop for new candle detection...")
+        
+        # Determine the unique set of symbol/timeframe pairs to monitor
+        unique_pairs_to_monitor = set()
+        for sg in self.signal_generators:
+            if hasattr(sg, 'required_timeframes'):
+                for symbol in self.symbols:
+                    for timeframe in sg.required_timeframes:
+                        unique_pairs_to_monitor.add((symbol, timeframe))
+        
+        if not unique_pairs_to_monitor:
+            logger.warning("No symbol/timeframe pairs to monitor. The tick event loop will do nothing.")
             return
-        # Log which strategies will be used
-        logger.info(f"[TICK LOOP] Using {len(self.signal_generators)} strategies: {[s.__class__.__name__ for s in self.signal_generators]}")
-        last_seen_candle = {}  # {(symbol, timeframe, strategy_name): last_datetime}
-        while not getattr(self, 'shutdown_requested', False):
+
+        logger.info(f"Monitoring {len(unique_pairs_to_monitor)} symbol/timeframe pairs.")
+
+        while not self.shutdown_requested:
             try:
-                logger.debug(f"tick_event_loop: symbols={self.symbols}, time={datetime.now()}")
-                symbols = set(sym for (sym, tf) in getattr(self.data_manager, 'requirements', {}).keys())
-                for symbol in symbols:
-                    await self.data_manager.update_on_tick(symbol)
+                if not self.mt5_handler.is_connected():
+                    logger.warning("MT5 disconnected. Pausing candle checks.")
+                    await asyncio.sleep(10)
+                    self.mt5_handler.initialize()
+                    continue
+
+                check_tasks = [
+                    self._check_for_new_candle(symbol, timeframe)
+                    for symbol, timeframe in unique_pairs_to_monitor
+                ]
+                await asyncio.gather(*check_tasks)
                 
-                # Iterate over all loaded strategies
-                for strategy in self.signal_generators:
-                    strategy_name = strategy.__class__.__name__
-                    required_timeframes = getattr(strategy, 'required_timeframes', [])
-                    primary_tf = getattr(strategy, 'primary_timeframe', required_timeframes[0] if required_timeframes else None)
-                    
-                    logger.info(f"[TICK LOOP] Processing strategy: {strategy_name}")
-                    
-                    if not required_timeframes:
-                        logger.debug(f"Skipping {strategy_name}: required_timeframes is empty")
-                        continue
-                    if not primary_tf:
-                        logger.debug(f"Skipping {strategy_name}: primary_timeframe is not set")
-                        continue
-                        
-                    lookback_periods = getattr(strategy, 'lookback_periods', {})
-                    default_lookback = getattr(strategy, 'lookback_period', 100)
-                    
-                    for symbol in self.symbols:
-                        if symbol not in symbols:
-                            logger.debug(f"Symbol {symbol} not in requirements, skipping for {strategy_name}.")
-                            continue
-                        # Add explicit log to show which strategy/symbol/timeframe is being processed
-                        logger.info(f"[TICK LOOP] Running {strategy_name} for {symbol}/{primary_tf}")
-                            
-                        # Use a unique key for last seen candle per strategy
-                        last_seen_key = (symbol, primary_tf, strategy_name)
-                        last_time = self.data_manager.last_candle_time.get((symbol, primary_tf))
-                        prev_time = last_seen_candle.get(last_seen_key)
-                        
-                        logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time={last_time}, prev_time={prev_time}")
-                        
-                        if last_time is None:
-                            logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time is None, skipping.")
-                            continue
-                        if last_time == prev_time:
-                            logger.debug(f"{strategy_name} {symbol}/{primary_tf}: last_time == prev_time ({last_time}), skipping.")
-                            continue
-                            
-                        logger.info(f"Triggering {strategy_name} for {symbol}/{primary_tf} at {last_time}")
-                        
-                        # Gather all required data windows for this symbol/strategy
-                        market_data = {symbol: {}}
-                        missing_data = False
-                        for tf in required_timeframes:
-                            lb = lookback_periods.get(tf, default_lookback)
-                            df = self.data_manager.get_data_window(symbol, tf, lb)
-                            if df is None or df.empty or len(df) < lb:
-                                logger.warning(f"Not enough data for {symbol}/{tf} (needed {lb} bars for {strategy_name}, got {len(df) if df is not None else 0})")
-                                missing_data = True
-                                break
-                            logger.debug(f"[DataFetch] {strategy_name} {symbol}/{tf}: fetched {len(df)} bars (required: {lb})")
-                            market_data[symbol][tf] = df
-                        
-                        # Skip signal generation if data is missing
-                        if missing_data:
-                            logger.warning(f"Skipping signal generation for {strategy_name} on {symbol}/{primary_tf} due to missing data")
-                            continue
-                        
-                        # Call generate_signals
-                        try:
-                            signals = await strategy.generate_signals(
-                                market_data=copy.deepcopy(market_data),
-                                symbol=symbol,
-                                timeframe=primary_tf,
-                                skip_plots=True  # Ensure plots are skipped during live trading
-                            )
-                            if signals:
-                                logger.info(f"Strategy {strategy_name} generated {len(signals)} signals for {symbol}/{primary_tf}")
-                            else:
-                                logger.info(f"Strategy {strategy_name} returned no signals for {symbol}/{primary_tf}")
-                            await self.process_signals(signals)
-                        except Exception as e:
-                            logger.error(f"Error in strategy {strategy_name} generate_signals: {str(e)}\n{tb.format_exc()}")
-                        
-                        # Update last seen for this specific strategy
-                        last_seen_candle[last_seen_key] = last_time
-                        
-                # End of strategy loop
-                await asyncio.sleep(2)
-            
+                await asyncio.sleep(self.check_interval)
+
+            except asyncio.CancelledError:
+                logger.info("Tick event loop cancelled.")
+                break
             except Exception as e:
-                logger.error(f"Error in tick_event_loop: {str(e)}\n{tb.format_exc()}")
-                await asyncio.sleep(2)
+                logger.error(f"An error occurred in the tick event loop: {e}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
+
+    async def _check_for_new_candle(self, symbol: str, timeframe: str):
+        """
+        Checks if a new candle has closed for a given symbol and timeframe.
+        This is intended for the live monitoring loop, not for startup.
+        """
+        key = (symbol, timeframe)
+        last_known_timestamp = self.last_candle_timestamps.get(key)
+
+        if last_known_timestamp is None:
+            logger.warning(f"[{symbol}/{timeframe}] Missing initial timestamp in live loop. Re-initializing.")
+            latest_ts = self.mt5_handler.get_latest_candle_time(symbol, timeframe)
+            if latest_ts:
+                self.last_candle_timestamps[key] = latest_ts
+            return
+
+        latest_timestamp = self.mt5_handler.get_latest_candle_time(symbol, timeframe)
+        if latest_timestamp is None:
+            return
+
+        if latest_timestamp > last_known_timestamp:
+            logger.info(f"🕯️ New candle detected for {symbol}/{timeframe}. Timestamp: {datetime.fromtimestamp(latest_timestamp)}")
+            self.last_candle_timestamps[key] = latest_timestamp
+            
+            asyncio.create_task(self.run_analysis_cycle_for_symbol(symbol))
+
+    async def run_analysis_cycle_for_symbol(self, symbol: str):
+        """
+        Runs the full analysis pipeline for a single symbol.
+        Fetches data, generates signals, and processes them.
+        """
+        if not self.trading_enabled:
+            return
+
+        try:
+            logger.debug(f"Running analysis cycle for {symbol}...")
+            logger.info(f"New candle detected, re-fetching market data for {symbol} to run analysis.")
+            
+            required_timeframes = set()
+            for sg in self.signal_generators:
+                if hasattr(sg, 'required_timeframes'):
+                    for tf in sg.required_timeframes:
+                        required_timeframes.add(tf)
+            
+            market_data_response = await self.data_manager.get_market_data_for_symbol(symbol, list(required_timeframes))
+
+            if not market_data_response or symbol not in market_data_response:
+                logger.warning(f"Could not fetch market data for {symbol} to run analysis.")
+                return
+
+            market_data = market_data_response
+            # Populate the last known timestamps from the fetched data, primarily for startup
+            for tf, df in market_data[symbol].items():
+                if not df.empty and isinstance(df.index, pd.DatetimeIndex):
+                    key = (symbol, tf)
+                    timestamp = int(df.index[-1].timestamp())
+                    self.last_candle_timestamps[key] = timestamp
+
+            all_signals = []
+            for sg in self.signal_generators:
+                try:
+                    logger.debug(f"Executing signal generator '{sg.name}' for {symbol}...")
+                    symbol_specific_data = {symbol: market_data[symbol]}
+                    signals = await sg.generate_signals(market_data=symbol_specific_data)
+                    if signals:
+                        all_signals.extend(signals)
+                except Exception as e:
+                    logger.error(f"Error generating signals from {sg.name} for {symbol}: {e}")
+                    logger.error(traceback.format_exc())
+            
+            if all_signals:
+                await self.process_signals(all_signals)
+
+        except Exception as e:
+            logger.error(f"Error in analysis cycle for symbol {symbol}: {e}")
+            logger.error(traceback.format_exc())
 
     async def _initialize_signal_generators(self):
+        """
+        Load and initialize signal generators based on the configuration.
+        This method dynamically loads signal generator classes from the 'strategy' directory.
+        """
         logger.info(f"[TRACE] _initialize_signal_generators called. trading_config signal_generators: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
         try:
             active_generator_names = self.trading_config.get("signal_generators")
@@ -424,6 +445,25 @@ class TradingBot:
             logger.error(traceback.format_exc())
             raise
 
+    async def _perform_startup_analysis(self):
+        """
+        Performs an initial data fetch and analysis for all required symbols.
+        This "warms up" the bot with historical data before live monitoring begins.
+        """
+        logger.info("🔥 Performing startup data warmup and initial analysis...")
+
+        unique_symbols = set(self.symbols)
+        if not unique_symbols:
+            logger.warning("No symbols configured for startup analysis.")
+            return
+
+        analysis_tasks = [
+            self.run_analysis_cycle_for_symbol(symbol) for symbol in unique_symbols
+        ]
+        await asyncio.gather(*analysis_tasks)
+        
+        logger.info("✅ Startup analysis complete. Bot is now live and monitoring for new candles.")
+
     async def start(self):
         """Start the trading bot."""
         # Create a future object that will be returned
@@ -455,13 +495,13 @@ class TradingBot:
                 logger.error("No signal generators loaded after initialization! Cannot start tick_event_loop.")
                 raise RuntimeError("No signal generators loaded.")
             
+            # Perform initial data fetch and analysis before starting live monitoring
+            await self._perform_startup_analysis()
+            
             # Set up Telegram commands
             if self.telegram_bot:
                 await self.register_telegram_commands()
                 logger.info("Telegram commands registered")
-            
-            # Start the notification task
-            self.notification_task = asyncio.create_task(self.send_notification_task())
             
             # --- REPLACE OLD MAIN LOOP WITH TICK EVENT LOOP ---
             self.main_task = asyncio.create_task(self.tick_event_loop())
@@ -1323,38 +1363,3 @@ class TradingBot:
             logger.info(f"[LOAD_STRAT] Finished loading. Found {len(self.available_signal_generators)} generators: {list(self.available_signal_generators.keys())}")
         else:
             logger.warning("[LOAD_STRAT] No signal generators were loaded dynamically.")
-    
-    async def send_notification_task(self):
-        """Periodically send status notifications to the Telegram bot."""
-        try:
-            while self.running and not self.shutdown_requested:
-                # Only send periodic notifications if telegram bot is available
-                if self.telegram_bot and hasattr(self.telegram_bot, 'is_running') and self.telegram_bot.is_running:
-                    # Get current status information
-                    positions = self.mt5_handler.get_open_positions() if self.mt5_handler is not None else []
-                    position_count = len(positions)
-                    
-                    # Only send notification if there are open positions
-                    if position_count > 0:
-                        try:
-                            # Calculate floating profit
-                            total_profit = sum(pos["profit"] for pos in positions)
-                            
-                            # Format message
-                            message = f"📊 Status Update\n"
-                            message += f"Open Positions: {position_count}\n"
-                            message += f"Total P/L: {total_profit:.2f}\n"
-                            
-                            # Send notification
-                            if hasattr(self.telegram_bot, 'send_notification'):
-                                await self.telegram_bot.send_notification(message)
-                        except Exception as e:
-                            logger.error(f"Error sending status notification: {str(e)}")
-                
-                # Wait for next notification interval (4 hours)
-                await asyncio.sleep(4 * 60 * 60)
-        except asyncio.CancelledError:
-            logger.info("Notification task cancelled")
-        except Exception as e:
-            logger.error(f"Error in notification task: {str(e)}")
-            logger.error(traceback.format_exc())

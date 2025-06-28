@@ -152,6 +152,35 @@ class MT5Handler:
             logger.error(traceback.format_exc())
             return {}
 
+    def get_latest_candle_time(self, symbol: str, timeframe: str) -> Optional[int]:
+        """
+        Get the timestamp of the most recent candle for a symbol and timeframe.
+        This is a lightweight check to see if a new candle has formed.
+        
+        Args:
+            symbol: Symbol to check
+            timeframe: Timeframe to check
+            
+        Returns:
+            The timestamp (as an integer Unix epoch) of the latest candle, or None if error.
+        """
+        if not self.connected:
+            return None
+
+        try:
+            mt5_timeframe = self._get_mt5_timeframe(timeframe)
+            
+            rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 1)
+            
+            if rates is None or len(rates) == 0:
+                return None
+                
+            return int(rates[0]['time'])
+            
+        except Exception as e:
+            logger.trace(f"Could not get latest candle time for {symbol}/{timeframe}: {e}")
+            return None
+
     def get_market_data(
         self,
         symbol: str,
