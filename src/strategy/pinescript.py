@@ -60,7 +60,7 @@ class PremiumLuxAlgo:
         high = self.data['high']
         low = self.data['low']
         atr = self.atr(atr_period)
-
+        
         # PineScript's direction logic is a bit unusual.
         # We'll use 1 for uptrend and -1 for downtrend.
         direction = pd.Series(1, index=close.index) 
@@ -488,11 +488,8 @@ class PremiumLuxAlgo:
                         af = min(af + af_step, max_af)
         return psar
 
-    def calculate_all_indicators(self, sensitivity: float = 5.5) -> dict:
-        """
-        Calculate all indicators and return a dictionary with the results dataframe
-        and other metadata like S/R levels.
-        """
+    def calculate_all_indicators(self, sensitivity: float = 5.5) -> pd.DataFrame:
+        """Calculate all indicators and return results dataframe"""
         
         # Initialize the sr_data attribute to None
         self.sr_data = None
@@ -505,25 +502,17 @@ class PremiumLuxAlgo:
         self.results['supertrend'] = supertrend
         self.results['st_direction'] = st_direction
         
-        # SMA calculations
+        # SMA calculations (FIX: Use 13 period as per original script, not 9)
         close = self.data['close']
-        sma13 = self.sma(close, 13)
-        self.results['sma_filter'] = sma13
+        self.results['sma13'] = self.sma(close, 13)
         
-        # --- NEW ROBUST SIGNAL LOGIC ---
-        # A signal is a CHANGE in the trend direction.
-        prev_direction = st_direction.shift(1)
+        # Buy/Sell signals (REFINEMENT: Decoupled from SMA filter)
+        bull_signal = (close > supertrend) & (close.shift(1) <= supertrend.shift(1))
+        bear_signal = (close < supertrend) & (close.shift(1) >= supertrend.shift(1))
         
-        # A Bull signal is when the direction flips from -1 (or 0) to 1.
-        just_flipped_bull = (st_direction == 1) & (prev_direction <= 0)
+        self.results['bull_signal'] = bull_signal
+        self.results['bear_signal'] = bear_signal
         
-        # A Bear signal is when the direction flips from 1 (or 0) to -1.
-        just_flipped_bear = (st_direction == -1) & (prev_direction >= 0)
-
-        # Now, combine the flip with the SMA filter.
-        self.results['bull_signal'] = just_flipped_bull & (close >= sma13)
-        self.results['bear_signal'] = just_flipped_bear & (close <= sma13)
-
         # TP Points
         major_tp, minor_tp = self.calculate_tp_points()
         self.results['major_tp'] = major_tp
@@ -569,7 +558,7 @@ class PremiumLuxAlgo:
         
         self.results['psar'] = self.psar()
         
-        return {"dataframe": self.results}
+        return self.results
     
     def get_signals(self) -> pd.DataFrame:
         """Get clean signals summary"""
@@ -663,29 +652,31 @@ class PremiumLuxAlgoStrategy(SignalGenerator):
                 self.processed_bars[(sym, self.primary_timeframe)] = last_timestamp
             except IndexError: continue
 
+            logger.debug(f"[{sym}] Analyzing data for timestamp: {last_timestamp}")
+
             try:
                 lux_algo = PremiumLuxAlgo(primary_df.copy())
-                all_results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
-                results = all_results["dataframe"]
+                # Pass strategy params to the indicator calculation
+                results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
             except Exception as e:
-                logger.error(f"[{sym}] Error calculating indicators: {e}", exc_info=True)
+                logger.error(f"[{sym}] Error calculating indicators: {e}")
                 continue
             
+            # --- CORRECTION: Use the pre-calculated results from the LuxAlgo class ---
             last = results.iloc[-1]
             
-            # The full condition is now calculated once in the `PremiumLuxAlgo` class.
-            bull_cond = last['bull_signal']
-            bear_cond = last['bear_signal']
-            
-            logger.debug(
-                f"[{sym}] Analysis for {last.name}: Close={last.close:.5f}, "
-                f"ST_Dir={int(last.st_direction)}, Prev_ST_Dir={int(results.iloc[-2]['st_direction'])}, "
-                f"SMA13={last.sma_filter:.5f}, "
-                f"==> Bull Signal: {bull_cond}, Bear Signal: {bear_cond}"
-            )
+            logger.debug(f"[{sym}] Last candle data: Close={last['close']:.5f}, SMA13={last['sma13']:.5f}, "
+                         f"Supertrend={last['supertrend']:.5f}, ST_Dir={last['st_direction']}, "
+                         f"Bull={last['bull_signal']}, Bear={last['bear_signal']}, "
+                         f"MajorTP={last['major_tp']}, MinorTP={last['minor_tp']}")
+
+            # REFINEMENT: Apply the SMA(13) filter here, not during signal calculation
+            bull_cond = last['bull_signal'] and last['close'] >= last['sma13']
+            bear_cond = last['bear_signal'] and last['close'] <= last['sma13']
 
             direction = 'buy' if bull_cond else 'sell' if bear_cond else None
             if not direction:
+                logger.trace(f"[{sym}] No signal condition met at {last.name}. Bull: {bull_cond}, Bear: {bear_cond}")
                 continue
 
             tp_score = 0
@@ -696,12 +687,21 @@ class PremiumLuxAlgoStrategy(SignalGenerator):
                 if self.params['use_minor_tp'] and last['minor_tp'] == -1: tp_score += 1
                 if self.params['use_major_tp'] and last['major_tp'] == -1: tp_score += 2
             
-            confidence = min(0.95, 0.75 + (tp_score * 0.1))
+            logger.debug(f"[{sym}] Direction: {direction}, TP Score: {tp_score}")
+
+            confidence = 0.75 + (tp_score * 0.1) # Base confidence 0.75, max 0.95
+
             entry = last['close']
             atr = lux_algo.atr(period=self.params['supertrend_atr_period']).iloc[-1]
             
-            stop_loss = entry - (atr * self.atr_multiplier) if direction == 'buy' else entry + (atr * self.atr_multiplier)
-            take_profit = entry + (abs(entry - stop_loss) * self.min_risk_reward) if direction == 'buy' else entry - (abs(entry - stop_loss) * self.min_risk_reward)
+            if direction == 'buy':
+                stop_loss = entry - (atr * self.atr_multiplier)
+                take_profit = entry + ((entry - stop_loss) * self.min_risk_reward)
+            else: # sell
+                stop_loss = entry + (atr * self.atr_multiplier)
+                take_profit = entry - ((stop_loss - entry) * self.min_risk_reward)
+
+            logger.debug(f"[{sym}] Calculated SL: {stop_loss:.5f}, TP: {take_profit:.5f}, ATR: {atr:.5f}")
 
             signal_details = {
                 "symbol": sym, "direction": direction, "entry_price": entry,
@@ -709,8 +709,8 @@ class PremiumLuxAlgoStrategy(SignalGenerator):
                 "timeframe": self.primary_timeframe, "strategy_name": self.name,
                 "confidence": confidence, "signal_timestamp": str(last.name),
                 "detailed_reasoning": [
-                    f"Supertrend Flipped: {direction.upper()}",
-                    f"SMA(13) Filter Met: Close ({last.close:.5f}) vs SMA ({last.sma_filter:.5f})",
+                    f"Supertrend Crossover: {direction.upper()}",
+                    f"SMA(13) Confirmation: Close ({last['close']:.5f}) {' >=' if direction == 'buy' else ' <='} SMA(13) ({last['sma13']:.5f})",
                     f"TP Score: {tp_score}"
                 ]
             }
