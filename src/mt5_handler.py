@@ -401,60 +401,57 @@ class MT5Handler:
 
             # Adjust stop loss and take profit if they're too close to the entry price
             if action == mt5.ORDER_TYPE_BUY:
-                if stop_loss >= price - min_stop_distance:
-                    logger.warning(f"Stop loss for BUY order too close to entry, adjusting: SL ({stop_loss}) → ({price - min_stop_distance - symbol_info.point})")
-                    stop_loss = price - min_stop_distance - symbol_info.point
-                if take_profit <= price + min_stop_distance:
-                    logger.warning(f"Take profit for BUY order too close to entry, adjusting: TP ({take_profit}) → ({price + min_stop_distance + symbol_info.point})")
-                    take_profit = price + min_stop_distance + symbol_info.point
+                if stop_loss is not None and stop_loss != 0 and stop_loss >= price - min_stop_distance:
+                    logger.warning(f"Stop loss for BUY order too close to entry, adjusting: SL ({stop_loss}) → ({price - min_stop_distance})")
+                    stop_loss = price - min_stop_distance
+                if take_profit is not None and take_profit != 0 and take_profit <= price + min_stop_distance:
+                    logger.warning(f"Take profit for BUY order too close to entry, adjusting: TP ({take_profit}) → ({price + min_stop_distance})")
+                    take_profit = price + min_stop_distance
             else:  # SELL
-                if stop_loss <= price + min_stop_distance:
-                    logger.warning(f"Stop loss for SELL order too close to entry, adjusting: SL ({stop_loss}) → ({price + min_stop_distance + symbol_info.point})")
-                    stop_loss = price + min_stop_distance + symbol_info.point
-                if take_profit >= price - min_stop_distance:
-                    logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
-                    take_profit = price - min_stop_distance - symbol_info.point
+                if stop_loss is not None and stop_loss != 0 and stop_loss <= price + min_stop_distance:
+                    logger.warning(f"Stop loss for SELL order too close to entry, adjusting: SL ({stop_loss}) → ({price + min_stop_distance})")
+                    stop_loss = price + min_stop_distance
+                if take_profit is not None and take_profit != 0 and take_profit >= price - min_stop_distance:
+                    logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance})")
+                    take_profit = price - min_stop_distance
 
-            # --- RISK-REWARD VALIDATION (NEW) ---
-            # Get min_risk_reward from config, or use a default if not found
+            # --- RISK-REWARD VALIDATION (REVISED) ---
+            # This block runs AFTER SL/TP adjustments to ensure the trade is still viable.
             min_risk_reward = RISK_MANAGER_CONFIG.get('min_risk_reward', 1.0)
-            
-            # Calculate risk-reward ratio
-            if action == mt5.ORDER_TYPE_BUY:
-                risk = price - stop_loss
-                reward = take_profit - price
-            else:  # SELL
-                risk = stop_loss - price
-                reward = price - take_profit
-                
-            # Only validate R:R if both SL and TP are set
-            if risk <= 0 or reward <= 0:
-                logger.error(f"Invalid risk/reward values after adjustment: risk={risk}, reward={reward}")
-                return None
-                
-            risk_reward_ratio = reward / risk
-            if risk_reward_ratio < min_risk_reward:
-                # Instead of rejecting, adjust TP to meet minimum risk:reward
+
+            # Use the first TP from the list if available, otherwise use the single take_profit value
+            tp_for_rr_calc = take_profit
+            if take_profits and isinstance(take_profits, list) and len(take_profits) > 0:
+                tp_for_rr_calc = take_profits[0]
+
+            if stop_loss is not None and stop_loss != 0 and tp_for_rr_calc is not None and tp_for_rr_calc != 0:
                 if action == mt5.ORDER_TYPE_BUY:
-                    new_tp = price + (risk * min_risk_reward)
-                    logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
-                    take_profit = new_tp
+                    risk = price - stop_loss
+                    reward = tp_for_rr_calc - price
                 else:  # SELL
-                    new_tp = price - (risk * min_risk_reward)
-                    logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
-                    take_profit = new_tp
+                    risk = stop_loss - price
+                    reward = price - tp_for_rr_calc
+
+                if risk <= 0:
+                    logger.error(f"Trade aborted: Invalid risk ({risk:.5f}) after adjustments. Price: {price}, SL: {stop_loss}")
+                    return None
                 
-                # Recalculate the R:R after adjustment
-                if action == mt5.ORDER_TYPE_BUY:
-                    reward = take_profit - price
-                else:  # SELL
-                    reward = price - take_profit
+                if reward <= 0:
+                    logger.error(f"Trade aborted: Invalid reward ({reward:.5f}) after adjustments. Price: {price}, TP: {tp_for_rr_calc}")
+                    return None
+
                 risk_reward_ratio = reward / risk
-                logger.info(f"New risk:reward ratio after TP adjustment: {risk_reward_ratio:.2f}")
-                
-            # If TP or SL are missing, don't validate R:R
-            if stop_loss == 0 or take_profit == 0:
-                logger.info(f"Skipping R:R validation as SL or TP is not set")
+                logger.info(f"Post-adjustment validation. Risk: {risk:.5f}, Reward: {reward:.5f}, R:R: {risk_reward_ratio:.2f}")
+
+                if risk_reward_ratio < min_risk_reward:
+                    logger.critical(
+                        f"TRADE ABORTED: Risk-to-reward ratio ({risk_reward_ratio:.2f}) is below the minimum "
+                        f"required ({min_risk_reward:.2f}) after broker adjustments. "
+                        f"Final params: Price={price}, SL={stop_loss}, TP={tp_for_rr_calc}"
+                    )
+                    return None
+            else:
+                logger.warning("Skipping R:R validation as Stop Loss or Take Profit is not set.")
                 
             # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
             try:

@@ -663,7 +663,7 @@ class SignalProcessor:
                 
                 trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, final_take_profit_for_order, position_size)
                 
-                await self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
+                self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
                 
                 return {
                     'status': 'success',
@@ -675,7 +675,7 @@ class SignalProcessor:
                 error_message = f'Failed to place {order_type} order'
                 logger.error(f"❌ {order_type.upper()} execution failed: {error_message}")
                 if self.telegram_bot:
-                    await self.telegram_bot.send_message(
+                    self.telegram_bot.send_message(
                         f"❌ {order_type.upper()} Execution Failed\n\n"
                         f"Symbol: {symbol}\n"
                         f"Direction: {(direction or '').upper()}\n"
