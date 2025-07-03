@@ -244,15 +244,29 @@ class RiskManager:
             logger.error("Trade validation failed: Stop loss (stop_loss_price or stop_loss) is missing.")
             return {'is_valid': False, 'reason': "Stop loss key (stop_loss_price or stop_loss) is missing", 'position_size': 0.0}
 
-        has_take_profit = 'take_profit_price' in trade or 'take_profit' in trade
-        if not has_take_profit:
-            logger.error("Trade validation failed: Take profit (take_profit_price or take_profit) is missing.")
-            return {'is_valid': False, 'reason': "Take profit key (take_profit_price or take_profit) is missing", 'position_size': 0.0}
+        # --- MODIFICATION: Handle single or multiple take-profits ---
+        has_take_profits = 'take_profits' in trade and isinstance(trade.get('take_profits'), list)
+        has_single_take_profit = 'take_profit_price' in trade or 'take_profit' in trade
+        
+        if not has_take_profits and not has_single_take_profit:
+            logger.error("Trade validation failed: Take profit key ('take_profits', 'take_profit_price', or 'take_profit') is missing.")
+            return {'is_valid': False, 'reason': "Take profit key is missing", 'position_size': 0.0}
 
         entry_val = trade.get('entry_price') 
         stop_val = trade.get('stop_loss_price', trade.get('stop_loss'))
-        tp_val = trade.get('take_profit_price', trade.get('take_profit'))
         
+        # --- Multi-TP Handling ---
+        tp_val = None
+        if has_take_profits:
+            tp_list = trade.get('take_profits', [])
+            if not tp_list:
+                logger.error("Trade validation failed: 'take_profits' list is present but empty.")
+                return {'is_valid': False, 'reason': "'take_profits' list is empty", 'position_size': 0.0}
+            tp_val = tp_list[0] # Use the first TP for validation
+            logger.debug(f"Validating with first TP from list: {tp_val}")
+        else:
+            tp_val = trade.get('take_profit_price', trade.get('take_profit'))
+
         if entry_val is None: # Should have been caught by 'entry_price' in trade check, but for safety
             logger.error("Trade validation failed: entry_price value is None.")
             return {'is_valid': False, 'reason': "entry_price value is None", 'position_size': 0.0}

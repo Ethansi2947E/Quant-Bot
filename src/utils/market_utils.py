@@ -96,3 +96,66 @@ def convert_price_to_pips(price_diff: float, symbol: str, symbol_info: Any = Non
     if pip_value == 0:
         return 0  # Avoid division by zero
     return price_diff / pip_value 
+
+def adjust_trade_for_spread(
+    symbol: str,
+    order_type: str,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    mt5_handler: Any  # MT5Handler instance
+) -> Tuple[float, float, float, float]:
+    """
+    Adjusts SL/TP based on the current spread to maintain intended risk/reward.
+
+    Args:
+        symbol (str): The trading symbol.
+        order_type (str): 'BUY' or 'SELL'.
+        entry_price (float): The signal's entry price.
+        stop_loss (float): The signal's stop loss.
+        take_profit (float): The signal's take profit.
+        mt5_handler (Any): An instance of the MT5Handler.
+
+    Returns:
+        Tuple[float, float, float, float]: A tuple containing the actual_entry_price, 
+                                           adjusted_stop_loss, and adjusted_take_profit, spread.
+    """
+    try:
+        tick_info = mt5_handler.get_last_tick(symbol)
+        if not tick_info:
+            logger.error(f"Could not retrieve tick info for {symbol} to adjust for spread.")
+            return entry_price, stop_loss, take_profit, 0.0
+
+        spread = tick_info['ask'] - tick_info['bid']
+        
+        if order_type.upper() == 'BUY':
+            actual_entry_price = tick_info['ask']
+            risk_pips = entry_price - stop_loss
+            reward_pips = take_profit - entry_price
+            
+            new_stop_loss = actual_entry_price - risk_pips
+            new_take_profit = actual_entry_price + reward_pips
+            
+        elif order_type.upper() == 'SELL':
+            actual_entry_price = tick_info['bid']
+            risk_pips = stop_loss - entry_price
+            reward_pips = entry_price - take_profit
+
+            new_stop_loss = actual_entry_price + risk_pips
+            new_take_profit = actual_entry_price - reward_pips
+        else:
+            logger.warning(f"Unknown order type '{order_type}' for spread adjustment.")
+            return entry_price, stop_loss, take_profit, 0.0
+
+        logger.info(f"Spread Adjustment for {symbol} {order_type}:")
+        logger.info(f"  - Original Signal: Entry={entry_price}, SL={stop_loss}, TP={take_profit}")
+        logger.info(f"  - Market Prices: Bid={tick_info['bid']}, Ask={tick_info['ask']}, Spread={spread:.5f}")
+        logger.info(f"  - Actual Entry: {actual_entry_price}")
+        logger.info(f"  - Adjusted Trade: SL={new_stop_loss}, TP={new_take_profit}")
+
+        return actual_entry_price, new_stop_loss, new_take_profit, spread
+
+    except Exception as e:
+        logger.error(f"Error adjusting trade for spread for {symbol}: {e}")
+        logger.error(traceback.format_exc())
+        return entry_price, stop_loss, take_profit, 0.0 

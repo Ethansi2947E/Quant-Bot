@@ -8,6 +8,8 @@ import hashlib
 from src.risk_manager import RiskManager
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
+from src.utils.market_utils import adjust_trade_for_spread
+from src.utils.position_manager import PositionManager
 
 class SignalProcessor:
     """
@@ -20,7 +22,7 @@ class SignalProcessor:
     - Validating signals against real-time MT5 data before execution
     """
     
-    def __init__(self, mt5_handler=None, risk_manager=None, telegram_bot=None, config=None):
+    def __init__(self, mt5_handler=None, risk_manager=None, telegram_bot=None, config=None, position_manager=None):
         """
         Initialize the SignalProcessor.
         
@@ -29,10 +31,12 @@ class SignalProcessor:
             risk_manager: RiskManager instance for position sizing
             telegram_bot: TelegramBot instance for notifications
             config: Configuration dictionary
+            position_manager: PositionManager instance for multi-TP handling
         """
         self.mt5_handler = mt5_handler if mt5_handler is not None else MT5Handler()
         self.risk_manager = risk_manager if risk_manager is not None else RiskManager()
         self.telegram_bot = telegram_bot if telegram_bot else TelegramBot.get_instance()
+        self.position_manager = position_manager if position_manager is not None else PositionManager()
         self.config = config or {}
         
         # State tracking
@@ -528,6 +532,13 @@ class SignalProcessor:
                     # --- RiskManager state update: trade opened ---
                     if self.risk_manager:
                         self.risk_manager.on_trade_opened(signal)
+                    # --- NEW: Register trade with PositionManager for multi-TP handling ---
+                    if self.position_manager:
+                        try:
+                            self.position_manager.register_trade(signal, result)
+                        except Exception as e:
+                            logger.error(f"Failed to register trade with PositionManager: {e}")
+                    # -------------------------------------------------------------------
                 else:
                     signal["status"] = "failed"
                     signal["error"] = result.get("message", "Unknown error")
@@ -620,70 +631,45 @@ class SignalProcessor:
 
             # --- Extract signal parameters ---
             entry_price = signal.get('entry_price', 0)
-            stop_loss = signal.get('stop_loss', 0)
-            take_profit = signal.get('take_profit', 0)
-            comment = signal.get('reason') or signal.get('description') or f"{signal.get('strategy_name', 'BOT')} trade"
-
-            # --- Final normalization of position size ---
-            if self.mt5_handler:
-                position_size = self.mt5_handler.normalize_volume(symbol, position_size)
-                logger.info(f"Final normalized position size for {symbol}: {position_size} lots (after validation and final checks).")
+            stop_loss = float(signal.get('stop_loss', 0.0))
             
-            # --- ROUTE TO CORRECT ORDER FUNCTION ---
-            order_result = None
-            if order_type == 'limit':
-                logger.info(f"Placing LIMIT order for {symbol}...")
-                order_result = self.mt5_handler.place_limit_order(
-                    symbol=symbol,
-                    order_type=(direction or "").upper(),
-                    volume=position_size,
-                    limit_price=entry_price, # For a limit order, this is the target price
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    comment=comment
-                )
-            elif order_type == 'market':
-                logger.info(f"Placing MARKET order for {symbol}...")
-                # For market orders, if the price has deviated significantly, we might want to recalculate SL/TP
-                current_tick = self.mt5_handler.get_last_tick(symbol)
-                if current_tick:
-                    current_price = current_tick['bid'] if (direction or "").lower() == 'sell' else current_tick['ask']
-                    original_entry = signal.get('entry_price', 0)
-                    if original_entry > 0 and abs(current_price - original_entry) / original_entry > 0.005:
-                        signal = self._recalculate_tp_sl_for_price_deviation(signal, current_price)
-                        entry_price = signal.get('entry_price', entry_price)
-                        stop_loss = signal.get('stop_loss', stop_loss)
-                        take_profit = signal.get('take_profit', take_profit)
+            # --- Multi-TP Handling ---
+            # Look for a list of TPs first, then fall back to a single TP
+            take_profits_list = signal.get('take_profits') # This will be a list or None
+            take_profit_single = float(signal.get('take_profit', 0.0)) # Fallback single value
+            
+            # For the order, we use the single TP if the list is absent, 
+            # otherwise MT5Handler will use the first from the list.
+            final_take_profit_for_order = take_profit_single if not take_profits_list else take_profits_list[0]
 
-                order_result = self.mt5_handler.place_market_order(
-                    symbol=symbol,
-                    order_type=(direction or "").upper(),
-                    volume=position_size,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    comment=comment
-                )
-            else:
-                logger.error(f"Unsupported order type: {order_type}")
-                return {'status': 'error', 'message': f"Unsupported order type: {order_type}"}
+            logger.debug(f"Executing trade for {symbol} {direction}: size={position_size}, SL={stop_loss}, TP={final_take_profit_for_order}")
+            
+            # Execute the trade using MT5Handler
+            trade_result = self.mt5_handler.place_market_order(
+                symbol=symbol,
+                order_type=direction,
+                volume=position_size,
+                stop_loss=stop_loss,
+                take_profit=take_profit_single, # Pass single TP for backward compatibility/clarity
+                take_profits=take_profits_list, # Pass the list for new logic
+                comment=f"Signal: {signal.get('strategy_name', 'N/A')}"
+            )
 
-            execution_time = time.time() - execution_start
-            logger.debug(f"[TIMING] 💰 Total trade execution took {execution_time:.4f}s")
-
-            if order_result:
+            if trade_result and 'ticket' in trade_result and trade_result['ticket'] > 0:
+                ticket = trade_result['ticket']
                 logger.info(f"✅ {order_type.upper()} order processed successfully: {symbol} {(direction or '')} {position_size} lots")
                 if self.risk_manager:
                     self.risk_manager.on_trade_opened(signal)
                 
-                trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, take_profit, position_size)
+                trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, final_take_profit_for_order, position_size)
                 
                 await self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
                 
                 return {
                     'status': 'success',
-                    'order': order_result.get('ticket', 0),
+                    'order': ticket,
                     'message': f'{order_type.capitalize()} order placed successfully',
-                    'time_taken': execution_time
+                    'time_taken': time.time() - execution_start
                 }
             else:
                 error_message = f'Failed to place {order_type} order'
@@ -699,7 +685,7 @@ class SignalProcessor:
                     'status': 'error',
                     'message': error_message,
                     'code': 'MT5_EXECUTION_ERROR',
-                    'time_taken': execution_time
+                    'time_taken': time.time() - execution_start
                 }
                 
         except Exception as e:
@@ -1084,13 +1070,20 @@ class SignalProcessor:
             
             # Use strategy_name from signal if available
             strategy_name = signal.get('strategy_name') or signal.get('strategy') or 'Unknown'
+            # Check for multiple TPs and format them if they exist
+            take_profits = signal.get('take_profits')
+            if take_profits and isinstance(take_profits, list):
+                tp_text = ", ".join([f"TP{i+1}: {tp:.5f}" for i, tp in enumerate(take_profits)])
+            else:
+                tp_text = f"{take_profit:.5f}" # Fallback to single TP
+            
             trade_details = (
                 f"🔸 Strategy: {strategy_name}\n"
                 f"🔹 Symbol: {symbol}\n"
                 f"🔹 Direction: {(direction or '').upper()}\n"
-                f"🔹 Entry: {entry_price}\n"
-                f"🔹 Stop Loss: {stop_loss}\n"
-                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Entry: {entry_price:.5f}\n"
+                f"🔹 Stop Loss: {stop_loss:.5f}\n"
+                f"🔹 Take Profit: {tp_text}\n"
                 f"🔹 Size: {position_size} lots\n\n"
                 f"📊 Confidence: {confidence_pct:.1f}%\n"
                 f"📊 Signal Quality: {self._get_score_emoji(final_score_pct)} ({final_score_pct:.1f}%)\n"
@@ -1135,13 +1128,20 @@ class SignalProcessor:
                 analysis_text = "\n".join(str(r) for r in detailed_reasoning)
             else:
                 analysis_text = signal.get('reason', 'N/A')
+            # Check for multiple TPs and format them if they exist
+            take_profits = signal.get('take_profits')
+            if take_profits and isinstance(take_profits, list):
+                tp_text = ", ".join([f"TP{i+1}: {tp:.5f}" for i, tp in enumerate(take_profits)])
+            else:
+                tp_text = f"{take_profit:.5f}" # Fallback to single TP
+            
             trade_details = (
                 f"🔸 Strategy: {strategy_name}\n"
                 f"🔹 Symbol: {symbol}\n"
                 f"🔹 Direction: {(direction or '').upper()}\n"
-                f"🔹 Entry: {entry_price}\n"
-                f"🔹 Stop Loss: {stop_loss}\n"
-                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Entry: {entry_price:.5f}\n"
+                f"🔹 Stop Loss: {stop_loss:.5f}\n"
+                f"🔹 Take Profit: {tp_text}\n"
                 f"🔹 Size: {position_size} lots\n\n"
                 f"📊 Confidence: {signal.get('confidence', 0) * 100:.1f}%\n"
                 f"📊 Signal Quality: {self._get_score_emoji(signal_quality_pct)} ({signal_quality_pct:.1f}%)\n"
@@ -1169,13 +1169,20 @@ class SignalProcessor:
             zone = signal.get('zone', 0.0)
             zone_touches = signal.get('zone_touches', 0)
             
+            # Check for multiple TPs and format them if they exist
+            take_profits = signal.get('take_profits')
+            if take_profits and isinstance(take_profits, list):
+                tp_text = ", ".join([f"TP{i+1}: {tp:.5f}" for i, tp in enumerate(take_profits)])
+            else:
+                tp_text = f"{take_profit:.5f}" # Fallback to single TP
+            
             trade_details = (
                 f"🔸 Strategy: {strategy_name}\n"
                 f"🔹 Symbol: {symbol}\n"
                 f"🔹 Direction: {(direction or '').upper()}\n"
-                f"🔹 Entry: {entry_price}\n"
-                f"🔹 Stop Loss: {stop_loss}\n"
-                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Entry: {entry_price:.5f}\n"
+                f"🔹 Stop Loss: {stop_loss:.5f}\n"
+                f"🔹 Take Profit: {tp_text}\n"
                 f"🔹 Size: {position_size} lots\n\n"
                 f"📊 Confidence: {confidence_pct:.1f}%\n"
                 f"📊 Signal Quality: {self._get_score_emoji(score_01_pct)} ({score_01_pct:.1f}%)\n"
@@ -1235,13 +1242,20 @@ class SignalProcessor:
             # Join analysis parts
             enhanced_analysis = " | ".join(analysis_parts) if analysis_parts else "Price action signal"
             
+            # Check for multiple TPs and format them if they exist
+            take_profits = signal.get('take_profits')
+            if take_profits and isinstance(take_profits, list):
+                tp_text = ", ".join([f"TP{i+1}: {tp:.5f}" for i, tp in enumerate(take_profits)])
+            else:
+                tp_text = f"{take_profit:.5f}" # Fallback to single TP
+            
             trade_details = (
                 f"🔸 Strategy: {strategy_name}\n"
                 f"🔹 Symbol: {symbol}\n"
                 f"🔹 Direction: {(direction or '').upper()}\n"
-                f"🔹 Entry: {entry_price}\n"
-                f"🔹 Stop Loss: {stop_loss}\n"
-                f"🔹 Take Profit: {take_profit}\n"
+                f"🔹 Entry: {entry_price:.5f}\n"
+                f"🔹 Stop Loss: {stop_loss:.5f}\n"
+                f"🔹 Take Profit: {tp_text}\n"
                 f"🔹 Size: {position_size} lots\n\n"
                 f"📊 Confidence: {confidence_pct:.1f}%\n"
                 f"📊 Risk:Reward: {risk_reward_ratio:.2f}\n"

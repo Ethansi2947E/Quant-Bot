@@ -342,269 +342,358 @@ class MT5Handler:
         order_type: str,
         volume: float,
         stop_loss: float,
-        take_profit: float,
-        comment: str = ""
+        take_profit: Optional[float] = None, # Can now be None
+        comment: str = "",
+        take_profits: Optional[List[float]] = None # New optional list of TPs
     ) -> Optional[Dict[str, Any]]:
-        """Place a market order with proper validations."""
-        if not self.connected:
-            logger.error("MT5 not connected")
-            return None
-
-        # Get symbol info
-        symbol_info = mt5.symbol_info(symbol)  # type: ignore
-        if not symbol_info:
-            logger.error(f"Failed to get symbol info for {symbol}")
-            return None
-
-        # Check if symbol is visible in MarketWatch
-        if not symbol_info.visible:
-            logger.warning(f"{symbol} not visible, trying to add it")
-            if not mt5.symbol_select(symbol, True):  # type: ignore
-                logger.error(f"Failed to add {symbol} to MarketWatch")
+        """
+        Place a market order (BUY or SELL).
+        If `take_profits` list is provided, its first element is used as the TP.
+        Otherwise, the single `take_profit` value is used.
+        """
+        try:
+            if not self.connected:
+                logger.error("MT5 not connected")
                 return None
 
-        # Get account info for logging
-        account_info = mt5.account_info()  # type: ignore
-        if account_info:
-            logger.info(f"Account balance: {account_info.balance:.2f}, Free margin: {account_info.margin_free:.2f}, Equity: {account_info.equity:.2f}")
+            # Get symbol info
+            symbol_info = mt5.symbol_info(symbol)  # type: ignore
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                return None
 
-        # Log trading state
-        logger.debug(f"Symbol {symbol} trading state: Trade Mode={symbol_info.trade_mode}, Visible={symbol_info.visible}")
-
-        # Map order type to MT5 constant
-        if order_type == "BUY":
-            action = mt5.ORDER_TYPE_BUY
-            price = symbol_info.ask
-        elif order_type == "SELL":
-            action = mt5.ORDER_TYPE_SELL
-            price = symbol_info.bid
-        else:
-            logger.error(f"Invalid order type: {order_type}")
-            return None
-
-        # Log current prices
-        logger.debug(f"Current prices for {symbol}: Ask={symbol_info.ask}, Bid={symbol_info.bid}, Spread={symbol_info.ask - symbol_info.bid}")
-
-        # --- ENFORCE TRUE MIN STOP DISTANCE ---
-        # Use get_min_stop_distance to get the most accurate min stop distance
-        min_stop_distance_mt5 = symbol_info.point * symbol_info.trade_stops_level
-        min_stop_distance_fallback = self.get_min_stop_distance(symbol)
-        min_stop_distance = max(min_stop_distance_mt5, min_stop_distance_fallback)
-        logger.debug(f"[Order] {symbol}: min_stop_distance_mt5={min_stop_distance_mt5}, min_stop_distance_fallback={min_stop_distance_fallback}, used={min_stop_distance}")
-
-        # Adjust stop loss and take profit if they're too close to the entry price
-        if action == mt5.ORDER_TYPE_BUY:
-            if stop_loss >= price - min_stop_distance:
-                logger.warning(f"Stop loss for BUY order too close to entry, adjusting: SL ({stop_loss}) → ({price - min_stop_distance - symbol_info.point})")
-                stop_loss = price - min_stop_distance - symbol_info.point
-            if take_profit <= price + min_stop_distance:
-                logger.warning(f"Take profit for BUY order too close to entry, adjusting: TP ({take_profit}) → ({price + min_stop_distance + symbol_info.point})")
-                take_profit = price + min_stop_distance + symbol_info.point
-        else:  # SELL
-            if stop_loss <= price + min_stop_distance:
-                logger.warning(f"Stop loss for SELL order too close to entry, adjusting: SL ({stop_loss}) → ({price + min_stop_distance + symbol_info.point})")
-                stop_loss = price + min_stop_distance + symbol_info.point
-            if take_profit >= price - min_stop_distance:
-                logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
-                take_profit = price - min_stop_distance - symbol_info.point
-
-        # --- RISK-REWARD VALIDATION (NEW) ---
-        # Get min_risk_reward from config, or use a default if not found
-        min_risk_reward = RISK_MANAGER_CONFIG.get('min_risk_reward', 1.0)
-        
-        # Calculate risk-reward ratio
-        if action == mt5.ORDER_TYPE_BUY:
-            risk = price - stop_loss
-            reward = take_profit - price
-        else:  # SELL
-            risk = stop_loss - price
-            reward = price - take_profit
-            
-        # Only validate R:R if both SL and TP are set
-        if risk <= 0 or reward <= 0:
-            logger.error(f"Invalid risk/reward values after adjustment: risk={risk}, reward={reward}")
-            return None
-            
-        risk_reward_ratio = reward / risk
-        if risk_reward_ratio < min_risk_reward:
-            # Instead of rejecting, adjust TP to meet minimum risk:reward
-            if action == mt5.ORDER_TYPE_BUY:
-                new_tp = price + (risk * min_risk_reward)
-                logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
-                take_profit = new_tp
-            else:  # SELL
-                new_tp = price - (risk * min_risk_reward)
-                logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
-                take_profit = new_tp
-            
-            # Recalculate the R:R after adjustment
-            if action == mt5.ORDER_TYPE_BUY:
-                reward = take_profit - price
-            else:  # SELL
-                reward = price - take_profit
-            risk_reward_ratio = reward / risk
-            logger.info(f"New risk:reward ratio after TP adjustment: {risk_reward_ratio:.2f}")
-            
-        # If TP or SL are missing, don't validate R:R
-        if stop_loss == 0 or take_profit == 0:
-            logger.info(f"Skipping R:R validation as SL or TP is not set")
-            
-        # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
-        try:
-            digits = int(getattr(symbol_info, "digits", 2))  # default to 2 if attribute missing
-            price = round(price, digits)
-            stop_loss = round(stop_loss, digits)
-            take_profit = round(take_profit, digits)
-            logger.debug(f"Rounded prices to {digits} digits → Price: {price}, SL: {stop_loss}, TP: {take_profit}")
-        except Exception as e:
-            logger.warning(f"Failed to round prices for {symbol}: {e}")
-        # ------------------------------------------------------------------------------
-
-        # Log original volume request
-        logger.info(f"Requested position size: {volume:.4f} lots")
-
-        # --- NEW: Adjust volume to broker limits (min/max/step) ---
-        adjusted_volume = self._adjust_volume_to_broker_limits(symbol, volume)
-        if adjusted_volume != volume:
-            logger.info(f"Volume adjusted to broker limits: {adjusted_volume:.4f} lots (was {volume:.4f})")
-
-        # --- Optionally, also adjust for margin constraints using risk manager as before ---
-        if self.risk_manager:
-            try:
-                if account_info and 'balance' in account_info:
-                    account_balance = account_info['balance']
-                    stop_loss_price = stop_loss if stop_loss != 0 else price * 0.95
-                    if hasattr(self.risk_manager, 'calculate_position_size'):
-                        risk_percent = self.risk_manager.max_risk_per_trade * 100 if hasattr(self.risk_manager, 'max_risk_per_trade') else 1.0
-                        margin_adjusted = self.risk_manager.calculate_position_size(
-                            account_balance=account_balance,
-                            risk_per_trade=risk_percent,
-                            entry_price=price,
-                            stop_loss_price=stop_loss_price,
-                            symbol=symbol
-                        )
-                        # Take the minimum of broker-limited and margin-limited size
-                        if margin_adjusted < adjusted_volume:
-                            logger.info(f"Further adjusted position size to {margin_adjusted:.4f} lots due to margin constraints")
-                        adjusted_volume = min(adjusted_volume, margin_adjusted)
-            except Exception as e:
-                logger.warning(f"Failed to adjust position size for margin: {str(e)}. Using broker-limited size: {adjusted_volume:.4f} lots")
-
-        # Final check: ensure volume is still within broker limits after all adjustments
-        adjusted_volume = self._adjust_volume_to_broker_limits(symbol, adjusted_volume)
-
-        if adjusted_volume == 0:
-            logger.error(f"Cannot place order: No margin or volume available for {symbol}")
-            return None
-
-        # Get appropriate filling mode for this symbol
-        filling_mode = self.get_symbol_filling_mode(symbol)
-        logger.debug(f"Using filling mode {filling_mode} for {symbol}")
-
-        # Ensure comment is valid
-        if comment is None or not isinstance(comment, str):
-            comment = f"MT5Bot-{symbol}"
-        # Limit comment length to 31 characters to comply with MT5 requirements
-        comment = comment[:31]
-
-        # Remove any potentially problematic characters from comment
-        comment = re.sub(r'[^a-zA-Z0-9_\-\.]', '', comment)
-
-        # If comment is empty after sanitization, use a default
-        if not comment:
-            comment = f"MT5Bot{symbol.replace(' ', '')}"
-
-        # Prepare the request
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": adjusted_volume,
-            "type": action,  # Use MT5 constant instead of string
-            "price": price,
-            "sl": stop_loss if stop_loss != 0 else None,  # Use None instead of 0 for SL
-            "tp": take_profit if take_profit != 0 else None,  # Use None instead of 0 for TP
-            "deviation": 20,
-            "magic": 234000,
-            "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling_mode,
-        }
-        
-        if stop_loss == 0:
-            logger.debug(f"Converting SL value of 0 to None for {symbol} {order_type} order")
-        if take_profit == 0:
-            logger.debug(f"Converting TP value of 0 to None for {symbol} {order_type} order")
-
-        # Try multiple times with increasing deviation and different filling modes if needed
-        max_retries = 3
-        filling_modes_to_try = [filling_mode]
-
-        # Prepare fallback filling modes in case primary one fails
-        if filling_mode != mt5.ORDER_FILLING_IOC:
-            filling_modes_to_try.append(mt5.ORDER_FILLING_IOC)
-        if filling_mode != mt5.ORDER_FILLING_FOK and mt5.ORDER_FILLING_FOK not in filling_modes_to_try:
-            filling_modes_to_try.append(mt5.ORDER_FILLING_FOK)
-
-        for filling_mode in filling_modes_to_try:
-            request["type_filling"] = filling_mode
-            logger.debug(f"Trying with filling mode: {filling_mode}")
-
-            for attempt in range(max_retries):
-                result = mt5.order_send(request)  # type: ignore
-                if result is None:
-                    error_info = mt5.last_error()  # type: ignore
-                    logger.error(f"Failed to send order: {error_info}")
-
-                    if "unsupported filling" in str(error_info).lower():
-                        # Break this attempt loop and try next filling mode
-                        logger.warning(f"Unsupported filling mode {filling_mode}, will try alternative")
-                        break
-
-                    continue
-
-                logger.debug(f"Order result: {json.dumps(result._asdict(), default=str)}")
-
-                if result.retcode == mt5.TRADE_RETCODE_DONE or result.retcode == 10009:
-                    logger.info(f"Order executed successfully: Ticket {result.order}")
-                    return {
-                        "ticket": result.order,
-                        "volume": result.volume,
-                        "price": result.price,
-                        "comment": comment
-                    }
-
-                if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
-                    logger.warning(f"Requote detected on attempt {attempt + 1}")
-                    # Update price and increase deviation
-                    tick = mt5.symbol_info_tick(symbol)  # type: ignore
-                    if tick:
-                        request["price"] = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
-                    request["deviation"] += 10
-                    continue
-
-                if result.retcode == 10016:  # Request canceled by dealer
-                    logger.warning(f"Order canceled by dealer. Trying with increased deviation")
-                    request["deviation"] += 15
-                    continue
-
-                if result.retcode == 10018:  # Market closed
-                    logger.error(f"Market closed for {symbol}")
+            # Check if symbol is visible in MarketWatch
+            if not symbol_info.visible:
+                logger.warning(f"{symbol} not visible, trying to add it")
+                if not mt5.symbol_select(symbol, True):  # type: ignore
+                    logger.error(f"Failed to add {symbol} to MarketWatch")
                     return None
 
-                # For any other error code, log the specific error
-                error_description = self.get_error_info(result.retcode)
-                logger.error(f"Order failed with error code {result.retcode}: {error_description}")
+            # Get account info for logging
+            account_info = mt5.account_info()  # type: ignore
+            if account_info:
+                logger.info(f"Account balance: {account_info.balance:.2f}, Free margin: {account_info.margin_free:.2f}, Equity: {account_info.equity:.2f}")
 
-                if "unsupported filling" in str(result.comment).lower():
-                    # Break this attempt loop and try next filling mode
-                    logger.warning(f"Unsupported filling mode detected, will try alternative")
-                    break
+            # Log trading state
+            logger.debug(f"Symbol {symbol} trading state: Trade Mode={symbol_info.trade_mode}, Visible={symbol_info.visible}")
 
-                # For other errors, try again with increased deviation
-                request["deviation"] += 10
+            # Map order type to MT5 constant, making it case-insensitive
+            action_str = order_type.upper()
+            if action_str == "BUY":
+                action = mt5.ORDER_TYPE_BUY
+                price = symbol_info.ask
+            elif action_str == "SELL":
+                action = mt5.ORDER_TYPE_SELL
+                price = symbol_info.bid
+            else:
+                logger.error(f"Invalid order type: {order_type}")
+                return None
 
-        logger.error("Failed to place order after trying all filling modes and retries")
-        return None
+            # Log current prices
+            logger.debug(f"Current prices for {symbol}: Ask={symbol_info.ask}, Bid={symbol_info.bid}, Spread={symbol_info.ask - symbol_info.bid}")
+
+            # --- ENFORCE TRUE MIN STOP DISTANCE ---
+            # Use get_min_stop_distance to get the most accurate min stop distance
+            min_stop_distance_mt5 = symbol_info.point * symbol_info.trade_stops_level
+            min_stop_distance_fallback = self.get_min_stop_distance(symbol)
+            min_stop_distance = max(min_stop_distance_mt5, min_stop_distance_fallback)
+            logger.debug(f"[Order] {symbol}: min_stop_distance_mt5={min_stop_distance_mt5}, min_stop_distance_fallback={min_stop_distance_fallback}, used={min_stop_distance}")
+
+            # Adjust stop loss and take profit if they're too close to the entry price
+            if action == mt5.ORDER_TYPE_BUY:
+                if stop_loss >= price - min_stop_distance:
+                    logger.warning(f"Stop loss for BUY order too close to entry, adjusting: SL ({stop_loss}) → ({price - min_stop_distance - symbol_info.point})")
+                    stop_loss = price - min_stop_distance - symbol_info.point
+                if take_profit <= price + min_stop_distance:
+                    logger.warning(f"Take profit for BUY order too close to entry, adjusting: TP ({take_profit}) → ({price + min_stop_distance + symbol_info.point})")
+                    take_profit = price + min_stop_distance + symbol_info.point
+            else:  # SELL
+                if stop_loss <= price + min_stop_distance:
+                    logger.warning(f"Stop loss for SELL order too close to entry, adjusting: SL ({stop_loss}) → ({price + min_stop_distance + symbol_info.point})")
+                    stop_loss = price + min_stop_distance + symbol_info.point
+                if take_profit >= price - min_stop_distance:
+                    logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance - symbol_info.point})")
+                    take_profit = price - min_stop_distance - symbol_info.point
+
+            # --- RISK-REWARD VALIDATION (NEW) ---
+            # Get min_risk_reward from config, or use a default if not found
+            min_risk_reward = RISK_MANAGER_CONFIG.get('min_risk_reward', 1.0)
+            
+            # Calculate risk-reward ratio
+            if action == mt5.ORDER_TYPE_BUY:
+                risk = price - stop_loss
+                reward = take_profit - price
+            else:  # SELL
+                risk = stop_loss - price
+                reward = price - take_profit
+                
+            # Only validate R:R if both SL and TP are set
+            if risk <= 0 or reward <= 0:
+                logger.error(f"Invalid risk/reward values after adjustment: risk={risk}, reward={reward}")
+                return None
+                
+            risk_reward_ratio = reward / risk
+            if risk_reward_ratio < min_risk_reward:
+                # Instead of rejecting, adjust TP to meet minimum risk:reward
+                if action == mt5.ORDER_TYPE_BUY:
+                    new_tp = price + (risk * min_risk_reward)
+                    logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
+                    take_profit = new_tp
+                else:  # SELL
+                    new_tp = price - (risk * min_risk_reward)
+                    logger.warning(f"Adjusted TP to meet minimum {min_risk_reward:.2f} risk:reward ratio: {take_profit:.5f} → {new_tp:.5f}")
+                    take_profit = new_tp
+                
+                # Recalculate the R:R after adjustment
+                if action == mt5.ORDER_TYPE_BUY:
+                    reward = take_profit - price
+                else:  # SELL
+                    reward = price - take_profit
+                risk_reward_ratio = reward / risk
+                logger.info(f"New risk:reward ratio after TP adjustment: {risk_reward_ratio:.2f}")
+                
+            # If TP or SL are missing, don't validate R:R
+            if stop_loss == 0 or take_profit == 0:
+                logger.info(f"Skipping R:R validation as SL or TP is not set")
+                
+            # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
+            try:
+                digits = int(getattr(symbol_info, "digits", 2))  # default to 2 if attribute missing
+                price = round(price, digits)
+                if stop_loss is not None and stop_loss != 0:
+                    stop_loss = round(stop_loss, digits)
+                if take_profit is not None and take_profit != 0:
+                    take_profit = round(take_profit, digits)
+                logger.debug(f"Rounded prices to {digits} digits → Price: {price}, SL: {stop_loss}, TP: {take_profit}")
+            except Exception as e:
+                logger.warning(f"Failed to round prices for {symbol}: {e}")
+            # ------------------------------------------------------------------------------
+
+            # Log original volume request
+            logger.info(f"Requested position size: {volume:.4f} lots")
+
+            # --- NEW: Adjust volume to broker limits (min/max/step) ---
+            adjusted_volume = self._adjust_volume_to_broker_limits(symbol, volume)
+            if adjusted_volume != volume:
+                logger.info(f"Volume adjusted to broker limits: {adjusted_volume:.4f} lots (was {volume:.4f})")
+
+            # --- Optionally, also adjust for margin constraints using risk manager as before ---
+            if self.risk_manager:
+                try:
+                    if account_info and 'balance' in account_info:
+                        account_balance = account_info['balance']
+                        stop_loss_price = stop_loss if stop_loss != 0 else price * 0.95
+                        if hasattr(self.risk_manager, 'calculate_position_size'):
+                            risk_percent = self.risk_manager.max_risk_per_trade * 100 if hasattr(self.risk_manager, 'max_risk_per_trade') else 1.0
+                            margin_adjusted = self.risk_manager.calculate_position_size(
+                                account_balance=account_balance,
+                                risk_per_trade=risk_percent,
+                                entry_price=price,
+                                stop_loss_price=stop_loss_price,
+                                symbol=symbol
+                            )
+                            # Take the minimum of broker-limited and margin-limited size
+                            if margin_adjusted < adjusted_volume:
+                                logger.info(f"Further adjusted position size to {margin_adjusted:.4f} lots due to margin constraints")
+                            adjusted_volume = min(adjusted_volume, margin_adjusted)
+                except Exception as e:
+                    logger.warning(f"Failed to adjust position size for margin: {str(e)}. Using broker-limited size: {adjusted_volume:.4f} lots")
+
+            # Final check: ensure volume is still within broker limits after all adjustments
+            adjusted_volume = self._adjust_volume_to_broker_limits(symbol, adjusted_volume)
+
+            if adjusted_volume == 0:
+                logger.error(f"Cannot place order: No margin or volume available for {symbol}")
+                return None
+
+            # Get appropriate filling mode for this symbol
+            filling_mode = self.get_symbol_filling_mode(symbol)
+            logger.debug(f"Using filling mode {filling_mode} for {symbol}")
+
+            # Ensure comment is valid
+            if comment is None or not isinstance(comment, str):
+                comment = f"MT5Bot-{symbol}"
+            # Limit comment length to 31 characters to comply with MT5 requirements
+            comment = comment[:31]
+
+            # Remove any potentially problematic characters from comment
+            comment = re.sub(r'[^a-zA-Z0-9_\-\.]', '', comment)
+
+            # If comment is empty after sanitization, use a default
+            if not comment:
+                comment = f"MT5Bot{symbol.replace(' ', '')}"
+
+            # --- Multi-TP Handling ---
+            final_tp = 0.0
+            if take_profits and isinstance(take_profits, list) and len(take_profits) > 0:
+                final_tp = take_profits[0]
+                logger.info(f"Using first TP ({final_tp}) from the provided list for order placement.")
+            elif take_profit is not None:
+                final_tp = take_profit
+            
+            # Prepare the request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": adjusted_volume,
+                "type": action,  # Use MT5 constant instead of string
+                "price": price,
+                "sl": stop_loss if stop_loss != 0 else None,
+                "tp": final_tp if final_tp != 0 else None,  # Use the determined final_tp
+                "deviation": 20,
+                "magic": 234000,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            
+            if stop_loss == 0:
+                logger.debug(f"Converting SL value of 0 to None for {symbol} {order_type} order")
+            if final_tp == 0:
+                logger.debug(f"Converting TP value of 0 to None for {symbol} {order_type} order")
+
+            # Try multiple times with increasing deviation and different filling modes if needed
+            max_retries = 3
+            filling_modes_to_try = [filling_mode]
+
+            # Prepare fallback filling modes in case primary one fails
+            if filling_mode != mt5.ORDER_FILLING_IOC:
+                filling_modes_to_try.append(mt5.ORDER_FILLING_IOC)
+            if filling_mode != mt5.ORDER_FILLING_FOK and mt5.ORDER_FILLING_FOK not in filling_modes_to_try:
+                filling_modes_to_try.append(mt5.ORDER_FILLING_FOK)
+
+            for filling_mode in filling_modes_to_try:
+                request["type_filling"] = filling_mode
+                logger.debug(f"Trying with filling mode: {filling_mode}")
+
+                for attempt in range(max_retries):
+                    result = mt5.order_send(request)  # type: ignore
+                    if result is None:
+                        error_info = mt5.last_error()  # type: ignore
+                        logger.error(f"Failed to send order: {error_info}")
+
+                        if "unsupported filling" in str(error_info).lower():
+                            # Break this attempt loop and try next filling mode
+                            logger.warning(f"Unsupported filling mode {filling_mode}, will try alternative")
+                            break
+
+                        continue
+
+                    logger.debug(f"Order result: {json.dumps(result._asdict(), default=str)}")
+
+                    # --- START REPLACEMENT BLOCK ---
+
+                    if result.retcode == mt5.TRADE_RETCODE_DONE or result.retcode == 10009:  # Success codes
+                        logger.info(f"Order executed successfully: Ticket {result.order}")
+                        return {
+                            "ticket": result.order,
+                            "volume": result.volume,
+                            "price": result.price,
+                            "comment": comment
+                        }
+
+                    # --- Revised handling for retcode 10030 ---
+                    # 10030 can signal either an unsupported filling mode _or_ a broker-imposed position/volume limit.
+                    # We inspect the comment field to distinguish the cases.
+                    if result.retcode == 10030:
+                        comment_lower = str(getattr(result, "comment", "")).lower()
+                        if "unsupported filling" in comment_lower:
+                            logger.warning(
+                                f"Unsupported filling mode {filling_mode} detected via retcode 10030. "
+                                "Trying alternative filling mode."
+                            )
+                            break  # break out of attempts loop to try the next filling_mode
+                        else:
+                            logger.error(
+                                "Order failed with retcode 10030 (likely limit on positions/volume): "
+                                f"{getattr(result, 'comment', '')}"
+                            )
+                            return None  # Fail immediately, do not retry
+                    
+                    if result.retcode == mt5.TRADE_RETCODE_MARKET_CLOSED:
+                        logger.error(f"Order failed: Market is closed for {symbol}.")
+                        return None # Fail immediately
+
+                    # Handle retryable errors
+                    if result.retcode == mt5.TRADE_RETCODE_REQUOTE:
+                        logger.warning(f"Requote on attempt {attempt + 1}. Updating price and retrying.")
+                        tick = mt5.symbol_info_tick(symbol)
+                        if tick:
+                            request["price"] = tick.ask if action == mt5.ORDER_TYPE_BUY else tick.bid
+                        request["deviation"] += 10 # Increase slippage tolerance
+                        continue # Continue to next attempt in the loop
+
+                    if result.retcode == 10016:
+                        comment_lower = str(getattr(result, "comment", "")).lower()
+
+                        # Case 1: Invalid stops (distance too small)
+                        if "invalid stops" in comment_lower or "invalid sl" in comment_lower:
+                            # Widen SL/TP distances and retry
+                            buffer = min_stop_distance  # reuse previously-calculated min distance
+
+                            if action == mt5.ORDER_TYPE_BUY:
+                                new_sl = price - (buffer * 2)
+                                new_tp = price + (buffer * 2)
+                            else:  # SELL
+                                new_sl = price + (buffer * 2)
+                                new_tp = price - (buffer * 2)
+
+                            # Round to correct precision
+                            digits = int(getattr(symbol_info, "digits", 2))
+                            new_sl = round(new_sl, digits)
+                            new_tp = round(new_tp, digits)
+
+                            logger.warning(
+                                f"Invalid stops detected on attempt {attempt + 1}. "
+                                f"Adjusting SL to {new_sl}, TP to {new_tp} and retrying."
+                            )
+
+                            request["sl"] = new_sl if new_sl != 0 else None
+                            request["tp"] = new_tp if new_tp != 0 else None
+                            # Also bump deviation slightly to reduce rejections
+                            request["deviation"] += 5
+                            continue  # retry with the adjusted stops
+
+                        # Case 2: generic dealer cancellation – just increase deviation and retry
+                        logger.warning(
+                            f"Order canceled by dealer on attempt {attempt + 1}. Increasing deviation and retrying."
+                        )
+                        request["deviation"] += 15
+                        continue # Continue to next attempt
+
+                    # Fallback for other errors
+                    error_description = self.get_error_info(result.retcode)
+                    logger.error(f"Order failed with unhandled error code {result.retcode}: {error_description}")
+                    
+                    # If the comment suggests a filling mode issue, break to try the next mode
+                    if "unsupported filling" in str(result.comment).lower():
+                        logger.warning("Unsupported filling mode detected by comment, trying next mode.")
+                        break # Break from attempts loop to try next filling mode
+
+                    # For other errors, just retry with more deviation
+                    request["deviation"] += 10
+                
+                # --- END REPLACEMENT BLOCK ---
+
+            logger.error("Failed to place order after trying all filling modes and retries")
+            try:
+                # Capture the current call-stack for deeper diagnostics
+                stack_str = "\n".join(traceback.format_stack())
+                logger.debug(f"Call-stack at order failure for {symbol} {order_type}:\n{stack_str}")
+            except Exception as _stack_err:
+                logger.warning(f"Could not capture failure stack trace: {_stack_err}")
+
+            # Log the last error coming from MT5 (if any)
+            try:
+                mt5_err = mt5.last_error()  # type: ignore
+                logger.error(f"MT5 last_error after failure: {mt5_err}")
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected exception occurred in place_market_order for {symbol}: {e}")
+            logger.error(traceback.format_exc())
+            return None
 
     def place_limit_order(
         self,
@@ -2214,3 +2303,74 @@ class MT5Handler:
         except Exception as e:
             logger.error(f"Error accessing point value for {symbol} from symbol_info: {e}. Symbol info: {symbol_info}. Using default 0.0001.")
             return 0.0001
+
+    def close_partial_position(self, ticket: int, volume_to_close: float) -> Optional[Dict[str, Any]]:
+        """
+        Closes a part of the position specified by the ticket.
+
+        Args:
+            ticket (int): The ticket of the position to partially close.
+            volume_to_close (float): The volume (in lots) to close.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary with the trade result if successful, otherwise None.
+        """
+        if not self.connected:
+            logger.error("MT5 not connected, cannot perform partial close.")
+            return None
+
+        position_info = self.get_position_by_ticket(ticket)
+        if not position_info:
+            logger.error(f"Cannot partially close position {ticket}: Not found.")
+            return None
+
+        symbol = position_info["symbol"]
+        current_volume = position_info["volume"]
+
+        if volume_to_close >= current_volume:
+            logger.warning(f"Volume to close ({volume_to_close}) is equal to or greater than current volume ({current_volume}). Performing a full close instead.")
+            close_result = self.close_position(ticket)
+            return {"status": "full_close", "success": close_result} if close_result else None
+
+        # Determine the correct order type for closing
+        # If it's a BUY position, we need to SELL to close it.
+        close_action = mt5.ORDER_TYPE_SELL if position_info["type"] == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        
+        # Get the current price for closing
+        tick_info = self.get_last_tick(symbol)
+        if not tick_info:
+            logger.error(f"Could not get current price for {symbol} to perform partial close.")
+            return None
+        price = tick_info['bid'] if close_action == mt5.ORDER_TYPE_SELL else tick_info['ask']
+
+        # Normalize the volume to close
+        normalized_volume = self.normalize_volume(symbol, volume_to_close)
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": symbol,
+            "volume": normalized_volume,
+            "type": close_action,
+            "price": price,
+            "deviation": 20,
+            "magic": 234000,
+            "comment": f"Partial close for ticket {ticket}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": self.get_symbol_filling_mode(symbol),
+        }
+
+        logger.info(f"Submitting partial close request for ticket {ticket}: Closing {normalized_volume} lots of {current_volume}.")
+        
+        result = mt5.order_send(request)
+
+        if result is None:
+            logger.error(f"Partial close for ticket {ticket} failed. Error: {self.get_error_info()}")
+            return None
+        
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Successfully executed partial close for ticket {ticket}. New volume should be {current_volume - normalized_volume}.")
+            return result._asdict()
+        else:
+            logger.error(f"Partial close for ticket {ticket} failed with retcode {result.retcode}: {result.comment}")
+            return None

@@ -694,18 +694,29 @@ class PremiumLuxAlgoStrategy(SignalGenerator):
             entry = last['close']
             atr = lux_algo.atr(period=self.params['supertrend_atr_period']).iloc[-1]
             
+            # --- FEATURE: Multiple Take-Profit Levels ---
+            # Generate a list of TP levels instead of a single one.
+            take_profits = []
             if direction == 'buy':
                 stop_loss = entry - (atr * self.atr_multiplier)
-                take_profit = entry + ((entry - stop_loss) * self.min_risk_reward)
+                # TP1: Standard risk/reward
+                tp1 = entry + ((entry - stop_loss) * self.min_risk_reward)
+                # TP2: Double risk/reward
+                tp2 = entry + ((entry - stop_loss) * self.min_risk_reward * 2)
+                take_profits.extend([tp1, tp2])
             else: # sell
                 stop_loss = entry + (atr * self.atr_multiplier)
-                take_profit = entry - ((stop_loss - entry) * self.min_risk_reward)
+                # TP1: Standard risk/reward
+                tp1 = entry - ((stop_loss - entry) * self.min_risk_reward)
+                # TP2: Double risk/reward
+                tp2 = entry - ((stop_loss - entry) * self.min_risk_reward * 2)
+                take_profits.extend([tp1, tp2])
 
-            logger.debug(f"[{sym}] Calculated SL: {stop_loss:.5f}, TP: {take_profit:.5f}, ATR: {atr:.5f}")
+            logger.debug(f"[{sym}] Calculated SL: {stop_loss:.5f}, TPs: {[f'{tp:.5f}' for tp in take_profits]}, ATR: {atr:.5f}")
 
             signal_details = {
                 "symbol": sym, "direction": direction, "entry_price": entry,
-                "stop_loss": stop_loss, "take_profit": take_profit,
+                "stop_loss": stop_loss, "take_profits": take_profits, # Use plural form for list
                 "timeframe": self.primary_timeframe, "strategy_name": self.name,
                 "confidence": confidence, "signal_timestamp": str(last.name),
                 "detailed_reasoning": [

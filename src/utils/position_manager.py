@@ -39,11 +39,48 @@ class PositionManager:
         self.telegram_bot = telegram_bot if telegram_bot else TelegramBot.get_instance()
         self.config = config or {}
         
-        # State tracking
+        # State tracking for trailing stops
         self.active_trades = {}
         self.trailing_stop_data = {}
         self.trailing_stop_enabled = self.config.get('use_trailing_stop', True)
+
+        # State tracking for multi-TP partial closes
+        self.managed_positions: Dict[int, Dict[str, Any]] = {}
         
+    def register_trade(self, signal: Dict[str, Any], trade_result: Dict[str, Any]):
+        """
+        Registers a new trade to be managed for multiple take-profits.
+
+        Args:
+            signal: The original signal data, containing the 'take_profits' list.
+            trade_result: The result from the trade execution, containing the ticket.
+        """
+        ticket = trade_result.get('request', {}).get('position')
+        if not ticket:
+            ticket = trade_result.get('ticket') # Fallback for different result structures
+        
+        if not ticket:
+            logger.warning("Could not register trade for multi-TP management: Ticket not found in trade result.")
+            return
+
+        take_profits = signal.get('take_profits')
+        if not take_profits or not isinstance(take_profits, list):
+            logger.debug(f"Trade {ticket} is not a multi-TP trade. Skipping registration.")
+            return
+
+        volume = trade_result.get('request', {}).get('volume')
+
+        self.managed_positions[ticket] = {
+            "symbol": signal.get('symbol'),
+            "initial_volume": volume,
+            "current_volume": volume,
+            "take_profits": sorted(take_profits), # Ensure TPs are sorted
+            "direction": signal.get('direction'),
+            "entry_price": trade_result.get('price'),
+            "registration_time": datetime.now()
+        }
+        logger.info(f"Registered trade {ticket} for multi-TP management. TPs: {self.managed_positions[ticket]['take_profits']}")
+
     def set_mt5_handler(self, mt5_handler):
         """Set the MT5Handler instance after initialization."""
         self.mt5_handler = mt5_handler
@@ -65,17 +102,18 @@ class PositionManager:
         Manage all currently open trading positions.
         
         This method:
-        - Updates stop loss and take profit levels
-        - Applies trailing stops
-        - Checks for take profit/stop loss hits
-        - Executes partial closures if conditions are met
+        - Checks for and executes partial take-profits.
+        - Applies trailing stops.
         """
         if not self.mt5_handler:
             logger.warning("MT5Handler not set, cannot manage open trades")
             return
             
         try:
-            # Get all open positions
+            # First, handle multi-TP logic for any managed positions
+            await self._manage_multi_tp_positions()
+
+            # Second, handle trailing stop logic for all open positions
             positions = self.mt5_handler.get_open_positions()
             
             if not positions:
@@ -154,12 +192,79 @@ class PositionManager:
                     # Implement additional position management logic here if needed
                     
                 except Exception as e:
-                    logger.error(f"Error managing position {position.get('ticket', 'unknown')}: {str(e)}")
+                    logger.error(f"Error managing position {position.get('ticket', 'unknown')} for trailing stop: {str(e)}")
                     logger.error(traceback.format_exc())
                     
         except Exception as e:
             logger.error(f"Error in manage_open_trades: {str(e)}")
             logger.error(traceback.format_exc())
+
+    async def _manage_multi_tp_positions(self):
+        """Manages partial take-profit logic for registered positions."""
+        if not self.managed_positions:
+            return
+
+        logger.debug(f"Checking {len(self.managed_positions)} positions for partial TP.")
+        
+        # Get all open position tickets from MT5 once for efficient checking
+        try:
+            open_positions = self.mt5_handler.get_open_positions()
+            if open_positions is None:
+                logger.warning("Could not get open positions for multi-TP management. Skipping this cycle.")
+                return
+            open_position_tickets = {p['ticket'] for p in open_positions}
+        except Exception as e:
+            logger.error(f"Failed to get open positions for deregistration check: {e}")
+            return
+
+        # Iterate over a copy of tickets since the dictionary may be modified
+        for ticket in list(self.managed_positions.keys()):
+            # --- NEW: Deregistration Logic ---
+            if ticket not in open_position_tickets:
+                logger.info(f"Position {ticket} is no longer open. Deregistering from multi-TP management.")
+                del self.managed_positions[ticket]
+                continue
+            # --------------------------------
+
+            trade = self.managed_positions.get(ticket)
+            if not trade:
+                continue
+
+            symbol = trade['symbol']
+            direction = trade['direction']
+            next_tp = trade['take_profits'][0] if trade['take_profits'] else None
+
+            if not next_tp:
+                logger.warning(f"Trade {ticket} is managed but has no more TPs. It will be deregistered.")
+                del self.managed_positions[ticket]
+                continue
+
+            tick = self.mt5_handler.get_last_tick(symbol)
+            if not tick:
+                logger.warning(f"Could not get tick for {symbol} to check TP.")
+                continue
+            
+            price = tick['ask'] if direction == 'buy' else tick['bid']
+
+            tp_hit = (direction == 'buy' and price >= next_tp) or \
+                     (direction == 'sell' and price <= next_tp)
+
+            if tp_hit:
+                logger.info(f"TP HIT for {symbol} ticket {ticket} at level {next_tp}. Current price: {price}")
+                
+                # Determine volume to close (e.g., 50% of current volume)
+                # This can be made more sophisticated later
+                volume_to_close = self.mt5_handler.normalize_volume(symbol, trade['current_volume'] * 0.5)
+
+                if volume_to_close > 0:
+                    close_result = self.mt5_handler.close_partial_position(ticket, volume_to_close)
+                    # This is where we will add state updates and notifications in the next task.
+                    if close_result:
+                        logger.success(f"Successfully executed partial close for ticket {ticket}.")
+                    else:
+                        logger.error(f"Failed to execute partial close for ticket {ticket}.")
+                else:
+                    logger.warning(f"Calculated volume to close for {ticket} is zero. Skipping partial close.")
 
     def _update_trade_in_database(self, position: Dict[str, Any]) -> None:
         """
