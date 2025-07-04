@@ -184,14 +184,32 @@ run_bot.bat
 
 Once the bot is running, you can control it via Telegram with the following commands:
 
-- `/status` - Check the current status of the bot
-- `/enable_trading` - Enable trading
-- `/disable_trading` - Disable trading
-- `/list_signals` - List recent trading signals
-- `/list_positions` - List current open positions
-- `/close_position {ticket}` - Close a specific position
-- `/close_all` - Close all open positions
-- `/shutdown` - Safely shut down the bot
+**General & Status**
+- `/status` - Get a detailed overview of the bot's current status, including trading state, open positions, and account balance.
+- `/statustable` - View a concise, table-formatted summary of open positions.
+- `/performance` - Receive a comprehensive performance report with key trading metrics.
+- `/balance` - Get the current account balance, equity, and margin information.
+- `/metrics` - Display detailed trading metrics, such as win rate, profit factor, and drawdown.
+- `/history {days}` - Show the trade history for the last specified number of days (e.g., `/history 7`).
+- `/daily` - Get a summary of the current day's trading activity and P/L.
+- `/count` - Show the number of trades taken today, this week, and this month.
+
+**Trading Control**
+- `/enable` - Enable the trading functionality. The bot will start processing signals and opening trades.
+- `/disable` - Disable trading. The bot will stop opening new trades but continue to manage existing ones.
+- `/listsignalgenerators` - List all available signal generation strategies.
+- `/setsignalgenerator {generator_name}` - Switch the active signal generation strategy.
+
+**Risk & Position Management**
+- `/enabletrailingstop` - Enable the automated trailing stop loss for managed positions.
+- `/disabletrailingstop` - Disable the trailing stop loss.
+- `/enablepositionadditions` - Allow the bot to add to existing positions (pyramiding).
+- `/disablepositionadditions` - Prevent the bot from adding to existing positions.
+
+**Admin & Shutdown**
+- `/enablecloseonshutdown` - Configure the bot to automatically close all open positions upon shutdown.
+- `/disablecloseonshutdown` - Prevent the bot from closing positions upon shutdown.
+- `/shutdown` - Safely shut down the bot.
 
 ## Telegram Integration
 
@@ -217,20 +235,18 @@ Trading_Bot/
 │   ├── risk_manager.py      # Risk management
 │   ├── strategy/            # Trading strategies
 │   │   ├── __init__.py
-│   │   ├── trend_following_strategy.py
-│   │   ├── breakout_trading_strategy.py
-│   │   ├── price_action_sr_strategy.py
-│   │   └── ...
+│   │   ├── luxalgopremium.py    # LuxAlgo Premium signal strategy
+│   │   └── strategy_template.py # Base template for new strategies
 │   ├── telegram/            # Telegram integration
 │   │   ├── telegram_bot.py
 │   │   └── telegram_command_handler.py
 │   ├── utils/               # Utility functions
-│   │   ├── indicators.py
-│   │   ├── position_manager.py
-│   │   ├── signal_processor.py
+│   │   ├── __init__.py
 │   │   ├── data_manager.py
-│   │   └── performance_tracker.py
-│   └── backtest/            # Backtesting framework
+│   │   ├── market_utils.py
+│   │   ├── performance_tracker.py
+│   │   ├── position_manager.py
+│   │   └── signal_processor.py
 ├── exports/                 # Exported data and reports
 ├── main.py                  # Entry point
 ├── requirements.txt         # Package dependencies
