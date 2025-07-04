@@ -29,6 +29,8 @@ This Trading Bot is a comprehensive algorithmic trading system designed to conne
 - **Detailed Logging**: Comprehensive logging system for debugging and performance analysis
 - **Position Management**: Automated trailing stops and take-profit mechanisms
 - **Performance Tracking**: Tracks and reports trading performance metrics
+- **Advanced Error Handling**: Automatically handles common broker errors like invalid stops and unsupported order-filling modes.
+- **Multi-Take-Profit Management**: Capable of managing trades with multiple take-profit levels, executing partial closes to secure profits incrementally.
 
 ## System Architecture
 
@@ -37,79 +39,71 @@ This Trading Bot is a comprehensive algorithmic trading system designed to conne
 ```mermaid
 flowchart TB
     subgraph Main["Main Application"]
-        A[main.py] --> |initializes| B[TradingBot]
+        A[main.py] --> |initializes| B(TradingBot)
     end
-    
+
     subgraph Core["Core Components"]
-        B --> |manages| C[MT5Handler]
-        B --> |uses| D[RiskManager]
-        B --> |coordinates| E[SignalProcessor]
-        B --> |tracks| F[PositionManager]
-        B --> |monitors| G[PerformanceTracker]
-        B --> |communicates via| H[TelegramBot]
-        B --> |manages data via| I[DataManager]
+        B --> |manages| C[src/mt5_handler.py]
+        B --> |uses| D[src/risk_manager.py]
+        B --> |communicates via| H[src/telegram/telegram_bot.py]
     end
-    
+
+    subgraph Utils["Utility Components"]
+        B --> |coordinates| E[utils/signal_processor.py]
+        B --> |tracks| F[utils/position_manager.py]
+        B --> |monitors| G[utils/performance_tracker.py]
+        B --> |manages data via| I[utils/data_manager.py]
+        B --> |uses for market info| J[utils/market_utils.py]
+    end
+
     subgraph Strategies["Trading Strategies"]
-        E --> J[TrendFollowingStrategy]
-        E --> K[BreakoutTradingStrategy]
-        E --> L[PriceActionSRStrategy]
-        E --> M[BreakoutReversalStrategy]
-        E --> N[ConfluencePriceActionStrategy]
+        E --> K(strategy/luxalgopremium.py)
+        K -- implements --> L((strategy/strategy_template.py))
     end
-    
+
     subgraph External["External Systems"]
         C <--> O[MetaTrader 5]
         H <--> P[Telegram API]
     end
-    
-    subgraph Workflows["Key Workflows"]
-        W1[Data Collection] --> W2[Signal Generation]
-        W2 --> W3[Risk Assessment]
-        W3 --> W4[Trade Execution]
-        W4 --> W5[Position Management]
-        W5 --> W6[Performance Tracking]
+
+    subgraph Notes["Notes"]
+        Note1[MT5Handler: Includes enhanced error recovery and partial close logic.]
+        Note2[PositionManager: Actively manages multi-TP lifecycle (register, monitor, partial close, deregister).]
+        Note3[RiskManager: Re-validates R:R ratio after broker-side stop adjustments.]
     end
-    
-    C --> W1
-    J & K & L & M & N --> W2
-    D --> W3
-    C --> W4
-    F --> W5
-    G --> W6
 ```
 
 ### Component Description
 
-1. **TradingBot (trading_bot.py)**: The central orchestrator that manages the entire trading process, initializes components, and handles the main event loops.
+1.  **TradingBot (`trading_bot.py`)**: The central orchestrator that manages the entire trading process, initializes components, and handles the main event loops.
 
-2. **MT5Handler (mt5_handler.py)**: Manages the connection to MetaTrader 5, handles market data retrieval, and executes trading orders.
+2.  **MT5Handler (`mt5_handler.py`)**: Manages the connection to MetaTrader 5, handles market data retrieval, and executes trading orders. It includes robust error handling to automatically adjust for broker-specific requirements (e.g., "invalid stops") and can execute **partial position closes**.
 
-3. **RiskManager (risk_manager.py)**: Handles position sizing, risk calculations, and implements trading limits to protect account equity.
+3.  **RiskManager (`risk_manager.py`)**: Handles position sizing, risk calculations, and implements trading limits. It performs a crucial final check, re-validating the risk-to-reward ratio *after* any automatic stop adjustments are made by the `MT5Handler` to ensure trade viability.
 
-4. **SignalProcessor**: Processes raw signals from strategies and applies risk management rules before execution.
+4.  **SignalProcessor (`src/utils/signal_processor.py`)**: Processes raw signals from strategies, applies risk management rules, and, upon successful execution, **registers the new trade with the `PositionManager`** for lifecycle management.
 
-5. **PositionManager**: Monitors and manages open positions, including trailing stops and take-profit orders.
+5.  **PositionManager (`src/utils/position_manager.py`)**: Monitors and manages all open positions. Its responsibilities include:
+    - Managing standard trailing stops.
+    - Tracking trades with multiple take-profit (TP) levels.
+    - Continuously monitoring market price against each TP level.
+    - Triggering partial closes via `MT5Handler` when a TP is hit.
+    - Updating the trade's state (e.g., remaining volume, next TP).
+    - Deregistering trades once they are fully closed.
 
-6. **DataManager**: Handles market data caching and preprocessing for efficient strategy execution.
+6.  **DataManager (`src/utils/data_manager.py`)**: Handles market data caching and preprocessing for efficient strategy execution.
 
-7. **TelegramBot**: Provides remote monitoring and control capabilities through Telegram messaging.
+7.  **MarketUtils (`src/utils/market_utils.py`)**: Provides helper functions for market-specific data, such as symbol information, contract sizes, and minimum stop distances required by the broker.
 
-8. **PerformanceTracker**: Tracks and reports trading performance metrics.
+8.  **TelegramBot (`src/telegram/telegram_bot.py`)**: Provides remote monitoring and control capabilities through Telegram messaging.
+
+9.  **PerformanceTracker (`src/utils/performance_tracker.py`)**: Tracks and reports trading performance metrics.
 
 ## Trading Strategies
 
-The system implements multiple trading strategies:
+The system is designed to be modular, with strategies implementing a common template (`strategy_template.py`). The current primary strategy is:
 
-1. **Trend Following Strategy**: Identifies established trends using ADX and moving averages, entering on pullbacks to dynamic support/resistance levels.
-
-2. **Breakout Trading Strategy**: Detects price breakouts from consolidation patterns or key levels with confirmation filters.
-
-3. **Price Action SR Strategy**: Uses support and resistance levels combined with price action patterns for entries.
-
-4. **Breakout Reversal Strategy**: Identifies false breakouts and potential trend reversals.
-
-5. **Confluence Price Action Strategy**: Combines multiple technical factors to identify high-probability setups.
+1.  **PremiumLuxAlgoStrategy (`luxalgopremium.py`)**: An advanced strategy that uses signals from the LuxAlgo Premium indicator suite, generating signals with multiple take-profit levels for sophisticated trade management.
 
 ## Risk Management
 
@@ -117,7 +111,7 @@ The risk management system implements several layers of protection:
 
 - **Position Sizing**: Calculates appropriate lot sizes based on account balance and risk percentage
 - **Drawdown Protection**: Reduces position sizes or stops trading during drawdown periods
-- **Trade Validation**: Validates all trades against risk parameters before execution
+- **Trade Validation**: Validates all trades against risk parameters before execution. This includes a final risk-to-reward ratio check *after* the broker's minimum stop requirements have been met and applied.
 - **Volatility Adjustment**: Adjusts position sizes based on market volatility
 - **Recovery Mode**: Implements conservative trading during recovery from drawdowns
 - **Daily/Weekly Limits**: Enforces limits on number of trades and maximum risk per day/week
