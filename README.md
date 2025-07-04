@@ -57,7 +57,7 @@ flowchart TB
     end
 
     subgraph Strategies["Trading Strategies"]
-        E --> K(strategy/luxalgopremium.py)
+        E --> K(strategy/Supertrend.py)
         K -- implements --> L((strategy/strategy_template.py))
     end
 
@@ -103,7 +103,7 @@ flowchart TB
 
 The system is designed to be modular, with strategies implementing a common template (`strategy_template.py`). The current primary strategy is:
 
-1.  **PremiumLuxAlgoStrategy (`luxalgopremium.py`)**: An advanced strategy that uses signals from the LuxAlgo Premium indicator suite, generating signals with multiple take-profit levels for sophisticated trade management.
+1.  **PremiumLuxAlgoStrategy (`Supertrend.py`)**: A strategy centered around the Supertrend indicator, using a collection of other indicators for confirmation. It generates signals with multiple take-profit levels for sophisticated trade management.
 
 ## Risk Management
 
@@ -235,7 +235,7 @@ Trading_Bot/
 │   ├── risk_manager.py      # Risk management
 │   ├── strategy/            # Trading strategies
 │   │   ├── __init__.py
-│   │   ├── luxalgopremium.py    # LuxAlgo Premium signal strategy
+│   │   ├── Supertrend.py        # Supertrend-based signal strategy
 │   │   └── strategy_template.py # Base template for new strategies
 │   ├── telegram/            # Telegram integration
 │   │   ├── telegram_bot.py
