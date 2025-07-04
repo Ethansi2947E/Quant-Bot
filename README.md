@@ -127,8 +127,8 @@ The risk management system implements several layers of protection:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/trading_bot.git
-cd Trading_Bot
+https://github.com/Ethansi2947E/Quant-Bot/tree/SuperTrend
+cd Quant-Bot
 ```
 
 2. Create a virtual environment:
