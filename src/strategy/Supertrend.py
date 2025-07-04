@@ -9,7 +9,7 @@ from src.trading_bot import SignalGenerator
 from config.config import get_risk_manager_config
 from src.risk_manager import RiskManager
 
-class PremiumLuxAlgo:
+class Supertrend(SignalGenerator):
     def __init__(self, data: pd.DataFrame):
         """
         Initialize with OHLCV data
@@ -655,7 +655,7 @@ class PremiumLuxAlgoStrategy(SignalGenerator):
             logger.debug(f"[{sym}] Analyzing data for timestamp: {last_timestamp}")
 
             try:
-                lux_algo = PremiumLuxAlgo(primary_df.copy())
+                lux_algo = Supertrend(primary_df.copy())
                 # Pass strategy params to the indicator calculation
                 results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
             except Exception as e:
