@@ -67,9 +67,9 @@ flowchart TB
     end
 
     subgraph Notes["Notes"]
-        Note1[MT5Handler: Includes enhanced error recovery and partial close logic.]
-        Note2[PositionManager: Actively manages multi-TP lifecycle (register, monitor, partial close, deregister).]
-        Note3[RiskManager: Re-validates R:R ratio after broker-side stop adjustments.]
+        Note1["MT5Handler: Includes enhanced error recovery and partial close logic."]
+        Note2["PositionManager: Actively manages multi-TP lifecycle (register, monitor, partial close, deregister)."]
+        Note3["RiskManager: Re-validates R:R ratio after broker-side stop adjustments."]
     end
 ```
 
