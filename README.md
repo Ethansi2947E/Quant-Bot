@@ -103,7 +103,7 @@ flowchart TB
 
 The system is designed to be modular, with strategies implementing a common template (`strategy_template.py`). The current primary strategy is:
 
-1.  **PremiumLuxAlgoStrategy (`Supertrend.py`)**: A strategy centered around the Supertrend indicator, using a collection of other indicators for confirmation. It generates signals with multiple take-profit levels for sophisticated trade management.
+1.  **SuperTrendStrategy (`Supertrend.py`)**: A strategy centered around the Supertrend indicator, using a collection of other indicators for confirmation. It generates signals with multiple take-profit levels for sophisticated trade management.
 
 ## Risk Management
 
