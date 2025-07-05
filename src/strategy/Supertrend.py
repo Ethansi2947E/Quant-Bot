@@ -9,7 +9,7 @@ from src.trading_bot import SignalGenerator
 from config.config import get_risk_manager_config
 from src.risk_manager import RiskManager
 
-class Supertrend(SignalGenerator):
+class Supertrend:
     def __init__(self, data: pd.DataFrame):
         """
         Initialize with OHLCV data
@@ -589,7 +589,7 @@ TIMEFRAME_PROFILES = {
 DEFAULT_PROFILE = {"lookback": 284}
 
 
-class PremiumLuxAlgoStrategy(SignalGenerator):
+class SuperT(SignalGenerator):
     def __init__(self,
                  primary_timeframe: str = "M1", risk_percent: float = 0.01,
                  min_risk_reward: float = 2.0, atr_multiplier: float = 2.0,

@@ -64,7 +64,7 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,
     "signal_generators": [
        # "MintAlgoStrategy",
-        "Supertrend",
+        "SuperT",
         #"LuxAlgoPremiumStrategy"
     ],
 }
