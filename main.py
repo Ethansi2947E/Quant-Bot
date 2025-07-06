@@ -7,10 +7,14 @@ Main entry point for the trading bot system.
 """
 
 import os
+import sys
 import asyncio
 import logging
 import traceback
 from dotenv import load_dotenv
+
+# Diagnostic print to help identify initialization order
+print("main.py starting - before any logging setup")
 
 # --- Prevent __pycache__ creation ---
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
@@ -26,8 +30,9 @@ from config.config import (
 from src.utils.logging_setup import setup_logging
 
 # --- Configure Logging ---
-# All logging is now handled by the setup_logging function
+print("About to call setup_logging...")
 setup_logging(LOG_CONFIG)
+print("Logging setup complete.")
 
 from src.trading_bot import TradingBot
 

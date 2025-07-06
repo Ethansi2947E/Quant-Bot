@@ -80,7 +80,7 @@ TELEGRAM_CONFIG = {
 LOG_CONFIG = {
     "use_file_logging": os.getenv("LOG_TO_FILE", "False").lower() == "true",
     "log_file_path": BASE_DIR / "logs/trading_bot.log",
-    "level": os.getenv("LOG_LEVEL", "DEBUG"),
+    "level": "TRACE", # DEBUG, INFO, TRACE
     "rotation": "10 MB",
     "retention": "10 days",
     "compression": "zip",
