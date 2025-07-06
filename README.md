@@ -38,8 +38,15 @@ This Trading Bot is a comprehensive algorithmic trading system designed to conne
 
 ```mermaid
 flowchart TB
+    subgraph Config ["Configuration"]
+        Cfg[config/config.py]
+        Env[.env] --> |loads| Cfg
+    end
+
     subgraph Main["Main Application"]
-        A[main.py] --> |initializes| B(TradingBot)
+        A[main.py] -- "uses" --> Cfg
+        A --> |initializes| B(TradingBot)
+        A -- "uses" --> LS[utils/logging_setup.py]
     end
 
     subgraph Core["Core Components"]
@@ -67,21 +74,28 @@ flowchart TB
     end
 
     subgraph Notes["Notes"]
+        Note0["logging_setup.py: Centralizes all Loguru configuration."]
         Note1["MT5Handler: Includes enhanced error recovery and partial close logic."]
-        Note2["PositionManager: Actively manages multi-TP lifecycle (register, monitor, partial close, deregister)."]
-        Note3["RiskManager: Re-validates R:R ratio after broker-side stop adjustments."]
+        Note2["PositionManager: Actively manages multi-TP lifecycle."]
+        Note3["config.py: Purely declarative, no functions."]
     end
 ```
 
 ### Component Description
 
-1.  **TradingBot (`trading_bot.py`)**: The central orchestrator that manages the entire trading process, initializes components, and handles the main event loops.
+1.  **`main.py`**: The application's entry point. It loads the environment, uses `logging_setup.py` to configure the global logger, reads the declarative configs from `config.py`, and initializes and runs the `TradingBot`.
 
-2.  **MT5Handler (`mt5_handler.py`)**: Manages the connection to MetaTrader 5, handles market data retrieval, and executes trading orders. It includes robust error handling to automatically adjust for broker-specific requirements (e.g., "invalid stops") and can execute **partial position closes**.
+2.  **`config/config.py`**: A purely declarative file containing all static configurations for the bot (MT5, Trading, Telegram, Risk). It contains **no functions** and is the single source of truth for all parameters.
 
-3.  **RiskManager (`risk_manager.py`)**: Handles position sizing, risk calculations, and implements trading limits. It performs a crucial final check, re-validating the risk-to-reward ratio *after* any automatic stop adjustments are made by the `MT5Handler` to ensure trade viability.
+3.  **`utils/logging_setup.py`**: A dedicated utility that handles all logging configuration. It sets up `Loguru`, intercepts the standard Python logger, and configures console and file outputs based on settings in `config.py`.
 
-4.  **SignalProcessor (`src/utils/signal_processor.py`)**: Processes raw signals from strategies, applies risk management rules, and, upon successful execution, **registers the new trade with the `PositionManager`** for lifecycle management.
+4.  **TradingBot (`trading_bot.py`)**: The central orchestrator that manages the entire trading process, initializes components, and handles the main event loops.
+
+5.  **MT5Handler (`mt5_handler.py`)**: Manages the connection to MetaTrader 5, handles market data retrieval, and executes trading orders. It includes robust error handling to automatically adjust for broker-specific requirements (e.g., "invalid stops") and can execute **partial position closes**.
+
+6.  **RiskManager (`risk_manager.py`)**: Handles position sizing, risk calculations, and implements trading limits. It performs a crucial final check, re-validating the risk-to-reward ratio *after* any automatic stop adjustments are made by the `MT5Handler` to ensure trade viability.
+
+7.  **SignalProcessor (`src/utils/signal_processor.py`)**: Processes raw signals from strategies, applies risk management rules, and, upon successful execution, **registers the new trade with the `PositionManager`** for lifecycle management.
 
 5.  **PositionManager (`src/utils/position_manager.py`)**: Monitors and manages all open positions. Its responsibilities include:
     - Managing standard trailing stops.
@@ -91,13 +105,13 @@ flowchart TB
     - Updating the trade's state (e.g., remaining volume, next TP).
     - Deregistering trades once they are fully closed.
 
-6.  **DataManager (`src/utils/data_manager.py`)**: Handles market data caching and preprocessing for efficient strategy execution.
+9.  **DataManager (`src/utils/data_manager.py`)**: Handles market data caching and preprocessing for efficient strategy execution.
 
-7.  **MarketUtils (`src/utils/market_utils.py`)**: Provides helper functions for market-specific data, such as symbol information, contract sizes, and minimum stop distances required by the broker.
+10. **MarketUtils (`src/utils/market_utils.py`)**: Provides helper functions for market-specific data, such as symbol information and contract sizes.
 
-8.  **TelegramBot (`src/telegram/telegram_bot.py`)**: Provides remote monitoring and control capabilities through Telegram messaging.
+11. **TelegramBot (`src/telegram/telegram_bot.py`)**: Provides remote monitoring and control capabilities through Telegram messaging.
 
-9.  **PerformanceTracker (`src/utils/performance_tracker.py`)**: Tracks and reports trading performance metrics.
+12. **PerformanceTracker (`src/utils/performance_tracker.py`)**: Tracks and reports trading performance metrics.
 
 ## Trading Strategies
 
@@ -263,7 +277,7 @@ To ensure only you can control the bot, you must provide your unique Telegram Us
 Trading_Bot/
 ├── config/                   # Configuration files
 │   ├── __init__.py
-│   └── config.py            # Main configuration
+│   └── config.py            # Main configuration (declarative only)
 ├── src/                      # Source code
 │   ├── mt5_handler.py       # MetaTrader 5 interface
 │   ├── trading_bot.py       # Main bot orchestrator
@@ -278,6 +292,7 @@ Trading_Bot/
 │   ├── utils/               # Utility functions
 │   │   ├── __init__.py
 │   │   ├── data_manager.py
+│   │   ├── logging_setup.py   # Centralized logging configuration
 │   │   ├── market_utils.py
 │   │   ├── performance_tracker.py
 │   │   ├── position_manager.py
