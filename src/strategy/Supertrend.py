@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Core framework imports
 from src.trading_bot import SignalGenerator
-from config.config import get_risk_manager_config
+from config.config import RISK_MANAGER_CONFIG
 from src.risk_manager import RiskManager
 
 class Supertrend:
@@ -608,8 +608,7 @@ class SuperT(SignalGenerator):
             'supertrend_factor': supertrend_factor,
             'supertrend_atr_period': supertrend_atr_period,
         }
-        rm_conf = get_risk_manager_config()
-        self.risk_percent = rm_conf.get('max_risk_per_trade', risk_percent)
+        self.risk_percent = RISK_MANAGER_CONFIG.get('max_risk_per_trade', risk_percent)
         self.lookback = None
         self._load_timeframe_profile()
         self.processed_bars = {}

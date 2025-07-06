@@ -21,7 +21,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 # Core framework imports
 from src.trading_bot import SignalGenerator
-from config.config import get_risk_manager_config
+from config.config import RISK_MANAGER_CONFIG
 from src.risk_manager import RiskManager
 # Import any technical analysis libraries you need, e.g., talib
 import talib
@@ -85,8 +85,7 @@ class StrategyTemplate(SignalGenerator):
         self.min_risk_reward = min_risk_reward
 
         # It's good practice to allow risk settings to be overridden by a central config.
-        rm_conf = get_risk_manager_config()
-        self.risk_percent = rm_conf.get('max_risk_per_trade', risk_percent)
+        self.risk_percent = RISK_MANAGER_CONFIG.get('max_risk_per_trade', risk_percent)
 
         # --- 5. Load Timeframe-Specific Profile ---
         # This section demonstrates how to use the TIMEFRAME_PROFILES dictionary.

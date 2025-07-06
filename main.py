@@ -1,74 +1,33 @@
 # main.py -- Entry point for Trading Bot
 """
 Main entry point for the trading bot system.
-- Configures logging (console only, no file logging)
+- Configures logging via config.py
 - Loads environment and config
 - Starts and stops the TradingBot
 """
 
 import os
-import sys
 import asyncio
 import logging
 import traceback
 from dotenv import load_dotenv
-from loguru import logger
 
 # --- Prevent __pycache__ creation ---
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 
-# --- Configure standard logging (console only) ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logging.info("============================================")
-logging.info("LOGGING CONFIGURED WITH CONSOLE OUTPUT ONLY")
-logging.info("NO LOG FILES WILL BE CREATED")
-logging.info("============================================")
-
-
-
-# --- Intercept standard logging to loguru ---
-class InterceptHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            level = logger.level(record.levelname).name
-        except ValueError:
-            level = record.levelno
-        frame, depth = logging.currentframe(), 2
-        while frame and frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
-            depth += 1
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
-
-logger.remove()
-logger.add(
-    sys.stderr,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="TRACE",
-    colorize=True,
-    diagnose=False,
-    backtrace=False
-)
-logging.getLogger().handlers = [InterceptHandler()]
-logging.getLogger().setLevel(logging.DEBUG)
-
 # --- Load environment and config ---
 load_dotenv(override=True)
-from config.config import MT5_CONFIG, TRADING_CONFIG, TELEGRAM_CONFIG, LOG_CONFIG
+from config.config import (
+    MT5_CONFIG,
+    TRADING_CONFIG,
+    TELEGRAM_CONFIG,
+    LOG_CONFIG,
+)
+from src.utils.logging_setup import setup_logging
 
-# --- Override LOG_CONFIG for console-only logging ---
-LOG_CONFIG.update({
-    "format": "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    "level": "DEBUG",
-    "rotation": None,
-    "retention": None,
-    "compression": None,
-    "use_file_logging": False,
-    "colorize": True
-})
+# --- Configure Logging ---
+# All logging is now handled by the setup_logging function
+setup_logging(LOG_CONFIG)
 
 from src.trading_bot import TradingBot
 

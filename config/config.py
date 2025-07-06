@@ -78,25 +78,29 @@ TELEGRAM_CONFIG = {
 
 # ================= Logging Configuration =================
 LOG_CONFIG = {
-    "format": "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-    "level": "INFO",
-    "use_file_logging": False
+    "use_file_logging": os.getenv("LOG_TO_FILE", "False").lower() == "true",
+    "log_file_path": BASE_DIR / "logs/trading_bot.log",
+    "level": os.getenv("LOG_LEVEL", "DEBUG"),
+    "rotation": "10 MB",
+    "retention": "10 days",
+    "compression": "zip",
+    "colorize": True,
+    "backtrace": False,
+    "diagnose": False,
+    "format_console": "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    "format_file": "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
 }
 
 # ================= Risk Management Configuration =================
-def get_risk_manager_config():
-    return {
-        'max_risk_per_trade': 0.008,
-        'max_daily_loss': 0.015,
-        'min_risk_reward': 0.5,
-        'max_concurrent_trades': 1000,
-        'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
-        'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
-        'max_lot_size': TRADING_CONFIG['max_lot_size'],
-    }
-
-# Create a default RISK_MANAGER_CONFIG for imports
-RISK_MANAGER_CONFIG = get_risk_manager_config()
+RISK_MANAGER_CONFIG = {
+    'max_risk_per_trade': 0.008,
+    'max_daily_loss': 0.015,
+    'min_risk_reward': 0.5,
+    'max_concurrent_trades': 1000,
+    'use_fixed_lot_size': TRADING_CONFIG['use_fixed_lot_size'],
+    'fixed_lot_size': TRADING_CONFIG['fixed_lot_size'],
+    'max_lot_size': TRADING_CONFIG['max_lot_size'],
+}
 
 # ================= Trade Exit Configuration =================
 TRADE_EXIT_CONFIG = {
