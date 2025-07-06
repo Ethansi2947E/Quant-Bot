@@ -122,6 +122,7 @@ The risk management system implements several layers of protection:
 - Python 3.8 or higher
 - MetaTrader 5 terminal installed
 - Active MT5 account (demo or live)
+- Telegram Bot created using Bot Father (@BotFather)
 
 ### Setup
 
