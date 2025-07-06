@@ -124,11 +124,25 @@ The risk management system implements several layers of protection:
 - Active MT5 account (demo or live)
 - Telegram Bot created using Bot Father (@BotFather)
 
+### Special Instructions for Windows Users
+
+**1. Installing TA-Lib**
+
+The `TA-Lib` library is a powerful tool for technical analysis, but it cannot be installed directly with `pip` on Windows due to compilation requirements. Follow these steps to install it correctly:
+
+- **Check your Python Version**: Open Command Prompt and run `python --version` to note your Python version (e.g., 3.11).
+- **Download the Wheel File**: Go to the [talib-build releases on GitHub](https://github.com/cgohlke/talib-build/releases). Download the `TA_Lib` wheel (`.whl`) file that matches your Python version and system architecture (e.g., `TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl` for Python 3.11 64-bit).
+- **Install the Wheel File**: Navigate to your downloads folder in the Command Prompt and install the file using pip:
+  ```bash
+  # Example for a specific version
+  pip install TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl
+  ```
+
 ### Setup
 
 1. Clone the repository:
 ```bash
-https://github.com/Ethansi2947E/Quant-Bot/tree/SuperTrend
+https://github.com/Ethansi2947E/Quant-Bot/
 cd Quant-Bot
 ```
 
@@ -214,12 +228,32 @@ Once the bot is running, you can control it via Telegram with the following comm
 
 ## Telegram Integration
 
-The bot supports remote monitoring and control through Telegram:
+The bot uses Telegram for remote monitoring and control. To set it up, you need a bot token and your personal user ID.
 
-1. Create a Telegram bot using BotFather and obtain the API token
-2. Add the token to your `.env` file
-3. Add your Telegram user ID to the allowed users list
-4. Communicate with your bot through the Telegram app
+### Step 1: Create a Bot with BotFather
+
+1.  **Find BotFather**: Open your Telegram app and search for the official `@BotFather` bot (it has a blue checkmark).
+2.  **Start a New Bot**: Send the `/newbot` command to BotFather.
+3.  **Name Your Bot**: Follow the prompts to give your bot a user-friendly name (e.g., "My Trading Assistant").
+4.  **Set a Username**: Choose a unique username for your bot, which must end in "bot" (e.g., `MyTradingAssistantBot`).
+5.  **Save Your Token**: BotFather will provide you with an **API Token**. This is a secret key required for the bot to function. Copy it immediately and keep it safe. You will need it for the `.env` file.
+
+### Step 2: Find Your Telegram User ID
+
+To ensure only you can control the bot, you must provide your unique Telegram User ID.
+
+1.  **Find UserInfo Bot**: In Telegram, search for a bot like `@userinfobot`.
+2.  **Get Your ID**: Start a chat with the bot and it will immediately reply with your User ID (it's a long number).
+3.  **Save Your ID**: Copy this ID. You will need it for the `.env` file.
+
+### Step 3: Configure the Bot
+
+1.  Add the **API Token** and **User ID** you just obtained to your `.env` file:
+    ```
+    TELEGRAM_BOT_TOKEN=YourAPITokenFromBotFather
+    TELEGRAM_ALLOWED_USERS=YourUserIDFromUserInfoBot
+    ```
+2.  Start the trading bot. You can now communicate with it from your Telegram account.
 
 ## Development
 
