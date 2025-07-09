@@ -415,44 +415,6 @@ class MT5Handler:
                     logger.warning(f"Take profit for SELL order too close to entry, adjusting: TP ({take_profit}) → ({price - min_stop_distance})")
                     take_profit = price - min_stop_distance
 
-            # --- RISK-REWARD VALIDATION (REVISED) ---
-            # This block runs AFTER SL/TP adjustments to ensure the trade is still viable.
-            min_risk_reward = RISK_MANAGER_CONFIG.get('min_risk_reward', 1.0)
-
-            # Use the first TP from the list if available, otherwise use the single take_profit value
-            tp_for_rr_calc = take_profit
-            if take_profits and isinstance(take_profits, list) and len(take_profits) > 0:
-                tp_for_rr_calc = take_profits[0]
-
-            if stop_loss is not None and stop_loss != 0 and tp_for_rr_calc is not None and tp_for_rr_calc != 0:
-                if action == mt5.ORDER_TYPE_BUY:
-                    risk = price - stop_loss
-                    reward = tp_for_rr_calc - price
-                else:  # SELL
-                    risk = stop_loss - price
-                    reward = price - tp_for_rr_calc
-
-                if risk <= 0:
-                    logger.error(f"Trade aborted: Invalid risk ({risk:.5f}) after adjustments. Price: {price}, SL: {stop_loss}")
-                    return None
-                
-                if reward <= 0:
-                    logger.error(f"Trade aborted: Invalid reward ({reward:.5f}) after adjustments. Price: {price}, TP: {tp_for_rr_calc}")
-                    return None
-
-                risk_reward_ratio = reward / risk
-                logger.info(f"Post-adjustment validation. Risk: {risk:.5f}, Reward: {reward:.5f}, R:R: {risk_reward_ratio:.2f}")
-
-                if risk_reward_ratio < min_risk_reward:
-                    logger.critical(
-                        f"TRADE ABORTED: Risk-to-reward ratio ({risk_reward_ratio:.2f}) is below the minimum "
-                        f"required ({min_risk_reward:.2f}) after broker adjustments. "
-                        f"Final params: Price={price}, SL={stop_loss}, TP={tp_for_rr_calc}"
-                    )
-                    return None
-            else:
-                logger.warning("Skipping R:R validation as Stop Loss or Take Profit is not set.")
-                
             # --- NEW: Round price and SL/TP to the correct number of digits allowed by the symbol ---
             try:
                 digits = int(getattr(symbol_info, "digits", 2))  # default to 2 if attribute missing
@@ -1104,44 +1066,41 @@ class MT5Handler:
             logger.error(f"Error getting spread: {str(e)}")
             return float('inf')
 
-    def get_min_stop_distance(self, symbol: str) -> float:
-        """Calculate and return the minimum stop distance for a symbol based on its current market conditions."""
-        try:
-            if not self.connected:
-                logger.warning("MT5 not connected when trying to get minimum stop distance")
-                return self._get_fallback_min_stop_distance(symbol)
-
-            # Select symbol to ensure it's available
-            if not mt5.symbol_select(symbol, True):
-                logger.warning(f"Failed to select symbol {symbol} for min stop distance check")
-                return self._get_fallback_min_stop_distance(symbol)
-
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info is not None:
-                # If the symbol info has a stops_level, use it multiplied by point
-                if hasattr(symbol_info, "stops_level") and symbol_info.stops_level > 0:
-                    min_distance = symbol_info.stops_level * symbol_info.point
-                    logger.debug(f"Using MT5 stops_level for {symbol}: {min_distance}")
-                    return min_distance
-
-                # Get current tick for a percentage-based fallback
-                tick = mt5.symbol_info_tick(symbol)
-                if tick is not None and hasattr(tick, "ask") and tick.ask > 0:
-                    # Use 0.1% of current price as fallback
-                    min_distance = tick.ask * 0.001
-                    logger.debug(f"Using percentage-based fallback for {symbol} min stop distance: {min_distance}")
-                    return min_distance
-
-            # If we got here, we need to use the fallback
+    def get_min_stop_distance(self, symbol: str, use_fallback: bool = False) -> float:
+        """
+        Get the minimum stop distance for a symbol in points. Includes a configurable buffer.
+        """
+        if use_fallback:
             return self._get_fallback_min_stop_distance(symbol)
 
-        except Exception as e:
-            logger.error(f"Error calculating min_stop_distance for {symbol}: {str(e)}")
+        symbol_info = self.get_symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"Could not get symbol info for {symbol}, using fallback for min stop distance.")
             return self._get_fallback_min_stop_distance(symbol)
+
+        # trade_stops_level is in points, not price.
+        min_stop_level_points = symbol_info.trade_stops_level
+        
+        # If the broker reports 0, it's unreliable. Use fallback.
+        if min_stop_level_points == 0:
+            logger.debug(f"Broker reported 0 for trade_stops_level for {symbol}. Using fallback.")
+            return self._get_fallback_min_stop_distance(symbol)
+
+        # Add the configured buffer to the stop level
+        buffer_percent = RISK_MANAGER_CONFIG.get('stop_level_buffer_percent', 0.1) # Default to 10%
+        buffered_stop_level = min_stop_level_points * (1 + buffer_percent)
+        
+        point_value = self.get_point_value(symbol)
+        min_stop_distance_price = buffered_stop_level * point_value
+        
+        logger.trace(f"[{symbol}] Min stop distance: {min_stop_level_points} points, with {buffer_percent*100}% buffer -> {buffered_stop_level:.2f} points ({min_stop_distance_price:.5f} price units)")
+        
+        return min_stop_distance_price
 
     def _get_fallback_min_stop_distance(self, symbol: str) -> float:
         """
-        Provide a sensible fallback value for minimum stop distance when MT5 data is unavailable.
+        Fallback method to calculate a reasonable minimum stop distance based on ATR or price percentage.
+        This is used when broker-provided values are unreliable.
 
         Args:
             symbol: The trading symbol

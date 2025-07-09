@@ -65,6 +65,8 @@ TRADING_CONFIG = {
     "signal_generators": [
        # "MintAlgoStrategy",
         "SuperT",
+        "GarbageAlgoStrategy",
+        "ExhaustionReversalStrategy",
         #"LuxAlgoPremiumStrategy"
     ],
 }
@@ -93,7 +95,10 @@ LOG_CONFIG = {
 
 # ================= Risk Management Configuration =================
 RISK_MANAGER_CONFIG = {
-    'max_risk_per_trade': 0.008,
+    'max_risk_per_trade': 0.001,  # Max 0.1% of account balance per trade
+    'max_drawdown': 0.10,  # Max 10% drawdown for the entire account
+    'min_risk_reward_ratio': 1.5,
+    'stop_level_buffer_percent': 0.15,  # 15% buffer on min stop distance
     'max_daily_loss': 0.015,
     'min_risk_reward': 0.5,
     'max_concurrent_trades': 1000,

@@ -8,7 +8,6 @@ import hashlib
 from src.risk_manager import RiskManager
 from src.telegram.telegram_bot import TelegramBot
 from src.mt5_handler import MT5Handler
-from src.utils.market_utils import adjust_trade_for_spread
 from src.utils.position_manager import PositionManager
 
 class SignalProcessor:
@@ -520,12 +519,13 @@ class SignalProcessor:
                 # Execute the trade
                 trade_execution_start = time.time()
                 logger.info(f"Executing trade for {symbol} {direction}")
-                result = await self.execute_trade_from_signal(signal)
+                trade_result = await self.execute_trade_from_signal(signal)
                 
-                if result.get("status") == "success":
+                # Use the 'trade_result' dictionary for all post-execution logic
+                if trade_result and trade_result.get("status") == "success":
                     signal["status"] = "executed"
-                    signal["ticket"] = result.get("order")
-                    logger.info(f"Trade executed successfully for {symbol} {direction}. Ticket: {result.get('order')}")
+                    signal["ticket"] = trade_result.get("order")
+                    logger.info(f"Trade executed successfully for {symbol} {direction}. Ticket: {trade_result.get('order')}")
                     
                     # Store the processed signal to avoid duplicates
                     self._add_processed_signal(signal)
@@ -533,20 +533,25 @@ class SignalProcessor:
                     if self.risk_manager:
                         self.risk_manager.on_trade_opened(signal)
                     # --- NEW: Register trade with PositionManager for multi-TP handling ---
-                    if self.position_manager:
-                        try:
-                            self.position_manager.register_trade(signal, result)
-                        except Exception as e:
-                            logger.error(f"Failed to register trade with PositionManager: {e}")
+                    if self.position_manager and trade_result.get('ticket'):
+                        self.position_manager.register_trade(
+                            signal=signal,
+                            trade_result=trade_result
+                        )
+                    else:
+                        if not self.position_manager:
+                            logger.debug("PositionManager not available, skipping trade registration.")
+                        if not trade_result.get('ticket'):
+                            logger.warning("Could not register trade for multi-TP: Ticket not found in trade result.")
                     # -------------------------------------------------------------------
                 else:
                     signal["status"] = "failed"
-                    signal["error"] = result.get("message", "Unknown error")
-                    error_code = result.get("code", "Unknown code")
+                    signal["error"] = trade_result.get("message", "Unknown error")
+                    error_code = trade_result.get("code", "Unknown code")
                     logger.error(f"Trade execution failed for {symbol} {direction}: {error_code} - {signal['error']}")
                 
                 trade_execution_time = time.time() - trade_execution_start
-                execution_status = "SUCCESS" if result.get("status") == "success" else "FAILED"
+                execution_status = "SUCCESS" if trade_result and trade_result.get("status") == "success" else "FAILED"
                 logger.debug(f"[TIMING] 🔍 Trade execution took {trade_execution_time:.4f}s - {execution_status}")
                 
                 # Add the processed signal to results
@@ -584,6 +589,51 @@ class SignalProcessor:
 
         logger.debug(f"[TIMING] 💰 Starting {order_type.upper()} trade execution for {symbol} at {execution_start}")
         logger.warning(f"⚠️ {order_type.upper()} EXECUTION: Symbol={symbol}, Direction={direction}, is_addition={is_addition}")
+
+        # --- PRE-VALIDATION ADJUSTMENT ---
+        # Adjust SL and TP based on broker's minimum stop distance BEFORE final validation.
+        try:
+            current_tick = self.mt5_handler.get_last_tick(symbol)
+            if not current_tick:
+                raise ValueError("Could not retrieve current tick for pre-validation.")
+
+            current_price = current_tick['ask'] if direction.lower() == 'buy' else current_tick['bid']
+            min_stop_dist = self.mt5_handler.get_min_stop_distance(symbol)
+            
+            original_sl = float(signal.get('stop_loss', 0.0))
+            
+            # Check if the proposed stop loss is too close
+            stop_dist_from_price = abs(current_price - original_sl)
+
+            if stop_dist_from_price < min_stop_dist:
+                logger.warning(f"[{symbol}] Original SL ({original_sl}) is too close to current price ({current_price}). Adjusting to meet min distance of {min_stop_dist}.")
+                new_sl = current_price - min_stop_dist if direction.lower() == 'buy' else current_price + min_stop_dist
+                
+                # Now, recalculate TPs to maintain original R:R
+                original_risk = abs(signal['entry_price'] - original_sl)
+                new_risk = abs(current_price - new_sl)
+                
+                if original_risk > 0 and 'take_profits' in signal and signal['take_profits']:
+                    risk_ratio = new_risk / original_risk
+                    original_tps = signal['take_profits']
+                    new_tps = []
+                    for tp in original_tps:
+                        original_reward = abs(tp - signal['entry_price'])
+                        new_reward = original_reward * risk_ratio
+                        new_tp = current_price + new_reward if direction.lower() == 'buy' else current_price - new_reward
+                        new_tps.append(new_tp)
+                    
+                    logger.info(f"[{symbol}] Recalculated TPs from {signal['take_profits']} to {new_tps} to maintain R:R.")
+                    signal['take_profits'] = new_tps
+                
+                signal['stop_loss'] = new_sl
+                signal['entry_price'] = current_price # Update entry to current price for accuracy
+
+        except Exception as e:
+            logger.error(f"Failed during pre-validation adjustment for {symbol}: {e}")
+            # Abort if we can't adjust properly
+            return {'status': 'error', 'message': f'Pre-validation adjustment failed: {e}', 'code': 'ADJUSTMENT_FAILED'}
+
 
         # --- Perform trade validation (calls RiskManager.validate_trade) ---
         account_info_for_validation = self.mt5_handler.get_account_info() if self.mt5_handler else None
@@ -661,21 +711,28 @@ class SignalProcessor:
                 if self.risk_manager:
                     self.risk_manager.on_trade_opened(signal)
                 
-                trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, final_take_profit_for_order, position_size)
-                
-                self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
+                # Send a confirmation message via Telegram
+                if self.telegram_bot:
+                    order_type = "MARKET" if order_type == 'market' else "PENDING"
+                    trade_details = self._build_trade_notification(signal, symbol, direction, entry_price, stop_loss, final_take_profit_for_order, position_size)
+                    try:
+                        # Correctly await the async send_message function
+                        await self.telegram_bot.send_message(f"✅ {order_type.upper()} Order Placed\n\n{trade_details}")
+                    except Exception as e:
+                        logger.error(f"Failed to send Telegram confirmation for {symbol} {direction}: {e}")
                 
                 return {
                     'status': 'success',
                     'order': ticket,
+                    'ticket': ticket,  # Added for compatibility with PositionManager
                     'message': f'{order_type.capitalize()} order placed successfully',
                     'time_taken': time.time() - execution_start
                 }
             else:
-                error_message = f'Failed to place {order_type} order'
+                error_message = trade_result.get('message', f'Failed to place {order_type} order') if trade_result else 'Execution failed: MT5 handler returned no result'
                 logger.error(f"❌ {order_type.upper()} execution failed: {error_message}")
                 if self.telegram_bot:
-                    self.telegram_bot.send_message(
+                    await self.telegram_bot.send_message(
                         f"❌ {order_type.upper()} Execution Failed\n\n"
                         f"Symbol: {symbol}\n"
                         f"Direction: {(direction or '').upper()}\n"
