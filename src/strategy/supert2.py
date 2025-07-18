@@ -283,25 +283,37 @@ class GarbageAlgoStrategy(SignalGenerator):
                 continue
             
             last = results.iloc[-1]
-            direction, detailed_reasoning = None, []
+            
+            # --- STRATEGY LOGIC & Structured Logging ---
+            is_bull_signal = last['bull']
+            is_bear_signal = last['bear']
+            is_sideways = last['adx'] < self.params['sidewaysThreshold']
+            
+            is_long_candidate = self.params['nbuysell'] and is_bull_signal and not is_sideways
+            is_short_candidate = self.params['nbuysell'] and is_bear_signal and not is_sideways
+            
+            log_msg = f"[{sym}][{self.name}] Condition Analysis for Bar {last.name}:\n"
+            log_msg += f"  - LONG -> {'CANDIDATE' if is_long_candidate else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if is_bull_signal else '❌'} [Entry]     SuperTrend Bullish Crossover\n"
+            log_msg += f"    {'✅' if not is_sideways else '❌'} [Filter]    ADX > Threshold: {last['adx']:.2f} > {self.params['sidewaysThreshold']}\n"
+            
+            log_msg += f"  - SHORT -> {'CANDIDATE' if is_short_candidate else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if is_bear_signal else '❌'} [Entry]     SuperTrend Bearish Crossover\n"
+            log_msg += f"    {'✅' if not is_sideways else '❌'} [Filter]    ADX > Threshold: {last['adx']:.2f} > {self.params['sidewaysThreshold']}"
 
-            # --- STRATEGY LOGIC ---
-            if self.params['nbuysell']:
-                if last['bull']:
-                    direction = 'buy'
-                    detailed_reasoning = ["SuperTrend crossover bullish", "Close >= SMA(13)"]
-                elif last['bear']:
-                    direction = 'sell'
-                    detailed_reasoning = ["SuperTrend crossover bearish", "Close <= SMA(13)"]
+            logger.info(log_msg)
+
+            direction, detailed_reasoning = None, []
+            if is_long_candidate:
+                direction = 'buy'
+                detailed_reasoning = ["SuperTrend crossover bullish", "Close >= SMA(13)"]
+            elif is_short_candidate:
+                direction = 'sell'
+                detailed_reasoning = ["SuperTrend crossover bearish", "Close <= SMA(13)"]
 
             if not direction:
                 continue
                 
-            # Sideways Market Filter
-            if last['adx'] < self.params['sidewaysThreshold']:
-                logger.trace(f"[{sym}] Signal for {self.name} ignored due to sideways market (ADX {last['adx']:.2f} < {self.params['sidewaysThreshold']})")
-                continue
-
             # --- RISK AND TRADE PARAMETER CALCULATION ---
             entry = last['close']
             atr_band = last['atr_for_risk'] * self.params['atrRisk']

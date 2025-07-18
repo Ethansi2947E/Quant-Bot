@@ -664,14 +664,20 @@ class SuperT(SignalGenerator):
             # --- CORRECTION: Use the pre-calculated results from the LuxAlgo class ---
             last = results.iloc[-1]
             
-            logger.debug(f"[{sym}] Last candle data: Close={last['close']:.5f}, SMA13={last['sma13']:.5f}, "
-                         f"Supertrend={last['supertrend']:.5f}, ST_Dir={last['st_direction']}, "
-                         f"Bull={last['bull_signal']}, Bear={last['bear_signal']}, "
-                         f"MajorTP={last['major_tp']}, MinorTP={last['minor_tp']}")
-
-            # REFINEMENT: Apply the SMA(13) filter here, not during signal calculation
+            # --- Structured Logging ---
             bull_cond = last['bull_signal'] and last['close'] >= last['sma13']
             bear_cond = last['bear_signal'] and last['close'] <= last['sma13']
+
+            log_msg = f"[{sym}][{self.name}] Condition Analysis for Bar {last.name}:\n"
+            log_msg += f"  - LONG -> {'CANDIDATE' if bull_cond else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if last['bull_signal'] else '❌'} [Entry]   SuperTrend Bullish Crossover\n"
+            log_msg += f"    {'✅' if last['close'] >= last['sma13'] else '❌'} [Filter]  Close >= SMA(13): {last['close']:.2f} >= {last['sma13']:.2f}\n"
+
+            log_msg += f"  - SHORT -> {'CANDIDATE' if bear_cond else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if last['bear_signal'] else '❌'} [Entry]   SuperTrend Bearish Crossover\n"
+            log_msg += f"    {'✅' if last['close'] <= last['sma13'] else '❌'} [Filter]  Close <= SMA(13): {last['close']:.2f} <= {last['sma13']:.2f}"
+
+            logger.info(log_msg)
 
             direction = 'buy' if bull_cond else 'sell' if bear_cond else None
             if not direction:

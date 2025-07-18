@@ -2095,8 +2095,7 @@ class MT5Handler:
             try:
                 mt5.shutdown()
                 self.connected = False
-                self.initialized = False
-                logger.info("MetaTrader 5 connection closed")
+                logger.info("MT5 connection closed")
             except Exception as e:
                 logger.error(f"Error during MT5 shutdown: {str(e)}")
 
@@ -2330,3 +2329,49 @@ class MT5Handler:
         else:
             logger.error(f"Partial close for ticket {ticket} failed with retcode {result.retcode}: {result.comment}")
             return None
+
+    def get_market_book(self, symbol: str) -> Optional[List[Dict]]:
+        """
+        Subscribes to a symbol's market depth if needed and fetches the current order book.
+
+        Args:
+            symbol (str): The financial instrument to get the order book for.
+
+        Returns:
+            A list of order book entry dictionaries, or None if an error occurs.
+        """
+        if not self.connected:
+            logger.error("MT5 not connected, cannot get market book.")
+            return None
+
+        # Subscribe if we haven't already
+        if symbol not in self._active_subscriptions:
+            if not mt5.market_book_add(symbol):
+                error_code, error_message = mt5.last_error()
+                # If subscription fails with a non-error code, it implies no market depth data is available.
+                if error_code in [0, 1]:
+                    logger.warning(
+                        f"Could not subscribe to market depth for '{symbol}'. "
+                        "This symbol likely does not provide Level 2 data."
+                    )
+                    logger.trace(f"Traceback for '{symbol}' market depth failure:\n{''.join(traceback.format_stack())}")
+                else:
+                    logger.error(f"Failed to subscribe to market depth for {symbol}: ({error_code}, '{error_message}')")
+                return None
+
+            logger.info(f"Subscribed to market depth for {symbol}.")
+            self._active_subscriptions.add(symbol)
+            
+            # --- ADDED: A small delay to allow the book to populate on first subscription ---
+            logger.trace(f"Pausing briefly for {symbol} market book to populate...")
+            time.sleep(0.1) # 100ms warm-up delay
+
+        # Get the book and convert to a list of dicts for easier use
+        book = mt5.market_book_get(symbol)
+        if book:
+            return [item._asdict() for item in book]
+        
+        # If the subscription exists but the book is empty, return an empty list, not None.
+        # This signals a valid subscription with no current data, not a failure.
+        logger.trace(f"Subscription for {symbol} is active, but the market book is currently empty.")
+        return []

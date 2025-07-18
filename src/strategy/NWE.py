@@ -225,27 +225,36 @@ class ExhaustionReversalStrategy(SignalGenerator):
             
             last = results.iloc[-1]
             
-            # --- Diagnostic Logging ---
-            log_msg = f"[{sym}][{self.name}] Checking conditions for {last.name}:\n"
-            
-            # Common values
-            log_msg += f"  - Close: {last['close']:.5f}, EMA Filter: {last['ema_filter']:.5f}\n"
-            log_msg += f"  - Low: {last['low']:.5f}, Lower NWE: {last['nwe_lower']:.5f}\n"
-            log_msg += f"  - High: {last['high']:.5f}, Upper NWE: {last['nwe_upper']:.5f}\n"
-            
-            # --- STRATEGY LOGIC & Logging ---
-            direction = None
-            detailed_reasoning = []
-            
-            # LONG Condition checks
+            # --- Strategy Logic & Structured Logging ---
+            # LONG conditions
             is_above_ema = last['close'] > last['ema_filter']
             is_touching_lower_nwe = last['low'] <= last['nwe_lower']
             has_recent_bull_div = results['bullish_divergence'].iloc[-self.params['div_lookback']:].any()
-            log_msg += f"  - LONG CHECK: Above EMA? {'✅' if is_above_ema else '❌'} | "
-            log_msg += f"Touching Lower NWE? {'✅' if is_touching_lower_nwe else '❌'} | "
-            log_msg += f"Recent Bull Div? {'✅' if has_recent_bull_div else '❌'}\n"
+            is_long_candidate = is_above_ema and is_touching_lower_nwe and has_recent_bull_div
 
-            if is_above_ema and is_touching_lower_nwe and has_recent_bull_div:
+            # SHORT conditions
+            is_below_ema = last['close'] < last['ema_filter']
+            is_touching_upper_nwe = last['high'] >= last['nwe_upper']
+            has_recent_bear_div = results['bearish_divergence'].iloc[-self.params['div_lookback']:].any()
+            is_short_candidate = is_below_ema and is_touching_upper_nwe and has_recent_bear_div
+
+            # Structured Logging
+            log_msg = f"[{sym}][{self.name}] Condition Analysis for Bar {last.name}:\n"
+            log_msg += f"  - LONG -> {'CANDIDATE' if is_long_candidate else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if is_above_ema else '❌'} [Trend]     Close > EMA({self.params['ema_period']}): {last['close']:.2f} > {last['ema_filter']:.2f}\n"
+            log_msg += f"    {'✅' if is_touching_lower_nwe else '❌'} [Entry]     Low <= Lower NWE: {last['low']:.2f} <= {last['nwe_lower']:.2f}\n"
+            log_msg += f"    {'✅' if has_recent_bull_div else '❌'} [Momentum]  Recent Bullish Divergence\n"
+            
+            log_msg += f"  - SHORT -> {'CANDIDATE' if is_short_candidate else 'REJECTED'}\n"
+            log_msg += f"    {'✅' if is_below_ema else '❌'} [Trend]     Close < EMA({self.params['ema_period']}): {last['close']:.2f} < {last['ema_filter']:.2f}\n"
+            log_msg += f"    {'✅' if is_touching_upper_nwe else '❌'} [Entry]     High >= Upper NWE: {last['high']:.2f} >= {last['nwe_upper']:.2f}\n"
+            log_msg += f"    {'✅' if has_recent_bear_div else '❌'} [Momentum]  Recent Bearish Divergence"
+
+            logger.info(log_msg)
+
+            direction, detailed_reasoning = None, []
+            
+            if is_long_candidate:
                 direction = 'buy'
                 detailed_reasoning = [
                     "Trend Filter: Close > 200 EMA",
@@ -253,17 +262,7 @@ class ExhaustionReversalStrategy(SignalGenerator):
                     "Momentum Confirmation: Recent Bullish RSI Divergence"
                 ]
 
-            # SHORT Condition checks
-            is_below_ema = last['close'] < last['ema_filter']
-            is_touching_upper_nwe = last['high'] >= last['nwe_upper']
-            has_recent_bear_div = results['bearish_divergence'].iloc[-self.params['div_lookback']:].any()
-            log_msg += f"  - SHORT CHECK: Below EMA? {'✅' if is_below_ema else '❌'} | "
-            log_msg += f"Touching Upper NWE? {'✅' if is_touching_upper_nwe else '❌'} | "
-            log_msg += f"Recent Bear Div? {'✅' if has_recent_bear_div else '❌'}"
-            
-            logger.trace(log_msg)
-
-            if not direction and is_below_ema and is_touching_upper_nwe and has_recent_bear_div:
+            elif is_short_candidate:
                 direction = 'sell'
                 detailed_reasoning = [
                     "Trend Filter: Close < 200 EMA",
