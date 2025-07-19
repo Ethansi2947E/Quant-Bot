@@ -344,7 +344,8 @@ class MT5Handler:
         stop_loss: float,
         take_profit: Optional[float] = None, # Can now be None
         comment: str = "",
-        take_profits: Optional[List[float]] = None # New optional list of TPs
+        take_profits: Optional[List[float]] = None, # New optional list of TPs
+        magic_number: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Place a market order (BUY or SELL).
@@ -490,6 +491,9 @@ class MT5Handler:
             elif take_profit is not None:
                 final_tp = take_profit
             
+            # Use the provided magic number, otherwise fallback to config
+            final_magic_number = magic_number if magic_number is not None else TRADING_CONFIG.get('magic_number', 234000)
+
             # Prepare the request
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -500,7 +504,7 @@ class MT5Handler:
                 "sl": stop_loss if stop_loss != 0 else None,
                 "tp": final_tp if final_tp != 0 else None,  # Use the determined final_tp
                 "deviation": 20,
-                "magic": 234000,
+                "magic": final_magic_number,
                 "comment": comment,
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": filling_mode,
@@ -662,7 +666,8 @@ class MT5Handler:
         limit_price: float,
         stop_loss: float,
         take_profit: float,
-        comment: str = ""
+        comment: str = "",
+        magic_number: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """Place a limit order (BUY_LIMIT or SELL_LIMIT)."""
         if not self.connected:
@@ -706,12 +711,11 @@ class MT5Handler:
 
         filling_mode = self.get_symbol_filling_mode(symbol)
 
-        if comment is None or not isinstance(comment, str):
-            comment = f"MT5Bot-{symbol}"
-        comment = comment[:31]
-        comment = re.sub(r'[^a-zA-Z0-9_\\-\\.]', '', comment)
         if not comment:
             comment = f"MT5Bot{symbol.replace(' ', '')}"
+
+        # Use the provided magic number, otherwise fallback to config
+        final_magic_number = magic_number if magic_number is not None else TRADING_CONFIG.get('magic_number', 234000)
 
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
@@ -721,7 +725,7 @@ class MT5Handler:
             "price": limit_price,
             "sl": stop_loss if stop_loss != 0 else 0.0,
             "tp": take_profit if take_profit != 0 else 0.0,
-            "magic": 234000,
+            "magic": final_magic_number,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,
@@ -749,8 +753,11 @@ class MT5Handler:
             logger.error(f"Limit order failed with error code {result.retcode}: {error_description}")
             return None
 
-    def get_open_positions(self) -> List[Dict[str, Any]]:
-        """Get all open positions."""
+    def get_open_positions(self, magic_number: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get all open positions, optionally filtering by magic number.
+        If no magic number is provided, it uses the one from the global config.
+        """
         if not self.connected:
             logger.error("MT5 not connected")
             return []
@@ -759,9 +766,18 @@ class MT5Handler:
         recovery_attempts = 0
         max_recovery_attempts = 3
 
+        # Determine the magic number to filter by
+        filter_magic = magic_number if magic_number is not None else TRADING_CONFIG.get('magic_number')
+
         while recovery_attempts <= max_recovery_attempts:
             try:
-                positions = mt5.positions_get()  # type: ignore
+                if filter_magic:
+                    logger.debug(f"Fetching open positions with magic number: {filter_magic}")
+                    positions = mt5.positions_get(magic=filter_magic)
+                else:
+                    logger.debug("Fetching all open positions (no magic number filter).")
+                    positions = mt5.positions_get()
+
                 if positions is None:
                     error = mt5.last_error()  # type: ignore
                     # Check if it's a connection error
@@ -818,7 +834,7 @@ class MT5Handler:
         # If we get here, all recovery attempts failed
         return []
 
-    def close_position(self, ticket: int) -> bool:
+    def close_position(self, ticket: int, magic_number: Optional[int] = None) -> bool:
         """Close a specific position by ticket number."""
         if not self.connected:
             logger.error("MT5 not connected")
@@ -836,6 +852,9 @@ class MT5Handler:
         # Get the appropriate filling mode for this symbol
         filling_mode = self.get_symbol_filling_mode(pos.symbol)
 
+        # Use provided magic number or fallback to config
+        final_magic_number = magic_number if magic_number is not None else TRADING_CONFIG.get('magic_number', 234000)
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
@@ -844,7 +863,7 @@ class MT5Handler:
             "position": ticket,
             "price": price,
             "deviation": 20,
-            "magic": 234000,
+            "magic": final_magic_number,
             "comment": "Close position",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,  # Use appropriate filling mode for this symbol
@@ -2375,3 +2394,71 @@ class MT5Handler:
         # This signals a valid subscription with no current data, not a failure.
         logger.trace(f"Subscription for {symbol} is active, but the market book is currently empty.")
         return []
+
+    def get_deals_in_range(self, from_date: datetime, to_date: datetime, magic_number: Optional[int] = None) -> Optional[List[Any]]:
+        """
+        Retrieves historical trade deals within a specified date range,
+        optionally filtering by magic number.
+        """
+        try:
+            if not self.connected:
+                self.initialize()
+            
+            # Determine the magic number to filter by
+            filter_magic = magic_number if magic_number is not None else TRADING_CONFIG.get('magic_number')
+
+            deals = None
+            if filter_magic:
+                logger.debug(f"Fetching deals from {from_date} to {to_date} with magic number: {filter_magic}")
+                # MT5 API does not support filtering deals by magic number directly.
+                # We must fetch all and filter manually.
+                all_deals = mt5.history_deals_get(from_date, to_date)
+                if all_deals:
+                    deals = [d for d in all_deals if d.magic == filter_magic]
+            else:
+                logger.debug(f"Fetching all deals from {from_date} to {to_date} (no magic number filter).")
+                deals = mt5.history_deals_get(from_date, to_date)
+
+            return deals if deals is not None else []
+        except Exception as e:
+            logger.error(f"Error retrieving deals from MT5: {e}")
+            return None
+            
+    def get_trade_history(self, days: int = 30) -> Optional[pd.DataFrame]:
+        """
+        Retrieves the trade history for the account for a specified number of days.
+
+        Args:
+            days (int): Number of days to look back. Defaults to 30.
+
+        Returns:
+            Optional[pd.DataFrame]: A DataFrame containing trade history, or None if an error occurs.
+        """
+        if not self.connected:
+            logger.error("MT5 not connected, cannot retrieve trade history")
+            return None
+
+        try:
+            # Calculate the end date as the current date
+            end_date = datetime.now()
+            # Calculate the start date as 30 days ago
+            start_date = end_date - timedelta(days=days)
+
+            # Fetch historical data for each symbol
+            trade_history = []
+            for symbol in self._active_symbols:
+                data = self.get_historical_data(symbol, "D1", start_date, end_date)
+                if data is not None:
+                    trade_history.append(data)
+
+            # Combine all data into a single DataFrame
+            if trade_history:
+                combined_data = pd.concat(trade_history, axis=0, ignore_index=True)
+                combined_data['symbol'] = combined_data['symbol'].apply(lambda x: x.split('/')[0])
+                return combined_data
+            else:
+                logger.warning("No trade history data available")
+                return None
+        except Exception as e:
+            logger.error(f"Error retrieving trade history: {e}")
+            return None

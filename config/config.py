@@ -18,6 +18,8 @@ MT5_CONFIG = {
 
 # ================= Trading Configuration =================
 TRADING_CONFIG = {
+    "account_type": "demo",  # "real" or "demo"
+    "magic_number": 1235, # Unique identifier for this bot's trades
     "symbols": [
         "Volatility 10 Index",
         "Crash 500 Index",
@@ -67,6 +69,8 @@ TRADING_CONFIG = {
         # "SuperT",
         # "GarbageAlgoStrategy",
         # "ExhaustionReversalStrategy",
+        "AlphaFusionScalper",
+        "AlphaFusionScalper2",
         "AlphaQuantScalperV1",
         #"LuxAlgoPremiumStrategy"
     ],

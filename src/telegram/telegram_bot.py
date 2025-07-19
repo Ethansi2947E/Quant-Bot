@@ -957,15 +957,14 @@ Details: {str(context.error)}"""
             
             await self.send_message(alert_msg)
 
-    async def send_management_alert(self, message: str, alert_type: str = "info") -> bool:
-        """Send trade management alert message."""
+    async def send_management_alert(self, message: str, alert_type: str = "info", chat_id: Optional[int] = None) -> bool:
+        """Send trade management alert message to a specific user or all users."""
         try:
             # Check if bot is running
             if not self.is_running or not self.bot:
                 logger.warning("Cannot send management alert - Telegram bot not running")
-                # Don't try to initialize here
                 return False
-                
+
             # Format message based on alert type
             if alert_type.lower() == "warning":
                 emoji = "⚠️"
@@ -979,48 +978,39 @@ Details: {str(context.error)}"""
             else:
                 emoji = "ℹ️"
                 title = "INFO"
-            
+
             # Format with timestamp
             timestamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
-            
+
             formatted_message = f"""{emoji} <b>MANAGEMENT ALERT: {title}</b>
 
 {message}
 
 <i>{timestamp} UTC</i>"""
-            
-            # Send to all users if self.chat_id is not defined
-            if not hasattr(self, 'chat_id') or self.chat_id is None:
-                # Send to all allowed users
-                success = False
-                for user_id in self.allowed_user_ids:
-                    try:
-                        await self.bot.send_message(
-                            chat_id=int(user_id),
-                            text=formatted_message,
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
-                        )
-                        success = True
-                        logger.debug(f"Sent management alert to user {user_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to send management alert to {user_id}: {str(e)}")
-                
-                return success
-            
-            # Send to specific chat_id
-            try:
-                await self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=formatted_message,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                return True
-            except Exception as e:
-                logger.error(f"Failed to send management alert to {self.chat_id}: {str(e)}")
-                return False
-                
+
+            target_chat_ids = []
+            if chat_id is not None:
+                if str(chat_id) in self.allowed_user_ids:
+                    target_chat_ids.append(chat_id)
+            else:
+                target_chat_ids = [int(uid) for uid in self.allowed_user_ids]
+
+            success = False
+            for cid in target_chat_ids:
+                try:
+                    await self.bot.send_message(
+                        chat_id=cid,
+                        text=formatted_message,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    success = True
+                    logger.debug(f"Sent management alert to user {cid}")
+                except Exception as e:
+                    logger.error(f"Failed to send management alert to {cid}: {str(e)}")
+
+            return success
+
         except Exception as e:
             logger.error(f"Error sending management alert: {str(e)}")
             return False
@@ -1084,10 +1074,10 @@ Details: {str(context.error)}"""
 
     async def send_performance_update(
         self,
-        chat_id: int,
         total_trades: int,
         winning_trades: int,
-        total_profit: float
+        total_profit: float,
+        chat_id: Optional[int] = None
     ):
         """Send a performance update."""
         if self.bot is None:
@@ -1103,11 +1093,23 @@ Win Rate: {int(win_rate)}%
 Total Profit: {total_profit:.2f}
 
 Keep up the good work! 📈"""
-        await self.bot.send_message(
-            chat_id=chat_id,
-            text=message,
-            parse_mode='HTML'
-        )
+        
+        target_chat_ids = []
+        if chat_id is not None:
+            if str(chat_id) in self.allowed_user_ids:
+                target_chat_ids.append(chat_id)
+        else:
+            target_chat_ids = [int(uid) for uid in self.allowed_user_ids]
+
+        for cid in target_chat_ids:
+            try:
+                await self.bot.send_message(
+                    chat_id=cid,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send performance update to {cid}: {str(e)}")
 
     async def send_trade_error_alert(
         self,
@@ -1182,16 +1184,16 @@ Retry Attempts: {retry_count}"""
 
     async def send_trade_alert(
         self,
-        chat_id: int,
         symbol: str,
         direction: str,
         entry: float,
         sl: float,
         tp: float,
         confidence: float,
-        reason: str
+        reason: str,
+        chat_id: Optional[int] = None
     ):
-        """Send a trade alert to the specified user."""
+        """Send a trade alert to the specified user or all users if chat_id is None."""
         try:
             if not self.is_running or self.bot is None:
                 logger.warning("Cannot send trade alert: bot is not running or initialized")
@@ -1209,26 +1211,25 @@ Retry Attempts: {retry_count}"""
                 reason=reason
             )
             
-            # Send the alert to the user
-            if str(chat_id) in self.allowed_user_ids:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=alert_message,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
+            # Determine target chat IDs
+            target_chat_ids = []
+            if chat_id is not None:
+                if str(chat_id) in self.allowed_user_ids:
+                    target_chat_ids.append(chat_id)
             else:
-                # If specific chat_id not allowed, send to all allowed users
-                for user_id in self.allowed_user_ids:
-                    try:
-                        await self.bot.send_message(
-                            chat_id=int(user_id),
-                            text=alert_message,
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to send trade alert to user {user_id}: {str(e)}")
+                target_chat_ids = [int(uid) for uid in self.allowed_user_ids]
+
+            # Send the alert to all targeted users
+            for cid in target_chat_ids:
+                try:
+                    await self.bot.send_message(
+                        chat_id=cid,
+                        text=alert_message,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send trade alert to user {cid}: {str(e)}")
                     
         except Exception as e:
             logger.error(f"Error sending trade alert: {str(e)}")
@@ -1298,8 +1299,8 @@ Retry Attempts: {retry_count}"""
 ⏰ <i>{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
 ⚠️ <i>Trade at your own risk - Apply proper risk management</i>"""
 
-    async def notify_error(self, chat_id: int, error: str):
-        """Send an error notification."""
+    async def notify_error(self, error: str, chat_id: Optional[int] = None):
+        """Send an error notification to a specific user or all users."""
         # Get current timestamp
         timestamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
         
@@ -1324,21 +1325,31 @@ Retry Attempts: {retry_count}"""
 <i>Please check the logs for more information. If this issue persists, you may need to restart the bot or check your configuration.</i>"""
 
         try:
-            if self.bot is not None:
+            if self.bot is None:
+                logger.error("Cannot send error notification: bot is not initialized")
+                return
+
+            target_chat_ids = []
+            if chat_id is not None:
+                if str(chat_id) in self.allowed_user_ids:
+                    target_chat_ids.append(chat_id)
+            else:
+                target_chat_ids = [int(uid) for uid in self.allowed_user_ids]
+
+            for cid in target_chat_ids:
                 await self.bot.send_message(
-                    chat_id=chat_id,
+                    chat_id=cid,
                     text=error_message,
                     parse_mode='HTML',
                     disable_notification=False  # Important errors should trigger notifications
                 )
-                logger.info(f"Sent error notification to user {chat_id}")
-            else:
-                logger.error("Cannot send error notification: bot is not initialized")
+                logger.info(f"Sent error notification to user {cid}")
+
         except Exception as e:
             logger.error(f"Failed to send error notification: {str(e)}")
 
-    async def notify_performance(self, chat_id: str, data: Dict):
-        """Send performance update to specified chat."""
+    async def notify_performance(self, data: Dict, chat_id: Optional[str] = None):
+        """Send performance update to specified chat or all users."""
         try:
             # Validate input data
             if 'total_trades' not in data or data['total_trades'] == 0:
@@ -1379,13 +1390,24 @@ Retry Attempts: {retry_count}"""
 <i>Updated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC</i>"""
 
             if self.bot:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                logger.info(f"Sent performance update to {chat_id}")
+                target_chat_ids = []
+                if chat_id:
+                    if chat_id in self.allowed_user_ids:
+                        target_chat_ids.append(chat_id)
+                else:
+                    target_chat_ids = self.allowed_user_ids
+
+                for cid in target_chat_ids:
+                    try:
+                        await self.bot.send_message(
+                            chat_id=cid,
+                            text=message,
+                            parse_mode='HTML',
+                            disable_web_page_preview=True
+                        )
+                        logger.info(f"Sent performance update to {cid}")
+                    except Exception as e:
+                        logger.error(f"Error sending performance update to {cid}: {str(e)}")
         except Exception as e:
             logger.error(f"Error sending performance update: {str(e)}")
             logger.error(traceback.format_exc())
@@ -1520,48 +1542,49 @@ Stay profitable! 📈"""
     async def send_message(self, message: str, chat_id: Optional[int] = None, parse_mode: str = 'HTML',
                           disable_web_page_preview: bool = True):
         """
-        Send a message to a chat.
+        Send a message to a chat. If no chat_id is provided, it sends to all allowed users.
         
         Args:
             message: Text message to send
-            chat_id: Chat ID to send to (defaults to first allowed user if None)
+            chat_id: Chat ID to send to (defaults to all allowed users if None)
             parse_mode: Message parsing mode (HTML, Markdown, etc.)
             disable_web_page_preview: Whether to disable web previews
 
         Returns:
-            The message sending result
+            Boolean indicating if the message was sent to at least one user successfully.
         """
         try:
             # Ensure bot is initialized
-            if not self.is_initialized() or not self.application:
+            if not self.is_initialized() or not self.application or not self.application.bot:
                 logger.error("Bot not initialized for sending message")
                 return False
                 
-            # If chat_id is None, use the default chat ID
-            if chat_id is None and self.allowed_user_ids:
-                chat_id = int(self.allowed_user_ids[0])
-                
-            if not chat_id:
-                logger.error("No chat_id provided and no default available")
+            target_chat_ids = []
+            if chat_id is not None:
+                # If a specific chat_id is provided, send only to that one
+                target_chat_ids.append(chat_id)
+            elif self.allowed_user_ids:
+                # If no chat_id is provided, send to all allowed users
+                target_chat_ids = [int(uid) for uid in self.allowed_user_ids]
+            
+            if not target_chat_ids:
+                logger.error("No chat_id provided and no default users available")
                 return False
                 
-            # Ensure the application has a bot
-            if not hasattr(self.application, 'bot') or not self.application.bot:
-                logger.error("Bot not available on application")
-                return False
-                
-            # Send message
-            try:
-                await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode=parse_mode,
-                    disable_web_page_preview=disable_web_page_preview
-                )
-                return True
-            except Exception as e:
-                logger.error(f"Error sending message: {str(e)}")
-                return False
+            success = False
+            for cid in target_chat_ids:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=cid,
+                        text=message,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview
+                    )
+                    success = True
+                except Exception as e:
+                    logger.error(f"Error sending message to chat_id {cid}: {str(e)}")
+            
+            return success
                 
         except Exception as e:
             logger.error(f"Error in send_message: {str(e)}")

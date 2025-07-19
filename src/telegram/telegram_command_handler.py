@@ -7,6 +7,7 @@ import traceback
 if TYPE_CHECKING:
     from src.trading_bot import TradingBot
     from src.telegram.telegram_bot import TelegramBot
+    from src.mt5_handler import MT5Handler
 
 from loguru import logger
 
@@ -18,14 +19,16 @@ class TelegramCommandHandler:
     logic operations to the appropriate components.
     """
     
-    def __init__(self, trading_bot: "TradingBot"):
+    def __init__(self, trading_bot: "TradingBot", mt5_handler: "MT5Handler"):
         """
         Initialize the TelegramCommandHandler.
         
         Args:
             trading_bot: Reference to the trading bot instance for executing actions
+            mt5_handler: Reference to the MT5 handler for direct data access
         """
         self.trading_bot = trading_bot
+        self.mt5_handler = mt5_handler
         self.command_handlers = {}
         
     def set_trading_bot(self, trading_bot: "TradingBot"):
@@ -583,15 +586,8 @@ class TelegramCommandHandler:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
             
-            # Get trade history using direct MT5 calls for accurate data
-            import MetaTrader5 as mt5
-            
-            # Get deals for the specified period
-            if hasattr(mt5, "history_deals_get"):
-                deals = mt5.history_deals_get(start_date, end_date)
-            else:
-                logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
-                return "⚠️ <b>MT5 Python package is outdated or incompatible. Please upgrade MetaTrader5 to use trade history features.</b>"
+            # Get trade history using the MT5 handler for accurate data
+            deals = self.mt5_handler.get_deals_in_range(start_date, end_date)
             
             if not deals or len(deals) == 0:
                 return f"📊 <b>Performance Summary</b>\n\nNo trades found in the last {days} days."
@@ -808,89 +804,85 @@ class TelegramCommandHandler:
             month_start_str = start_of_month.strftime('%Y-%m-%d')
             
             # Get MT5 handler
-            from src.mt5_handler import MT5Handler
-            mt5_handler = MT5Handler.get_instance()
-            
-            if not mt5_handler or not mt5_handler.connected:
+            if not self.mt5_handler or not self.mt5_handler.connected:
                 return "⚠️ <b>MT5 Not Connected</b>\n\nCannot retrieve trade counts without an active MT5 connection."
             
             # Function to count trades in a date range
             def count_trades(from_date, to_date=None):
-                if not to_date:
-                    to_date = today
+                """Helper function to count trades from history."""
+                if to_date is None:
+                    to_date = from_date + timedelta(days=1)
                 
-                if hasattr(mt5, "history_deals_get"):
-                    deals = mt5.history_deals_get(from_date, to_date)
-                else:
-                    logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
+                try:
+                    # Directly use the provided MT5 handler
+                    if hasattr(self.mt5_handler, "get_deals_in_range"):
+                        deals = self.mt5_handler.get_deals_in_range(from_date, to_date)
+                        if deals is None:
+                            logger.warning(f"No deals returned from MT5 handler for the period {from_date} to {to_date}")
+                            return 0, 0, 0, 0
+                    else:
+                        logger.error("MT5 handler does not have 'get_deals_in_range' method.")
+                        return 0, 0, 0, 0
+                        
+                    total_trades = 0
+                    winning_trades = 0
+                    losing_trades = 0
+                    breakeven_trades = 0
+                    
+                    # Assuming deals is a list of dictionaries with 'profit'
+                    if deals:
+                        for deal in deals:
+                            if deal.entry == 1: # in/out deals
+                                continue
+                            
+                            total_trades += 1
+                            if deal.profit > 0:
+                                winning_trades += 1
+                            elif deal.profit < 0:
+                                losing_trades += 1
+                            else:
+                                breakeven_trades += 1
+                                
+                    return total_trades, winning_trades, losing_trades, breakeven_trades
+                    
+                except Exception as e:
+                    logger.error(f"Error counting trades: {e}")
+                    logger.error(traceback.format_exc())
                     return 0, 0, 0, 0
-                
-                if not deals:
-                    return 0, 0, 0, 0
-                
-                # Count unique positions (trades)
-                position_ids = set()
-                winning = 0
-                losing = 0
-                breakeven = 0
-                
-                for deal in deals:
-                    if deal.entry == 1:  # This is an exit deal
-                        position_ids.add(deal.position_id)
-                        if deal.profit > 0:
-                            winning += 1
-                        elif deal.profit < 0:
-                            losing += 1
-                        else:
-                            breakeven += 1
-                
-                return len(position_ids), winning, losing, breakeven
-            
-            # Get counts for different time periods
+
+            # Count trades for today
             today_total, today_win, today_loss, today_even = count_trades(
                 datetime.strptime(today_str, '%Y-%m-%d')
             )
             
-            week_total, week_win, week_loss, week_even = count_trades(
-                datetime.strptime(week_start_str, '%Y-%m-%d')
+            # Count trades for the last 7 days
+            seven_days_ago = today - timedelta(days=7)
+            seven_day_total, seven_day_win, seven_day_loss, seven_day_even = count_trades(
+                seven_days_ago,
+                today
             )
             
-            month_total, month_win, month_loss, month_even = count_trades(
-                datetime.strptime(month_start_str, '%Y-%m-%d')
-            )
+            response = f"""📊 <b>Trade Counts</b>
             
-            all_total, all_win, all_loss, all_even = count_trades(
-                today - timedelta(days=365)  # Last year as "all time"
-            )
-            
-            # Create the response
-            response = f"""🔢 <b>TRADE COUNT STATISTICS</b>
-
 <b>Today ({today_str}):</b>
-• Total Trades: <b>{today_total}</b>
-• Results: <b>{today_win}</b> wins, <b>{today_loss}</b> losses, <b>{today_even}</b> breakeven
+• Total: {today_total}
+• Won: {today_win}
+• Lost: {today_loss}
+• Breakeven: {today_even}
 
-<b>This Week:</b>
-• Total Trades: <b>{week_total}</b>
-• Results: <b>{week_win}</b> wins, <b>{week_loss}</b> losses, <b>{week_even}</b> breakeven
-
-<b>This Month:</b>
-• Total Trades: <b>{month_total}</b>
-• Results: <b>{month_win}</b> wins, <b>{month_loss}</b> losses, <b>{month_even}</b> breakeven
-
-<b>All Time:</b>
-• Total Trades: <b>{all_total}</b>
-• Results: <b>{all_win}</b> wins, <b>{all_loss}</b> losses, <b>{all_even}</b> breakeven
-
-<i>Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>"""
-            
+<b>Last 7 Days:</b>
+• Total: {seven_day_total}
+• Won: {seven_day_win}
+• Lost: {seven_day_loss}
+• Breakeven: {seven_day_even}
+"""
             return response
             
         except Exception as e:
             logger.error(f"Error retrieving trade counts: {str(e)}")
             logger.error(traceback.format_exc())
-            return f"⚠️ <b>Error retrieving trade counts</b>\n\nPlease try again later. Error: {str(e)[:100]}..."
-
+            return f"❌ Error retrieving trade counts: {str(e)}"
+            
     async def handle_metrics_command(self, args: List[str]) -> str:
         """
         Handler for the /metrics command.
@@ -927,24 +919,12 @@ class TelegramCommandHandler:
             
             logger.info(f"Retrieving metrics for period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
             
-            # Get trade history using direct MT5 calls for accurate data
-                    
-            # Connect to MT5 if not already connected
-            if hasattr(mt5, "terminal_info") and not mt5.terminal_info():
-                logger.info("Initializing MT5 connection")
-                if hasattr(mt5, "initialize"):
-                    mt5.initialize()
-            
-            # Get deals for the specified period
+            # Get deals for the specified period using the handler
             logger.info(f"Requesting MT5 history deals for {days} day(s)")
-            if hasattr(mt5, "history_deals_get"):
-                deals = mt5.history_deals_get(start_date, end_date)
-            else:
-                logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
-                return "⚠️ <b>MT5 Python package is outdated or incompatible. Please upgrade MetaTrader5 to use trade history features.</b>"
+            deals = self.mt5_handler.get_deals_in_range(start_date, end_date)
             
             if deals is None:
-                logger.error("MT5 returned None for history_deals_get")
+                logger.error("MT5 handler returned None for get_deals_in_range")
                 return f"⚠️ <b>Trading Metrics</b>\n\nFailed to retrieve data from MT5. Please check your connection."
             
             if not deals or len(deals) == 0:
@@ -1185,24 +1165,15 @@ class TelegramCommandHandler:
                            "• Add <code>csv</code> to export (e.g., <code>/history days=30 csv</code>)")
             
             # Get trade history from MT5 with the selected date range
-            from src.mt5_handler import MT5Handler
-            mt5_handler = MT5Handler.get_instance()
-            
             trade_history = []
             
-            if mt5_handler and mt5_handler.connected:
+            if self.mt5_handler and self.mt5_handler.connected:
                 logger.info(f"Fetching MT5 order history from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
                 
-                # Use direct MT5 calls to get complete deal information
+                # Use the handler to get complete deal information
                 try:
-                    import MetaTrader5 as mt5
-                    
-                    # Get deals directly - these contain the actual profit information
-                    if hasattr(mt5, "history_deals_get"):
-                        deals = mt5.history_deals_get(start_date, end_date)
-                    else:
-                        logger.error("MetaTrader5 module does not have 'history_deals_get'. Please upgrade the package.")
-                        deals = None
+                    # Get deals using the handler
+                    deals = self.mt5_handler.get_deals_in_range(start_date, end_date)
                     
                     if deals is not None and len(deals) > 0:
                         logger.info(f"Found {len(deals)} deals in MT5 history")
@@ -1295,15 +1266,8 @@ class TelegramCommandHandler:
                     else:
                         logger.warning("No deals found in MT5 history for the specified date range")
                         
-                except ImportError:
-                    logger.error("Could not import MetaTrader5 module directly")
-                    # Fall back to the handler method
-                    order_history = mt5_handler.get_order_history(days=days)
-                    if order_history:
-                        logger.info(f"Found {len(order_history)} orders in MT5 history (fallback method)")
-                        trade_history = order_history
                 except Exception as e:
-                    logger.error(f"Error accessing MT5 directly: {str(e)}")
+                    logger.error(f"Error fetching deals via handler: {str(e)}")
                     logger.error(traceback.format_exc())
                     
                 # Also update the telegram bot's trade history for access elsewhere

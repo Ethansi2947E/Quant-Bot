@@ -172,7 +172,7 @@ class TradingBot:
         self.telegram_bot = TelegramBot.get_instance()
         
         # Initialize telegram command handler
-        self.telegram_command_handler = TelegramCommandHandler(self)
+        self.telegram_command_handler = TelegramCommandHandler(self, self.mt5_handler)
         
         # Initialize position manager
         self.position_manager = PositionManager(

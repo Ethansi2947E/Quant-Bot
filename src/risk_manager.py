@@ -6,6 +6,7 @@ import MetaTrader5 as mt5
 # Use TYPE_CHECKING for import that's only used for type hints
 if TYPE_CHECKING:
     from src.mt5_handler import MT5Handler
+from config.config import TRADING_CONFIG
 from src.utils.market_utils import calculate_pip_value, convert_pips_to_price
 
 # Singleton instance for global reference
@@ -101,7 +102,37 @@ class RiskManager:
         # Initialize starting balance
         self._update_starting_balance()
 
-    
+    def get_bot_daily_pnl(self) -> float:
+        """
+        Calculates the net profit or loss for the current bot's trades for today.
+        Uses the bot's magic number to isolate its trades.
+        """
+        if not self.mt5_handler:
+            logger.error("MT5 handler not available, cannot calculate bot's daily PnL.")
+            return 0.0
+
+        try:
+            today = datetime.now(UTC).date()
+            start_of_day = datetime(today.year, today.month, today.day, tzinfo=UTC)
+            
+            bot_magic_number = TRADING_CONFIG.get('magic_number')
+            if not bot_magic_number:
+                logger.warning("No magic number found in config. Cannot calculate bot-specific PnL.")
+                return 0.0
+
+            deals = self.mt5_handler.get_deals_in_range(start_of_day, datetime.now(UTC), magic_number=bot_magic_number)
+            
+            if deals is None:
+                logger.warning("Could not retrieve deals to calculate daily PnL.")
+                return 0.0
+
+            # Sum the profit of all 'out' deals (closings)
+            total_pnl = sum(deal.profit for deal in deals if deal.entry == 1) # 1 = DEAL_ENTRY_OUT
+            return total_pnl
+        except Exception as e:
+            logger.error(f"Error calculating bot's daily PnL: {e}")
+            return 0.0
+
     def _update_starting_balance(self) -> None:
         """Update the starting balance from MT5 account info."""
         try:
@@ -571,18 +602,33 @@ class RiskManager:
     ) -> float:
         """
         Calculate position size based on account balance, risk percentage, and stop loss distance.
-        
-        Args:
-            account_balance: Current account balance
-            risk_per_trade: Risk percentage (e.g., 1.0 for 1%)
-            entry_price: Entry price of the trade
-            stop_loss_price: Stop loss price
-            symbol: Trading symbol
-            
-        Returns:
-            float: Position size in lots
+        Applies dynamic risk scaling based on the bot's daily performance.
         """
         try:
+            # --- Dynamic Risk Adjustment ---
+            adjusted_risk_per_trade = risk_per_trade
+            if TRADING_CONFIG.get('use_dynamic_risk', False):
+                daily_pnl = self.get_bot_daily_pnl()
+                scaling_factor = TRADING_CONFIG.get('dynamic_risk_scaling_factor', 2.0)
+                max_increase = TRADING_CONFIG.get('dynamic_risk_max_increase', 2.0)
+                min_decrease = TRADING_CONFIG.get('dynamic_risk_min_decrease', 0.5)
+
+                if daily_pnl > 0:
+                    # Increase risk proportionally to profit, capped by max_increase
+                    increase_multiplier = 1 + (daily_pnl / account_balance) * scaling_factor
+                    risk_multiplier = min(increase_multiplier, max_increase)
+                    adjusted_risk_per_trade *= risk_multiplier
+                    logger.info(f"Daily PnL is positive (${daily_pnl:.2f}). Scaling risk up by {risk_multiplier:.2f}x.")
+                elif daily_pnl < 0:
+                    # Decrease risk proportionally to loss, floored by min_decrease
+                    decrease_multiplier = 1 - (abs(daily_pnl) / account_balance) * scaling_factor
+                    risk_multiplier = max(decrease_multiplier, min_decrease)
+                    adjusted_risk_per_trade *= risk_multiplier
+                    logger.info(f"Daily PnL is negative (${daily_pnl:.2f}). Scaling risk down by {risk_multiplier:.2f}x.")
+            
+            logger.info(f"Using adjusted risk per trade: {adjusted_risk_per_trade:.2f}%")
+            # --- End Dynamic Risk Adjustment ---
+
             # First check if we're using fixed lot size from config
             if self.use_fixed_lot_size:
                 # Use fixed lot size from config
@@ -608,11 +654,11 @@ class RiskManager:
                 
             # If not using fixed lot size, calculate based on risk
             # Validate inputs first
-            self._validate_position_inputs(account_balance, risk_per_trade / 100.0, entry_price, stop_loss_price)
+            self._validate_position_inputs(account_balance, adjusted_risk_per_trade / 100.0, entry_price, stop_loss_price)
             # If _validate_position_inputs passes, we can proceed. It raises exceptions on failure.
                 
             # Calculate risk amount
-            risk_amount = account_balance * (risk_per_trade / 100.0) # Convert risk_per_trade percentage to decimal
+            risk_amount = account_balance * (adjusted_risk_per_trade / 100.0)
             
             # Calculate stop distance
             stop_distance = abs(entry_price - stop_loss_price)
