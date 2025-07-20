@@ -133,50 +133,80 @@ The risk management system implements several layers of protection:
 ## Installation
 
 ### Prerequisites
-- Python 3.8 or higher
+- Docker and Docker Compose
 - MetaTrader 5 terminal installed
 - Active MT5 account (demo or live)
 - Telegram Bot created using Bot Father (@BotFather)
 
-### Special Instructions for Windows Users
+### Recommended Setup (Docker)
 
-**1. Installing TA-Lib**
+Using Docker is the easiest and most reliable way to run the bot, as it eliminates the need to worry about Python versions or system dependencies.
 
-The `TA-Lib` library is a powerful tool for technical analysis, but it cannot be installed directly with `pip` on Windows due to compilation requirements. Follow these steps to install it correctly:
+1.  **Install Docker**: Make sure you have Docker and Docker Compose installed on your system.
+2.  **Configure the Bot**: Create a `.env` file with your credentials (see the [Configuration](#configuration) section).
+3.  **Build and Run**:
+    ```bash
+    docker-compose up --build
+    ```
+    To run in the background, use:
+    ```bash
+    docker-compose up --build -d
+    ```
 
-- **Check your Python Version**: Open Command Prompt and run `python --version` to note your Python version (e.g., 3.11).
-- **Download the Wheel File**: Go to the [talib-build releases on GitHub](https://github.com/cgohlke/talib-build/releases). Download the `TA_Lib` wheel (`.whl`) file that matches your Python version and system architecture (e.g., `TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl` for Python 3.11 64-bit).
-- **Install the Wheel File**: Navigate to your downloads folder in the Command Prompt and install the file using pip:
-  ```bash
-  # Example for a specific version
-  pip install TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl
-  ```
+### Alternative: Manual Installation
 
-### Setup
+#### Setup for Windows
 
-1. Clone the repository:
-```bash
-https://github.com/Ethansi2947E/Quant-Bot/
-cd Quant-Bot
-```
+For Windows users, the setup process is fully automated. Simply run the installer script:
 
-2. Create a virtual environment:
-```bash
-python -m venv .venv
-```
+1.  **Run the Installer**: Double-click the `install_windows.bat` file.
+2.  **Follow the Prompts**: The script will guide you through the process of creating a virtual environment and installing all necessary dependencies, including the tricky `TA-Lib` library.
 
-3. Activate the virtual environment:
-```bash
-# Windows
-.venv\Scripts\activate
-# Linux/Mac
-source .venv/bin/activate
-```
+### Setup for Linux and macOS
 
-4. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+For Linux and macOS users, a similar automated script is provided:
+
+1.  **Make the Script Executable**:
+    ```bash
+    chmod +x install_linux.sh
+    ```
+2.  **Run the Installer**:
+    ```bash
+    ./install_linux.sh
+    ```
+3.  **Follow the Prompts**: The script will guide you through installing `TA-Lib` and all other dependencies. You may be prompted for your password to install system-level packages.
+
+### Manual Setup (for Advanced Users)
+
+1.  **Clone the Repository**:
+    ```bash
+    git clone https://github.com/Ethansi2947E/Quant-Bot/
+    cd Quant-Bot
+    ```
+
+2.  **Create a Virtual Environment**:
+    ```bash
+    python -m venv .venv
+    ```
+
+3.  **Activate the Virtual Environment**:
+    ```bash
+    # Windows
+    .venv\Scripts\activate
+    
+    # Linux/macOS
+    source .venv/bin/activate
+    ```
+
+4.  **Install `TA-Lib` Manually**:
+    - **Windows**: Follow the manual installation guide [here](https://github.com/cgohlke/talib-build/releases).
+    - **macOS**: `brew install ta-lib`
+    - **Linux**: Use your distribution's package manager (e.g., `sudo apt-get install libta-lib-dev`).
+
+5.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ## Configuration
 
@@ -269,10 +299,7 @@ To ensure only you can control the bot, you must provide your unique Telegram Us
     ```
 2.  Start the trading bot. You can now communicate with it from your Telegram account.
 
-## Development
-
-### Project Structure
-
+## Project Structure
 ```
 Trading_Bot/
 ├── config/                   # Configuration files
@@ -301,8 +328,15 @@ Trading_Bot/
 ├── main.py                  # Entry point
 ├── requirements.txt         # Package dependencies
 ├── run_bot.bat              # Windows startup script
+├── install_windows.bat      # Windows automated installer
+├── install_linux.sh         # Linux/macOS automated installer
+├── Dockerfile               # Instructions to build the Docker image
+├── docker-compose.yml       # Docker Compose configuration
+├── .dockerignore            # Files to exclude from the Docker image
 └── README.md                # This file
 ```
+
+## Development
 
 ### Extending the Bot
 
@@ -320,3 +354,4 @@ Modify the `RiskManager` class in `src/risk_manager.py` to implement custom risk
 ## License
 
 This project is licensed under the MIT License. 
+

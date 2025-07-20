@@ -2,6 +2,9 @@ from datetime import datetime, timedelta
 import asyncio
 from typing import List, Dict, Any, TYPE_CHECKING, Optional, Callable, Union, Awaitable
 import traceback
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # Use TYPE_CHECKING to avoid runtime imports
 if TYPE_CHECKING:
@@ -10,6 +13,7 @@ if TYPE_CHECKING:
     from src.mt5_handler import MT5Handler
 
 from loguru import logger
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 class TelegramCommandHandler:
     """
@@ -243,6 +247,7 @@ class TelegramCommandHandler:
                     self.trading_bot.handle_shutdown_command
                 )
             
+            await telegram_bot.register_command_handler("report", self.handle_report_command)
             
             logger.info("Successfully registered telegram commands")
             
@@ -814,34 +819,39 @@ class TelegramCommandHandler:
                     to_date = from_date + timedelta(days=1)
                 
                 try:
-                    # Directly use the provided MT5 handler
-                    if hasattr(self.mt5_handler, "get_deals_in_range"):
-                        deals = self.mt5_handler.get_deals_in_range(from_date, to_date)
-                        if deals is None:
-                            logger.warning(f"No deals returned from MT5 handler for the period {from_date} to {to_date}")
-                            return 0, 0, 0, 0
-                    else:
-                        logger.error("MT5 handler does not have 'get_deals_in_range' method.")
+                    deals = self.mt5_handler.get_deals_in_range(from_date, to_date)
+                    if deals is None:
+                        logger.warning(f"No deals returned from MT5 handler for the period {from_date} to {to_date}")
                         return 0, 0, 0, 0
-                        
+
+                    position_deals = {}
+                    for deal in deals:
+                        if deal.position_id not in position_deals:
+                            position_deals[deal.position_id] = []
+                        position_deals[deal.position_id].append(deal)
+
                     total_trades = 0
                     winning_trades = 0
                     losing_trades = 0
                     breakeven_trades = 0
-                    
-                    # Assuming deals is a list of dictionaries with 'profit'
-                    if deals:
-                        for deal in deals:
-                            if deal.entry == 1: # in/out deals
-                                continue
-                            
-                            total_trades += 1
-                            if deal.profit > 0:
-                                winning_trades += 1
-                            elif deal.profit < 0:
-                                losing_trades += 1
-                            else:
-                                breakeven_trades += 1
+
+                    for position_id, position_deals_list in position_deals.items():
+                        entry_deals = [d for d in position_deals_list if d.entry == 0]
+                        exit_deals = [d for d in position_deals_list if d.entry == 1]
+
+                        if not entry_deals or not exit_deals:
+                            continue
+
+                        exit_deal = sorted(exit_deals, key=lambda d: d.time)[-1]
+                        profit = exit_deal.profit
+
+                        total_trades += 1
+                        if profit > 0:
+                            winning_trades += 1
+                        elif profit < 0:
+                            losing_trades += 1
+                        else:
+                            breakeven_trades += 1
                                 
                     return total_trades, winning_trades, losing_trades, breakeven_trades
                     
@@ -1120,7 +1130,9 @@ class TelegramCommandHandler:
                         InlineKeyboardButton("Last 90 days", callback_data="history:days=90")
                     ],
                     [
-                        InlineKeyboardButton("Export to CSV (30 days)", callback_data="history:days=30:csv")
+                        InlineKeyboardButton("Export (1d)", callback_data="history:days=1:csv"),
+                        InlineKeyboardButton("Export (7d)", callback_data="history:days=7:csv"),
+                        InlineKeyboardButton("Export (30d)", callback_data="history:days=30:csv")
                     ],
                     [
                         InlineKeyboardButton("Custom range", callback_data="history:custom")
@@ -1648,6 +1660,65 @@ class TelegramCommandHandler:
             logger.error(f"Error retrieving trade history: {str(e)}")
             logger.error(traceback.format_exc())
             return f"⚠️ <b>Error retrieving trade history</b>\n\nPlease try again later. Error: {str(e)[:100]}..." 
+
+    async def handle_report_command(self, args: List[str]) -> str:
+        """
+        Handler for the /report command. Generates and sends an equity curve graph.
+        
+        Args:
+            args: Command arguments (currently unused)
+            
+        Returns:
+            A message indicating the report is being generated or an error message.
+        """
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=30)
+
+            deals = self.mt5_handler.get_deals_in_range(start_date, end_date)
+            
+            if deals is None or len(deals) == 0:
+                return "No trades found for the last 30 days to generate a report."
+
+            trades_df = pd.DataFrame([deal._asdict() for deal in deals])
+            trades_df = trades_df.sort_values(by='time').reset_index(drop=True)
+            
+            # Calculate equity curve
+            trades_df['pnl'] = trades_df['profit'] + trades_df['commission'] + trades_df['swap']
+            trades_df['equity'] = trades_df['pnl'].cumsum()
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(trades_df['time'], trades_df['equity'], linestyle='-', marker='o')
+            plt.title('Equity Curve (Last 30 Days)')
+            plt.xlabel('Date')
+            plt.ylabel('Equity')
+            plt.grid(True)
+            
+            # Ensure the exports directory exists
+            exports_dir = "exports"
+            os.makedirs(exports_dir, exist_ok=True)
+            report_path = os.path.join(exports_dir, 'equity_curve.png')
+            plt.savefig(report_path)
+            plt.close()
+
+            if hasattr(self.trading_bot, "telegram_bot") and self.trading_bot.telegram_bot.last_update:
+                last_update = self.trading_bot.telegram_bot.last_update
+                if last_update and last_update.effective_chat:
+                    chat_id = last_update.effective_chat.id
+                    if self.trading_bot.telegram_bot.bot:
+                        with open(report_path, 'rb') as photo:
+                            await self.trading_bot.telegram_bot.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=photo,
+                                caption="Here is your 30-day equity curve."
+                            )
+                        return "Report generated and sent."
+
+            return f"Report generated: {report_path}"
+
+        except Exception as e:
+            logger.error(f"Error in /report command: {str(e)}")
+            return "An error occurred while generating the report."
 
     async def register_handlers(self):
         """

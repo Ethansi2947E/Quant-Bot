@@ -95,7 +95,7 @@ class TelegramBot:
         self.message_counter = 0
         self.last_error_time = None
         self.last_error_message = None
-    
+
     @classmethod
     def get_instance(cls):
         """Return the singleton instance, creating it if it doesn't exist."""
@@ -459,7 +459,8 @@ Details: {str(context.error)}"""
             ],
             "performance_analytics": [
                 [KeyboardButton("/metrics"), KeyboardButton("/history"), KeyboardButton("/daily")],
-                [KeyboardButton("/balance"), KeyboardButton("/performance"), KeyboardButton("/statustable")]
+                [KeyboardButton("/balance"), KeyboardButton("/performance"), KeyboardButton("/statustable")],
+                [KeyboardButton("/report")]
             ],
             "signal_management": [
                 [KeyboardButton("/listsignalgenerators"), KeyboardButton("/setsignalgenerator")]
