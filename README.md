@@ -153,6 +153,18 @@ Using Docker is the easiest and most reliable way to run the bot, as it eliminat
     docker-compose up --build -d
     ```
 
+### Updating the Bot
+
+To update your bot to the latest version, simply run the `update.sh` script. This script will automatically download the latest code, rebuild the Docker image, and restart the bot for you.
+
+```bash
+# On Linux/macOS
+./update.sh
+
+# On Windows (using Git Bash)
+./update.sh
+```
+
 ### Alternative: Manual Installation
 
 #### Setup for Windows
@@ -330,6 +342,7 @@ Trading_Bot/
 ├── run_bot.bat              # Windows startup script
 ├── install_windows.bat      # Windows automated installer
 ├── install_linux.sh         # Linux/macOS automated installer
+├── update.sh                # Universal update script
 ├── Dockerfile               # Instructions to build the Docker image
 ├── docker-compose.yml       # Docker Compose configuration
 ├── .dockerignore            # Files to exclude from the Docker image
