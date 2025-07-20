@@ -1,0 +1,69 @@
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Python virtual environment
+.venv/
+venv/
+env/
+**/virtualenv/
+**/.virtualenv/
+
+# Python cache files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/*.log
+logs/*.zip
+logs/*.log.zip
+logs/*.csv
+logs/*.xlsx
+
+# Compiled files
+*.pyc
+*.pyo
+*.pyd
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.bak
+*.tmp
+*~
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Other
+.ipynb_checkpoints/
+
+# Database files
+trading_data.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Exports
+exports/
+
+# Cursor
+.cursor/ 
