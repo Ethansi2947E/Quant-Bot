@@ -66,9 +66,9 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,
     "signal_generators": [
        # "MintAlgoStrategy",
-        # "SuperT",
-        # "GarbageAlgoStrategy",
-        # "ExhaustionReversalStrategy",
+        "SuperT",
+        "GarbageAlgoStrategy",
+        "ExhaustionReversalStrategy",
         "AlphaFusionScalper",
         "AlphaFusionScalper2",
         "AlphaQuantScalperV1",
