@@ -2,41 +2,41 @@
   <img src="Quant.png" alt="Trading Bot Banner">
 </div>
 
-# Trading Bot
+# 🤖 Quant Bot
 
 A sophisticated algorithmic trading system that integrates with MetaTrader 5 for automated Forex and synthetic indices trading.
 
 ## Table of Contents
 - [Overview](#overview)
-- [Key Features](#key-features)
-- [System Architecture](#system-architecture)
-- [Trading Strategies](#trading-strategies)
-- [Risk Management](#risk-management)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Telegram Integration](#telegram-integration)
-- [Development](#development)
-- [License](#license)
+- [✨ Key Features](#-key-features)
+- [🏗️ System Architecture](#-system-architecture)
+- [📈 Trading Strategies](#-trading-strategies)
+- [🛡️ Risk Management](#-risk-management)
+- [🚀 Installation](#-installation)
+- [⚙️ Configuration](#-configuration)
+- [▶️ Usage](#-usage)
+- [💬 Telegram Integration](#-telegram-integration)
+- [💻 Development](#-development)
+- [📜 License](#-license)
 
 ## Overview
 
 This Trading Bot is a comprehensive algorithmic trading system designed to connect to MetaTrader 5, analyze market data using various technical indicators, generate trading signals, and execute trades based on predefined risk management rules. The system supports multiple trading strategies and timeframes while providing real-time feedback through Telegram notifications.
 
-## Key Features
+## ✨ Key Features
 
-- **Multi-Strategy Support**: Implements various trading strategies including trend following, breakout trading, and price action-based approaches
-- **Advanced Risk Management**: Sophisticated position sizing, drawdown controls, and account protection mechanisms
-- **Real-Time Market Analysis**: Processes market data across multiple timeframes for enhanced decision-making
-- **Telegram Integration**: Remote monitoring and control through Telegram messaging
-- **Asynchronous Operation**: Efficiently handles multiple tasks simultaneously using asyncio
-- **Detailed Logging**: Comprehensive logging system for debugging and performance analysis
-- **Position Management**: Automated trailing stops and take-profit mechanisms
-- **Performance Tracking**: Tracks and reports trading performance metrics
-- **Advanced Error Handling**: Automatically handles common broker errors like invalid stops and unsupported order-filling modes.
-- **Multi-Take-Profit Management**: Capable of managing trades with multiple take-profit levels, executing partial closes to secure profits incrementally.
+- **🧠 Multi-Strategy Support**: Implements various trading strategies including trend following, breakout trading, and price action-based approaches.
+- **🛡️ Advanced Risk Management**: Sophisticated position sizing, drawdown controls, and account protection mechanisms.
+- **📈 Real-Time Market Analysis**: Processes market data across multiple timeframes for enhanced decision-making.
+- **💬 Telegram Integration**: Remote monitoring and control through Telegram messaging.
+- **⚡ Asynchronous Operation**: Efficiently handles multiple tasks simultaneously using asyncio.
+- **📝 Detailed Logging**: Comprehensive logging system for debugging and performance analysis.
+- **📊 Position Management**: Automated trailing stops and take-profit mechanisms.
+- **📉 Performance Tracking**: Tracks and reports trading performance metrics.
+- **🔧 Advanced Error Handling**: Automatically handles common broker errors like invalid stops and unsupported order-filling modes.
+- **🎯 Multi-Take-Profit Management**: Capable of managing trades with multiple take-profit levels, executing partial closes to secure profits incrementally.
 
-## System Architecture
+## 🏗️ System Architecture
 
 ### Flow Chart
 
@@ -134,53 +134,23 @@ The risk management system implements several layers of protection:
 - **Recovery Mode**: Implements conservative trading during recovery from drawdowns
 - **Daily/Weekly Limits**: Enforces limits on number of trades and maximum risk per day/week
 
-## Installation
+## 🚀 Installation
 
 ### Prerequisites
-- Docker and Docker Compose
 - MetaTrader 5 terminal installed
-- Active MT5 account (demo or live)
-- Telegram Bot created using Bot Father (@BotFather)
+- An active MT5 account (demo or live)
+- A Telegram Bot token and your User ID (see [Telegram Integration](#telegram-integration))
 
-### Recommended Setup (Docker)
+### Automated Installation
 
-Using Docker is the easiest and most reliable way to run the bot, as it eliminates the need to worry about Python versions or system dependencies.
-
-1.  **Install Docker**: Make sure you have Docker and Docker Compose installed on your system.
-2.  **Configure the Bot**: Create a `.env` file with your credentials (see the [Configuration](#configuration) section).
-3.  **Build and Run**:
-    ```bash
-    docker-compose up --build
-    ```
-    To run in the background, use:
-    ```bash
-    docker-compose up --build -d
-    ```
-
-### Updating the Bot
-
-To update your bot to the latest version, simply run the `update.sh` script. This script will automatically download the latest code, rebuild the Docker image, and restart the bot for you.
-
-```bash
-# On Linux/macOS
-./update.sh
-
-# On Windows (using Git Bash)
-./update.sh
-```
-
-### Alternative: Manual Installation
-
-#### Setup for Windows
-
-For Windows users, the setup process is fully automated. Simply run the installer script:
+#### 🏁 For Windows Users
+The setup process is fully automated. Simply run the installer script:
 
 1.  **Run the Installer**: Double-click the `install_windows.bat` file.
-2.  **Follow the Prompts**: The script will guide you through the process of creating a virtual environment and installing all necessary dependencies, including the tricky `TA-Lib` library.
+2.  **Follow the Prompts**: The script will guide you through creating a virtual environment and installing all necessary dependencies, including the tricky `TA-Lib` library.
 
-### Setup for Linux and macOS
-
-For Linux and macOS users, a similar automated script is provided:
+#### 🐧 For Linux & macOS Users
+A similar automated script is provided:
 
 1.  **Make the Script Executable**:
     ```bash
@@ -190,41 +160,18 @@ For Linux and macOS users, a similar automated script is provided:
     ```bash
     ./install_linux.sh
     ```
-3.  **Follow the Prompts**: The script will guide you through installing `TA-Lib` and all other dependencies. You may be prompted for your password to install system-level packages.
+3.  **Follow the Prompts**: The script will guide you through installing `TA-Lib` and all other dependencies. You may be prompted for your password for system-level packages.
 
-### Manual Setup (for Advanced Users)
+### 🔄 Updating the Bot
 
-1.  **Clone the Repository**:
-    ```bash
-    git clone https://github.com/Ethansi2947E/Quant-Bot/
-    cd Quant-Bot
-    ```
+To update your bot to the latest version, simply run the `update.sh` script. This script will automatically download the latest code, rebuild the Docker image, and restart the bot for you.
 
-2.  **Create a Virtual Environment**:
-    ```bash
-    python -m venv .venv
-    ```
+```bash
+# On Linux/macOS or Windows (using Git Bash)
+./update.sh
+```
 
-3.  **Activate the Virtual Environment**:
-    ```bash
-    # Windows
-    .venv\Scripts\activate
-    
-    # Linux/macOS
-    source .venv/bin/activate
-    ```
-
-4.  **Install `TA-Lib` Manually**:
-    - **Windows**: Follow the manual installation guide [here](https://github.com/cgohlke/talib-build/releases).
-    - **macOS**: `brew install ta-lib`
-    - **Linux**: Use your distribution's package manager (e.g., `sudo apt-get install libta-lib-dev`).
-
-5.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-## Configuration
+## ⚙️ Configuration
 
 1. Create a `.env` file in the root directory with your MT5 and Telegram credentials:
 ```
@@ -241,7 +188,7 @@ TELEGRAM_ALLOWED_USERS=YourTelegramUserID
    - Strategy-specific settings
    - Telegram settings
 
-## Usage
+## ▶️ Usage
 
 ### Starting the Bot
 
@@ -259,7 +206,7 @@ run_bot.bat
 
 Once the bot is running, you can control it via Telegram with the following commands:
 
-**General & Status**
+**📊 General & Status**
 - `/status` - Get a detailed overview of the bot's current status, including trading state, open positions, and account balance.
 - `/statustable` - View a concise, table-formatted summary of open positions.
 - `/performance` - Receive a comprehensive performance report with key trading metrics.
@@ -269,24 +216,24 @@ Once the bot is running, you can control it via Telegram with the following comm
 - `/daily` - Get a summary of the current day's trading activity and P/L.
 - `/count` - Show the number of trades taken today, this week, and this month.
 
-**Trading Control**
+**🕹️ Trading Control**
 - `/enable` - Enable the trading functionality. The bot will start processing signals and opening trades.
 - `/disable` - Disable trading. The bot will stop opening new trades but continue to manage existing ones.
 - `/listsignalgenerators` - List all available signal generation strategies.
 - `/setsignalgenerator {generator_name}` - Switch the active signal generation strategy.
 
-**Risk & Position Management**
+**🛡️ Risk & Position Management**
 - `/enabletrailingstop` - Enable the automated trailing stop loss for managed positions.
 - `/disabletrailingstop` - Disable the trailing stop loss.
 - `/enablepositionadditions` - Allow the bot to add to existing positions (pyramiding).
 - `/disablepositionadditions` - Prevent the bot from adding to existing positions.
 
-**Admin & Shutdown**
+**⚙️ Admin & Shutdown**
 - `/enablecloseonshutdown` - Configure the bot to automatically close all open positions upon shutdown.
 - `/disablecloseonshutdown` - Prevent the bot from closing positions upon shutdown.
 - `/shutdown` - Safely shut down the bot.
 
-## Telegram Integration
+## 💬 Telegram Integration
 
 The bot uses Telegram for remote monitoring and control. To set it up, you need a bot token and your personal user ID.
 
@@ -315,7 +262,7 @@ To ensure only you can control the bot, you must provide your unique Telegram Us
     ```
 2.  Start the trading bot. You can now communicate with it from your Telegram account.
 
-## Project Structure
+## 📂 Project Structure
 ```
 Trading_Bot/
 ├── config/                   # Configuration files
@@ -353,7 +300,7 @@ Trading_Bot/
 └── README.md                # This file
 ```
 
-## Development
+## 💻 Development
 
 ### Extending the Bot
 
@@ -368,7 +315,7 @@ Trading_Bot/
 
 Modify the `RiskManager` class in `src/risk_manager.py` to implement custom risk management rules.
 
-## License
+## 📜 License
 
 This project is licensed under the MIT License. 
 
