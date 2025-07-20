@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="Quant.png" alt="Trading Bot Banner">
+</div>
+
 # Trading Bot
 
 A sophisticated algorithmic trading system that integrates with MetaTrader 5 for automated Forex and synthetic indices trading.
