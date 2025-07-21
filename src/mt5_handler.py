@@ -1309,7 +1309,8 @@ class MT5Handler:
                         "sl": 0,  # Not available in deals
                         "tp": 0,  # Not available in deals
                         "state": 0,  # Not applicable for deals
-                        "profit": deal.profit
+                        "profit": deal.profit,
+                        "comment": deal.comment  # <-- ADD THIS LINE
                     })
 
                 logger.info(f"Converted {len(result)} deals to trade history format")
@@ -1339,7 +1340,8 @@ class MT5Handler:
                         "sl": order.sl,
                         "tp": order.tp,
                         "state": order.state,
-                        "profit": profit  # Use accumulated profit from deals
+                        "profit": profit,  # Use accumulated profit from deals
+                        "comment": order.comment # <-- ADD THIS LINE
                     })
 
             logger.info(f"Converted {len(result)} orders to trade history format")

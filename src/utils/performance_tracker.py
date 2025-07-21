@@ -25,42 +25,32 @@ class PerformanceTracker:
         self.mt5_handler = mt5_handler if mt5_handler is not None else MT5Handler()
         self.config = config or {}
         
-        # Performance metrics tracking
+        # Performance metrics tracking - RESTRUCTURED
+        # Now holds metrics per strategy, plus a "Global" aggregate.
         self.metrics = {
-            "total_trades": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-            "total_profit": 0.0,
-            "total_loss": 0.0,
-            "total_profit_winning": 0.0,
-            "total_profit_losing": 0.0,
-            "current_drawdown": 0.0,
-            "max_drawdown": 0.0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "avg_profit": 0.0,
-            "avg_loss": 0.0,
-            "expectancy": 0.0,
-            "last_updated": datetime.now(),
-            "tp_hits": 0,
-            "sl_hits": 0,
-            "manual_closures": 0,
-            "tp_hit_rate": 0.0,
-            # Add signal quality metrics
-            "avg_signal_quality": 0.0,
-            "high_quality_trades": 0,  # Trades with quality > 80%
-            "medium_quality_trades": 0,  # Trades with quality 50-80%
-            "low_quality_trades": 0,  # Trades with quality < 50%
-            "high_quality_win_rate": 0.0,
-            "medium_quality_win_rate": 0.0,
-            "low_quality_win_rate": 0.0
+            "Global": self._get_new_metrics_dict()
         }
         
-        # Historical performance data
+        # Historical performance data (can also be made per-strategy if needed later)
         self.daily_performance = {}
         self.weekly_performance = {}
         self.monthly_performance = {}
         
+    def _get_new_metrics_dict(self) -> Dict[str, Any]:
+        """Returns a fresh dictionary for tracking metrics."""
+        return {
+            "total_trades": 0, "winning_trades": 0, "losing_trades": 0,
+            "total_profit": 0.0, "total_loss": 0.0, "total_profit_winning": 0.0,
+            "total_profit_losing": 0.0, "current_drawdown": 0.0, "max_drawdown": 0.0,
+            "win_rate": 0.0, "profit_factor": 0.0, "avg_profit": 0.0,
+            "avg_loss": 0.0, "expectancy": 0.0, "last_updated": datetime.now(),
+            "tp_hits": 0, "sl_hits": 0, "manual_closures": 0, "tp_hit_rate": 0.0,
+            "avg_signal_quality": 0.0, "high_quality_trades": 0,
+            "medium_quality_trades": 0, "low_quality_trades": 0,
+            "high_quality_win_rate": 0.0, "medium_quality_win_rate": 0.0,
+            "low_quality_win_rate": 0.0
+        }
+
     def set_mt5_handler(self, mt5_handler):
         """Set the MT5Handler instance after initialization."""
         self.mt5_handler = mt5_handler
@@ -79,118 +69,92 @@ class PerformanceTracker:
                 
             # Get trading history from MT5
             logger.info("Fetching trading history for performance metrics...")
-            history = self.mt5_handler.get_order_history(days=3)
+            history = self.mt5_handler.get_order_history(days=30) # Increased lookback
             
             if not history:
-                logger.info("No trading history found for performance metrics")
+                logger.info("No trading history found for performance metrics.")
+                # Return current metrics without updating if no history
+                return self.metrics
                 
-                # Try with a longer period (7 days)
-                logger.info("Trying with a 7-day lookback period...")
-                extended_history = self.mt5_handler.get_order_history(days=7)
-                
-                if extended_history:
-                    logger.info(f"Found {len(extended_history)} trade records with 7-day lookback")
-                    history = extended_history
-                else:
-                    # Get current open positions for reference
-                    open_positions = self.mt5_handler.get_open_positions()
-                    logger.info(f"Currently have {len(open_positions)} open positions")
-                    
-                    # No history available, return current metrics
-                    self.metrics["last_updated"] = datetime.now()
-                    return self.metrics
-                
-            # Reset counters
-            winning_trades = 0
-            losing_trades = 0
-            total_profit = 0.0
-            total_loss = 0.0
-            total_profit_winning = 0.0  # Track winning trades profit
-            total_profit_losing = 0.0   # Track losing trades profit (negative value)
-            profits = []
-            losses = []
-            tp_hits = 0
-            sl_hits = 0
-            manual_closures = 0
+            # --- PER-STRATEGY TRACKING ---
+            # Reset all strategy metrics before recalculating
+            self.metrics = {"Global": self._get_new_metrics_dict()}
             
             logger.info(f"Processing {len(history)} trade history records...")
             
+            # Temporary dicts to hold raw numbers for each strategy
+            strategy_data = {}
+
             # Process history entries
             for trade in history:
                 profit = trade.get("profit", 0.0)
-                signal_quality = trade.get("signal_quality", 0.0)
+                strategy_name = trade.get("comment", "Unspecified")
+
+                # Initialize a data dict for the strategy if it's new
+                if strategy_name not in strategy_data:
+                    strategy_data[strategy_name] = {
+                        "profits": [], "losses": [], "winning_trades": 0, "losing_trades": 0
+                    }
                 
                 if profit > 0:
-                    winning_trades += 1
-                    total_profit += profit
-                    total_profit_winning += profit  # Add to winning profit total
-                    profits.append(profit)
+                    strategy_data[strategy_name]['winning_trades'] += 1
+                    strategy_data[strategy_name]['profits'].append(profit)
                 elif profit < 0:
-                    losing_trades += 1
-                    total_loss += abs(profit)  # Store as positive value
-                    total_profit_losing += profit  # Keep as negative value
-                    losses.append(abs(profit))
+                    strategy_data[strategy_name]['losing_trades'] += 1
+                    strategy_data[strategy_name]['losses'].append(abs(profit))
+
+            # --- AGGREGATE AND CALCULATE METRICS FOR EACH STRATEGY ---
+            for strategy_name, data in strategy_data.items():
+                if strategy_name not in self.metrics:
+                    self.metrics[strategy_name] = self._get_new_metrics_dict()
+
+                stats = self.metrics[strategy_name]
+                global_stats = self.metrics["Global"]
+
+                winning_trades = data['winning_trades']
+                losing_trades = data['losing_trades']
+                total_trades = winning_trades + losing_trades
                 
-                # Add closure reason analysis
-                reason = trade.get("reason", "unknown")
-                if reason == "tp":  # Actual code may differ
-                    tp_hits += 1
-                elif reason == "sl":
-                    sl_hits += 1
-                elif reason == "manual":
-                    manual_closures += 1
-                
-                # Track signal quality metrics
-                if signal_quality > 0:
-                    self.metrics["avg_signal_quality"] += signal_quality
-                    if signal_quality >= 0.8:  # 80%+
-                        self.metrics["high_quality_trades"] += 1
-                        if profit > 0:
-                            self.metrics["high_quality_win_rate"] += 1
-                    elif signal_quality >= 0.5:  # 50-80%
-                        self.metrics["medium_quality_trades"] += 1
-                        if profit > 0:
-                            self.metrics["medium_quality_win_rate"] += 1
-                    else:  # < 50%
-                        self.metrics["low_quality_trades"] += 1
-                        if profit > 0:
-                            self.metrics["low_quality_win_rate"] += 1
-            
-            # Calculate performance metrics
-            total_trades = winning_trades + losing_trades
-            
-            # Update metrics dictionary
-            self.metrics["total_trades"] = total_trades
-            self.metrics["winning_trades"] = winning_trades
-            self.metrics["losing_trades"] = losing_trades
-            self.metrics["total_profit"] = total_profit
-            self.metrics["total_loss"] = total_loss
-            self.metrics["total_profit_winning"] = total_profit_winning
-            self.metrics["total_profit_losing"] = total_profit_losing
-            
-            # Calculate derived metrics
-            if total_trades > 0:
-                self.metrics["win_rate"] = winning_trades / total_trades
-            
-            if total_loss > 0:
-                self.metrics["profit_factor"] = total_profit / total_loss
-            
-            if profits:
-                self.metrics["avg_profit"] = sum(profits) / len(profits)
-            
-            if losses:
-                self.metrics["avg_loss"] = sum(losses) / len(losses)
-            
-            # Calculate expectancy
-            if self.metrics["avg_loss"] > 0:
-                self.metrics["expectancy"] = (
-                    self.metrics["win_rate"] * (self.metrics["avg_profit"] / self.metrics["avg_loss"])
-                    - (1 - self.metrics["win_rate"])
-                )
-            
-            # Calculate drawdown (simplified version)
+                total_profit = sum(data['profits'])
+                total_loss = sum(data['losses'])
+
+                # Update strategy-specific stats
+                stats['total_trades'] = total_trades
+                stats['winning_trades'] = winning_trades
+                stats['losing_trades'] = losing_trades
+                stats['total_profit'] = total_profit
+                stats['total_loss'] = total_loss
+                stats['total_profit_winning'] = total_profit
+                stats['total_profit_losing'] = -total_loss
+                stats['win_rate'] = winning_trades / total_trades if total_trades > 0 else 0
+                stats['profit_factor'] = total_profit / total_loss if total_loss > 0 else 0
+                stats['avg_profit'] = total_profit / winning_trades if winning_trades > 0 else 0
+                stats['avg_loss'] = total_loss / losing_trades if losing_trades > 0 else 0
+                stats['last_updated'] = datetime.now()
+
+                # Update Global stats
+                global_stats['total_trades'] += total_trades
+                global_stats['winning_trades'] += winning_trades
+                global_stats['losing_trades'] += losing_trades
+                global_stats['total_profit'] += total_profit
+                global_stats['total_loss'] += total_loss
+                global_stats['total_profit_winning'] += total_profit
+                global_stats['total_profit_losing'] -= total_loss
+
+            # --- FINAL GLOBAL CALCULATIONS ---
+            if self.metrics['Global']['total_trades'] > 0:
+                self.metrics['Global']['win_rate'] = self.metrics['Global']['winning_trades'] / self.metrics['Global']['total_trades']
+            if self.metrics['Global']['total_loss'] > 0:
+                self.metrics['Global']['profit_factor'] = self.metrics['Global']['total_profit'] / self.metrics['Global']['total_loss']
+            if self.metrics['Global']['winning_trades'] > 0:
+                self.metrics['Global']['avg_profit'] = self.metrics['Global']['total_profit'] / self.metrics['Global']['winning_trades']
+            if self.metrics['Global']['losing_trades'] > 0:
+                self.metrics['Global']['avg_loss'] = self.metrics['Global']['total_loss'] / self.metrics['Global']['losing_trades']
+            self.metrics['Global']['last_updated'] = datetime.now()
+
+            # --- DRAWDOWN CALCULATION (Remains Global) ---
             logger.info("Fetching account history for drawdown calculation...")
-            balances = self.mt5_handler.get_account_history(days=3)
+            balances = self.mt5_handler.get_account_history(days=30) # Increased lookback
             if balances:
                 max_equity = 0
                 max_drawdown = 0
@@ -208,30 +172,14 @@ class PerformanceTracker:
                     if current_drawdown > max_drawdown:
                         max_drawdown = current_drawdown
                 
-                self.metrics["current_drawdown"] = current_drawdown
-                self.metrics["max_drawdown"] = max_drawdown
+                self.metrics["Global"]["current_drawdown"] = current_drawdown
+                self.metrics["Global"]["max_drawdown"] = max_drawdown
             
-            # Update timestamp
-            self.metrics["last_updated"] = datetime.now()
-            
-            # Update period performance
-            self._update_period_performance(history)
-            
-            # Update additional metrics
-            self.metrics["tp_hits"] = tp_hits
-            self.metrics["sl_hits"] = sl_hits
-            self.metrics["manual_closures"] = manual_closures
-            
-            # Calculate TP hit rate if we have any TP or SL hits
-            if tp_hits + sl_hits > 0:
-                self.metrics["tp_hit_rate"] = tp_hits / (tp_hits + sl_hits)
-            
-            # Update signal quality metrics
-            if self.metrics["avg_signal_quality"] > 0:
-                self.metrics["avg_signal_quality"] /= (self.metrics["high_quality_trades"] + self.metrics["medium_quality_trades"] + self.metrics["low_quality_trades"])
-            
-            logger.info(f"Performance metrics updated: Win rate {self.metrics['win_rate']:.2f}, "
-                        f"Profit factor {self.metrics['profit_factor']:.2f}")
+            # Log a summary
+            for name, stats in self.metrics.items():
+                logger.info(f"📊 Performance Metrics [{name}]: "
+                            f"Trades={stats['total_trades']}, Win Rate={stats['win_rate']:.2%}, "
+                            f"P/F={stats['profit_factor']:.2f}")
             
             return self.metrics
             
@@ -323,15 +271,15 @@ class PerformanceTracker:
             
             # Update metrics with quality statistics
             if trades_with_quality > 0:
-                self.metrics["avg_signal_quality"] = total_quality / trades_with_quality
+                self.metrics["Global"]["avg_signal_quality"] = total_quality / trades_with_quality
                 
-                self.metrics["high_quality_trades"] = quality_metrics["high"]["total"]
-                self.metrics["medium_quality_trades"] = quality_metrics["medium"]["total"]
-                self.metrics["low_quality_trades"] = quality_metrics["low"]["total"]
+                self.metrics["Global"]["high_quality_trades"] = quality_metrics["high"]["total"]
+                self.metrics["Global"]["medium_quality_trades"] = quality_metrics["medium"]["total"]
+                self.metrics["Global"]["low_quality_trades"] = quality_metrics["low"]["total"]
                 
-                self.metrics["high_quality_win_rate"] = quality_metrics["high"]["wins"] / quality_metrics["high"]["total"] if quality_metrics["high"]["total"] > 0 else 0.0
-                self.metrics["medium_quality_win_rate"] = quality_metrics["medium"]["wins"] / quality_metrics["medium"]["total"] if quality_metrics["medium"]["total"] > 0 else 0.0
-                self.metrics["low_quality_win_rate"] = quality_metrics["low"]["wins"] / quality_metrics["low"]["total"] if quality_metrics["low"]["total"] > 0 else 0.0
+                self.metrics["Global"]["high_quality_win_rate"] = quality_metrics["high"]["wins"] / quality_metrics["high"]["total"] if quality_metrics["high"]["total"] > 0 else 0.0
+                self.metrics["Global"]["medium_quality_win_rate"] = quality_metrics["medium"]["wins"] / quality_metrics["medium"]["total"] if quality_metrics["medium"]["total"] > 0 else 0.0
+                self.metrics["Global"]["low_quality_win_rate"] = quality_metrics["low"]["wins"] / quality_metrics["low"]["total"] if quality_metrics["low"]["total"] > 0 else 0.0
             
             # Store the updated data
             self.daily_performance = daily_data
@@ -358,18 +306,18 @@ class PerformanceTracker:
             "weekly_performance": dict(sorted(self.weekly_performance.items(), reverse=True)[:4]),  # Last 4 weeks
             "monthly_performance": dict(sorted(self.monthly_performance.items(), reverse=True)[:3]),  # Last 3 months
             "signal_quality_metrics": {
-                "average_quality": self.metrics["avg_signal_quality"] * 100,  # Convert to percentage
+                "average_quality": self.metrics["Global"]["avg_signal_quality"] * 100,  # Convert to percentage
                 "high_quality": {
-                    "trades": self.metrics["high_quality_trades"],
-                    "win_rate": self.metrics["high_quality_win_rate"] * 100
+                    "trades": self.metrics["Global"]["high_quality_trades"],
+                    "win_rate": self.metrics["Global"]["high_quality_win_rate"] * 100
                 },
                 "medium_quality": {
-                    "trades": self.metrics["medium_quality_trades"],
-                    "win_rate": self.metrics["medium_quality_win_rate"] * 100
+                    "trades": self.metrics["Global"]["medium_quality_trades"],
+                    "win_rate": self.metrics["Global"]["medium_quality_win_rate"] * 100
                 },
                 "low_quality": {
-                    "trades": self.metrics["low_quality_trades"],
-                    "win_rate": self.metrics["low_quality_win_rate"] * 100
+                    "trades": self.metrics["Global"]["low_quality_trades"],
+                    "win_rate": self.metrics["Global"]["low_quality_win_rate"] * 100
                 }
             },
             "generated_at": datetime.now()

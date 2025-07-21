@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Quant.png" alt="Trading Bot Banner">
+  <img src="assets/Quant.png" alt="Trading Bot Banner">
 </div>
 
 # 🤖 Quant Bot
