@@ -1,57 +1,63 @@
 #!/bin/bash
+#
+# Robust Update Script for Trading Bot
+#
+# This script safely updates the local repository with the latest changes
+# from the 'SuperTrend' branch on GitHub. It also intelligently handles
+# dependency updates for both the Python backend and the Next.js frontend.
+#
 
-# ============================================================================
-# Trading Bot Updater
-# ============================================================================
-# This script automates the process of updating the trading bot to the latest
-# version from the Git repository and rebuilding the Docker image.
-# ============================================================================
+set -e # Exit immediately if a command exits with a non-zero status.
 
-echo "========================================="
-echo "  Starting Trading Bot Update Process  "
-echo "========================================="
-echo
+echo "🚀 Starting the update process..."
 
-# --- Step 1: Stop the current bot ---
-echo "[1/4] Stopping the currently running bot..."
-docker-compose down
-echo "Bot stopped."
-echo
-
-# --- Step 2: Pull latest changes ---
-echo "[2/4] Pulling the latest updates from the Git repository..."
-git pull
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to pull updates from Git."
-    echo "Please resolve any merge conflicts or stash your local changes and try again."
-    exit 1
+# --- Check for clean working directory ---
+if ! git diff-index --quiet HEAD --; then
+    echo "⚠️  Local changes detected. Stashing them..."
+    git stash push -m "Auto-stashed by update script"
+    STASHED=true
+else
+    STASHED=false
 fi
-echo "Successfully pulled the latest code."
-echo
 
-# --- Step 3: Rebuild the Docker image ---
-echo "[3/4] Rebuilding the Docker image with the latest updates..."
-docker-compose build
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to rebuild the Docker image."
-    exit 1
+# --- Remember current branch ---
+ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+echo "🔄 Current branch is '$ORIGINAL_BRANCH'. Switching to 'SuperTrend' for update."
+
+# --- Fetch and Pull ---
+git checkout SuperTrend
+echo "🚚 Pulling latest changes from origin/SuperTrend..."
+git pull origin SuperTrend
+
+# --- Check for Python dependency changes ---
+if git diff HEAD@{1}..HEAD --quiet -- requirements.txt; then
+    echo "🐍 No changes in Python dependencies."
+else
+    echo "🐍 Python dependencies have changed. Installing..."
+    # Activate virtual environment if it exists
+    if [ -d ".venv" ]; then
+        source .venv/bin/activate
+    fi
+    pip install -r requirements.txt
 fi
-echo "Docker image rebuilt successfully."
-echo
 
-# --- Step 4: Restart the bot ---
-echo "[4/4] Restarting the bot in detached mode..."
-docker-compose up -d
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to restart the bot."
-    exit 1
+# --- Check for Node.js dependency changes ---
+if git diff HEAD@{1}..HEAD --quiet -- Quant-Dash/package.json; then
+    echo "📦 No changes in Node.js dependencies."
+else
+    echo "📦 Node.js dependencies have changed. Installing..."
+    cd Quant-Dash
+    pnpm install
+    cd ..
 fi
-echo
 
-# --- Final Message ---
-echo "========================================="
-echo "  Update Complete!                       "
-echo "========================================="
-echo
-echo "The trading bot has been updated and is now running with the latest version."
-echo 
+# --- Return to original branch and restore changes ---
+echo "🔄 Returning to original branch '$ORIGINAL_BRANCH'..."
+git checkout "$ORIGINAL_BRANCH"
+
+if [ "$STASHED" = true ]; then
+    echo " restorating local changes..."
+    git stash pop
+fi
+
+echo "✅ Update complete! Your trading bot is now up-to-date." 
