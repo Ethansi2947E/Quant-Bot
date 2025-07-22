@@ -153,10 +153,12 @@ class TradingBot:
         
         # Initialize data manager
         self.data_manager = DataManager(
-            mt5_handler=self.mt5_handler,
-            config=self.config
+            mt5_handler=self.mt5_handler
         )
         
+        # --- NEW: Perform historical data sync on startup ---
+        self.data_manager.synchronize_historical_trades()
+
         # Apply enhanced data management settings if available
         data_management_config = self.trading_config.get("data_management", {})
         if data_management_config:
@@ -257,6 +259,23 @@ class TradingBot:
         # Log config order at the very start
         logger.info(f"[TRACE INIT] Initial trading_config signal_generators order: {self.trading_config.get('signal_generators', 'NOT FOUND')}")
 
+    def get_default_lookback_for_timeframe(self, timeframe: str) -> int:
+        """
+        Provides an intelligent default lookback period based on the timeframe.
+        These values are chosen to accommodate common long-period indicators.
+        """
+        timeframe_defaults = {
+            'M1': 300,   # Adjusted for efficiency
+            'M5': 250,   # A common default
+            'M15': 200,
+            'M30': 150,
+            'H1': 100,
+            'H4': 100,
+            'D1': 100
+        }
+        # Default to 250 if timeframe is not in the map
+        return timeframe_defaults.get(timeframe.upper(), 250)
+        
     async def tick_event_loop(self):
         """
         High-frequency loop that checks for new candle events.
@@ -347,14 +366,17 @@ class TradingBot:
             logger.trace(f"[{symbol}] Starting data refetch for {len(required_timeframes)} timeframes: {list(required_timeframes)}")
             # 2. Update data for each required timeframe with the correct lookback
             for timeframe in required_timeframes:
-                lookback = self.data_manager.requirements.get((symbol, timeframe))
+                # Provide a default lookback of 100 if not found in requirements
+                lookback = self.data_manager.requirements.get((symbol, timeframe), 100)
                 logger.trace(f"[{symbol}/{timeframe}] Updating data with lookback: {lookback}")
                 self.data_manager.update_data(symbol, timeframe, force=True, num_candles=lookback)
 
-            # 3. Get all updated market data from the cache
-            market_data_for_symbol = self.data_manager.get_market_data_for_symbol(
-                symbol, timeframes=list(required_timeframes)
-            )
+            # 3. Get all updated market data directly from the cache for this symbol
+            market_data_for_symbol = {}
+            for timeframe in required_timeframes:
+                cached_data = self.data_manager.get_market_data(symbol, timeframe)
+                if cached_data is not None and not cached_data.empty:
+                    market_data_for_symbol[timeframe] = cached_data
             
             if not market_data_for_symbol:
                 logger.warning(f"No market data available for {symbol} after update.")
@@ -366,9 +388,9 @@ class TradingBot:
             for sg in self.signal_generators:
                 logger.debug(f"Executing signal generator '{sg.name}' for {symbol}...")
                 try:
-                    # Pass only the data for the current symbol to the generator
+                    # Pass the data wrapped in a symbol-keyed dictionary
                     signals = await sg.generate_signals(
-                        market_data=market_data_for_symbol,
+                        market_data={symbol: market_data_for_symbol},
                         balance=self.risk_manager.get_account_balance()
                     )
                     if signals:
@@ -429,10 +451,11 @@ class TradingBot:
                     # Register data requirements with DataManager
                     required_timeframes = getattr(generator, 'required_timeframes', [])
                     lookback_periods = getattr(generator, 'lookback_periods', {})
-                    default_lookback = getattr(generator, 'lookback_period', 100)
+                    
                     for symbol in self.symbols:
                         for tf in required_timeframes:
-                            lookback = lookback_periods.get(tf, default_lookback)
+                            # Use strategy's specific lookback, its general lookback, or a smart default
+                            lookback = lookback_periods.get(tf, getattr(generator, 'lookback', self.get_default_lookback_for_timeframe(tf)))
                             self.data_manager.register_timeframe(symbol, tf, lookback)
                 else:
                     logger.warning(f"Unknown signal generator specified in config: '{generator_name}'")
@@ -810,6 +833,25 @@ class TradingBot:
                 return
 
             logger.info(f"💼 Processing {len(signals)} trading signals with trading enabled: ✅")
+            
+            # --- NEW: Log signals to the database ---
+            if signals:
+                for signal in signals:
+                    try:
+                        # Construct a dictionary that matches the Signal model
+                        signal_to_log = {
+                            "symbol": signal.get('symbol'),
+                            "timeframe": signal.get('timeframe'),
+                            "strategy": signal.get('strategy_name', 'Unknown'),
+                            "direction": signal.get('direction'),
+                            "price": signal.get('price'),
+                            "details": signal.get('details') 
+                        }
+                        self.data_manager.log_signal(signal_to_log)
+                    except Exception as e:
+                        logger.error(f"Failed to log signal: {signal}. Error: {e}")
+            # --- END NEW ---
+
             logger.info(f"🔍 Signal generators in use: {[gen.__class__.__name__ for gen in self.signal_generators]}")
             
             # Log signal details

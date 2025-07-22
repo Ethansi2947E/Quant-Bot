@@ -111,46 +111,35 @@ class MT5Handler:
             logger.error(f"Error initializing MT5: {str(e)}")
             return False
 
-    def get_account_info(self) -> Dict[str, Any]:
+    def get_account_info(self) -> Optional[Dict[str, Any]]:
         """Get account information."""
-        if not self.connected:
-            logger.error("MT5 not connected")
-            return {}
-
+        if not self.is_connected():
+            logger.error("MT5 not connected, cannot get account info.")
+            return None
         try:
-            # First check if MT5 is still connected
-            if not self.is_connected():
-                logger.error("MT5 connection lost when trying to get account info")
-                return {}
-
-            account_info = mt5.account_info()  # type: ignore
+            account_info = mt5.account_info()
             if account_info is None:
-                error = "Unknown error"
-                if hasattr(mt5, 'last_error'):
-                    error = str(mt5.last_error())
-                logger.error(f"Failed to get account info. Error: {error}")
-                return {}
-
-            # Create detailed account info dictionary
-            result = {
+                logger.error(f"Failed to get account info. Error: {mt5.last_error()}")
+                return None
+            
+            # Convert the named tuple to a dictionary for easier use
+            info_dict = {
+                "login": account_info.login,
                 "balance": account_info.balance,
                 "equity": account_info.equity,
+                "profit": account_info.profit,
                 "margin": account_info.margin,
                 "margin_free": account_info.margin_free,
-                "leverage": account_info.leverage,
+                "margin_level": account_info.margin_level,
                 "currency": account_info.currency,
-                "login": account_info.login,
-                "name": account_info.name,
                 "server": account_info.server,
-                "profit": account_info.profit,
-                "margin_level": account_info.margin_level
+                "name": account_info.name,
+                "leverage": account_info.leverage
             }
-
-            return result
+            return info_dict
         except Exception as e:
-            logger.error(f"Exception in get_account_info: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {}
+            logger.error(f"An exception occurred while getting account info: {e}")
+            return None
 
     def get_latest_candle_time(self, symbol: str, timeframe: str) -> Optional[int]:
         """
@@ -2428,39 +2417,71 @@ class MT5Handler:
             
     def get_trade_history(self, days: int = 30) -> Optional[pd.DataFrame]:
         """
-        Retrieves the trade history for the account for a specified number of days.
-
-        Args:
-            days (int): Number of days to look back. Defaults to 30.
-
-        Returns:
-            Optional[pd.DataFrame]: A DataFrame containing trade history, or None if an error occurs.
+        Retrieves and reconstructs the trade history from MT5 deals.
+        It pairs 'in' and 'out' deals to create complete trade records.
         """
-        if not self.connected:
-            logger.error("MT5 not connected, cannot retrieve trade history")
-            return None
-
+        logger.info(f"Fetching and processing trade history for the last {days} days.")
         try:
-            # Calculate the end date as the current date
-            end_date = datetime.now()
-            # Calculate the start date as 30 days ago
-            start_date = end_date - timedelta(days=days)
+            from_date = datetime.utcnow() - timedelta(days=days)
+            to_date = datetime.utcnow()
 
-            # Fetch historical data for each symbol
-            trade_history = []
-            for symbol in self._active_symbols:
-                data = self.get_historical_data(symbol, "D1", start_date, end_date)
-                if data is not None:
-                    trade_history.append(data)
+            deals = mt5.history_deals_get(from_date, to_date)
 
-            # Combine all data into a single DataFrame
-            if trade_history:
-                combined_data = pd.concat(trade_history, axis=0, ignore_index=True)
-                combined_data['symbol'] = combined_data['symbol'].apply(lambda x: x.split('/')[0])
-                return combined_data
-            else:
-                logger.warning("No trade history data available")
+            if deals is None:
+                logger.warning("mt5.history_deals_get returned None.")
                 return None
+            
+            if not deals:
+                logger.info("No deals found in the specified time range.")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(list(deals), columns=deals[0]._asdict().keys())
+            logger.info(f"Processing {len(df)} deals to reconstruct trades.")
+
+            # Filter for deals that represent market entries and exits
+            df = df[df['entry'].isin([mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT])]
+            
+            # Group deals by their position ID to pair them up
+            trades = {}
+            for _, deal in df.iterrows():
+                pos_id = deal['position_id']
+                if pos_id not in trades:
+                    trades[pos_id] = {}
+                
+                if deal['entry'] == mt5.DEAL_ENTRY_IN:
+                    trades[pos_id]['open_deal'] = deal
+                elif deal['entry'] == mt5.DEAL_ENTRY_OUT:
+                    trades[pos_id]['close_deal'] = deal
+
+            # Reconstruct the list of closed trades
+            trade_history = []
+            for pos_id, trade_deals in trades.items():
+                if 'open_deal' in trade_deals and 'close_deal' in trade_deals:
+                    open_deal = trade_deals['open_deal']
+                    close_deal = trade_deals['close_deal']
+                    
+                    trade_history.append({
+                        'ticket': open_deal['order'], # Use the order ticket as the primary identifier
+                        'symbol': open_deal['symbol'],
+                        'type': 'buy' if open_deal['type'] == mt5.DEAL_TYPE_BUY else 'sell',
+                        'volume': open_deal['volume'],
+                        'open_time': pd.to_datetime(open_deal['time'], unit='s'),
+                        'open_price': open_deal['price'],
+                        'close_time': pd.to_datetime(close_deal['time'], unit='s'),
+                        'close_price': close_deal['price'],
+                        'profit': close_deal['profit'],
+                        'comment': open_deal['comment']
+                    })
+
+            if not trade_history:
+                logger.warning("Could not reconstruct any closed trades from the fetched deals.")
+                return pd.DataFrame()
+
+            history_df = pd.DataFrame(trade_history)
+            logger.info(f"Successfully reconstructed {len(history_df)} closed trades from deals.")
+            return history_df
+
         except Exception as e:
-            logger.error(f"Error retrieving trade history: {e}")
+            logger.error(f"An error occurred while getting trade history: {e}")
+            logger.error(traceback.format_exc())
             return None

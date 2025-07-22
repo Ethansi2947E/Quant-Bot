@@ -67,3 +67,15 @@ exports/
 
 # Cursor
 .cursor/ 
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js
+.next/ 

@@ -1,0 +1,3 @@
+@echo off
+echo Starting FastAPI server...
+uvicorn api.main:app --reload 
