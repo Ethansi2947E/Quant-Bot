@@ -11,7 +11,6 @@ from typing import Dict, List, Any, Type, Optional
 from loguru import logger
 import copy
 import pandas as pd
-from pandas import DatetimeIndex
 
 from src.mt5_handler import MT5Handler
 from src.risk_manager import RiskManager

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from .. import crud
 from ..database import get_db
@@ -9,17 +9,19 @@ router = APIRouter(
 )
 
 @router.get("/")
-def read_performance_data(db: Session = Depends(get_db)):
+def read_performance_data(
+    db: Session = Depends(get_db),
+    timeframe: str = Query("1Y", description="Timeframe for performance chart (e.g., 1W, 1M, 1Y)")
+):
     """
     Endpoint to get all data required for the performance analytics page.
     This includes data for the Overview, Risk Analysis, and Monthly Breakdown tabs.
     """
-    overview_data = crud.get_performance_overview(db)
+    overview_data = crud.get_performance_overview(db, timeframe=timeframe)
     risk_analysis_data = crud.get_risk_analysis(db)
     monthly_breakdown_data = crud.get_monthly_breakdown(db)
 
-    # Note: Filtering by asset and date range is not yet implemented.
-    # The API will currently return data for all assets.
+    # The API will now filter performance data based on the timeframe.
     
     return {
         "filters": {

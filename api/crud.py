@@ -4,6 +4,16 @@ from typing import Optional
 from . import models, schemas
 from datetime import datetime, timedelta
 
+# Mapping for timeframe string to timedelta
+TIMEFRAME_DELTAS = {
+    "1W": timedelta(weeks=1),
+    "1M": timedelta(days=30),
+    "3M": timedelta(days=90),
+    "6M": timedelta(days=180),
+    "1Y": timedelta(days=365),
+    "ALL": None # Special case for all data
+}
+
 # This file will contain functions to read/write from the database.
 
 def get_trade_history(db: Session, skip: int = 0, limit: int = 20, sort_by: str = "close_time", sort_order: str = "desc", search: Optional[str] = None):
@@ -84,58 +94,140 @@ def get_overview_chart_data(db: Session):
 
 def get_performance_chart_data(db: Session, timeframe: str = "1Y"):
     """
-    Generates the equity curve and drawdown data for the performance chart.
+    Generates the equity curve and drawdown data for the performance chart,
+    filtered by the specified timeframe.
     """
-    # This is a complex calculation. For now, we'll create a simplified version.
-    # A full implementation would require tracking balance over time.
+    # Determine the date range for the query
+    delta = TIMEFRAME_DELTAS.get(timeframe.upper())
     
-    trades = db.query(models.Trade).order_by(models.Trade.close_time.asc()).all()
+    query = db.query(models.Trade)
     
+    if delta:
+        start_date_filter = datetime.utcnow() - delta
+        query = query.filter(models.Trade.close_time >= start_date_filter)
+        
+    trades = query.order_by(models.Trade.close_time.asc()).all()
+    
+    initial_balance = 10000  # Assume 10k initial balance for calculation
+    
+    # To get a correct starting equity for the period, we need to calculate the
+    # profit from all trades *before* the start of our timeframe window.
+    starting_equity = initial_balance
+    if delta:
+        # Get profit from trades before the timeframe window
+        profit_before_window = db.query(func.sum(models.Trade.profit)).filter(models.Trade.close_time < start_date_filter).scalar() or 0
+        starting_equity += profit_before_window
+
     equity_curve = []
-    current_equity = 10000 # Example initial balance
+    current_equity = starting_equity
+    peak_equity = starting_equity
+    max_drawdown_value = 0
     
+    # Add an initial point for the chart
+    first_date = trades[0].close_time if trades else datetime.utcnow()
+    start_point_date = start_date_filter if delta else (first_date - timedelta(seconds=1))
+    equity_curve.append({
+        "date": start_point_date.strftime('%Y-%m-%d %H:%M:%S'),
+        "equity": starting_equity,
+        "drawdown": 0,
+    })
+
     for trade in trades:
         current_equity += trade.profit
+        
+        if current_equity > peak_equity:
+            peak_equity = current_equity
+        
+        drawdown_value = peak_equity - current_equity
+        if drawdown_value > max_drawdown_value:
+            max_drawdown_value = drawdown_value
+
+        current_drawdown_pct = (drawdown_value / peak_equity) * 100 if peak_equity > 0 else 0
+
         equity_curve.append({
-            "date": trade.close_time.strftime('%Y-%m-%d'),
+            "date": trade.close_time.strftime('%Y-%m-%d %H:%M:%S'),
             "equity": current_equity,
-            "drawdown": 0, # Placeholder for drawdown
-            "volume": trade.volume
+            "drawdown": -current_drawdown_pct,
         })
         
-    # This is a simplified return; the actual implementation would need to handle
-    # different timeframes (1W, 1M, etc.) by resampling the data.
+    max_drawdown_pct = (max_drawdown_value / peak_equity) * 100 if peak_equity > 0 else 0
+
+    # If the dataset is large, resample to daily points to improve frontend performance.
+    # A threshold of 366 points is chosen to allow daily data for up to a year without resampling.
+    if len(equity_curve) > 366:
+        resampled_points = {}
+        # The first point is always the initial balance, so we preserve it.
+        # It might not have a trade on its "day".
+        initial_point = equity_curve[0]
+        
+        # Group subsequent points by day, keeping only the last one for each day.
+        for point in equity_curve[1:]:
+            day = point["date"][:10] # Extract YYYY-MM-DD
+            resampled_points[day] = point
+            
+        # Combine the initial point with the sorted daily points.
+        final_curve = [initial_point] + [resampled_points[day] for day in sorted(resampled_points.keys())]
+        
+        return {
+            "series": final_curve,
+            "max_drawdown_percent": max_drawdown_pct
+        }
+
     return {
-        "1W": equity_curve[-7:] if len(equity_curve) > 7 else equity_curve,
-        "1M": equity_curve[-30:] if len(equity_curve) > 30 else equity_curve,
-        "3M": equity_curve[-90:] if len(equity_curve) > 90 else equity_curve,
-        "6M": equity_curve[-180:] if len(equity_curve) > 180 else equity_curve,
-        "1Y": equity_curve
+        "series": equity_curve,
+        "max_drawdown_percent": max_drawdown_pct
     }
 
-def get_performance_overview(db: Session):
+def get_performance_overview(db: Session, timeframe: str = "1Y"):
     """
     Calculates and returns the data for the 'Overview' tab on the performance page.
     """
-    trades = db.query(models.Trade).all()
-    if not trades:
-        return { "metrics": [], "performanceChart": { "1Y": [] } }
-
-    total_return_pct = (sum(t.profit for t in trades) / 10000) * 100 # Assuming 10k initial balance
+    # Determine the date range for the query
+    delta = TIMEFRAME_DELTAS.get(timeframe.upper())
     
-    # NOTE: These are simplified placeholders. Real calculations are much more complex.
+    trades_query = db.query(models.Trade)
+    if delta:
+        start_date_filter = datetime.utcnow() - delta
+        trades_query = trades_query.filter(models.Trade.close_time >= start_date_filter)
+
+    trades = trades_query.all()
+
+    if not trades:
+        return { 
+            "metrics": [], 
+            "performanceChart": { "series": [], "max_drawdown_percent": 0 } 
+        }
+
+    # Base the return calculation on the profit *within the timeframe*
+    total_profit_in_period = sum(t.profit for t in trades)
+    
+    # We need the balance at the start of the period to calculate return percentage accurately.
+    initial_balance = 10000
+    profit_before_period = 0
+    if delta:
+        profit_before_period = db.query(func.sum(models.Trade.profit)).filter(models.Trade.close_time < start_date_filter).scalar() or 0
+    
+    starting_balance_for_period = initial_balance + profit_before_period
+
+    total_return_pct = (total_profit_in_period / starting_balance_for_period) * 100 if starting_balance_for_period > 0 else 0
+    
+    # The performance chart data is now filtered by timeframe as well.
+    performance_chart_result = get_performance_chart_data(db, timeframe=timeframe)
+    max_drawdown_pct = performance_chart_result['max_drawdown_percent']
+    
+    # NOTE: The other metrics are still placeholders.
     metrics = [
-        { "title": "Total Return", "value": f"{total_return_pct:.2f}%", "change": "+2.1%" },
-        { "title": "Annualized Return", "value": "+18.7%", "change": "+1.5%" },
-        { "title": "Sharpe Ratio", "value": "1.85", "change": "+0.12" },
-        { "title": "Max Drawdown", "value": "-8.2%", "change": "-1.1%" },
-        { "title": "Calmar Ratio", "value": "2.28", "change": "+0.15" },
-        { "title": "Volatility", "value": "12.4%", "change": "-0.8%" },
-        { "title": "Beta", "value": "0.73", "change": "-0.05" },
-        { "title": "Alpha", "value": "4.2%", "change": "+0.3%" }
+        { "title": "Total Return", "value": f"{total_return_pct:.2f}%", "change": "+2.1%", "color": "text-green-500" },
+        { "title": "Annualized Return", "value": "18.7%", "change": "+1.5%", "color": "text-green-500" },
+        { "title": "Sharpe Ratio", "value": "1.85", "change": "+0.12", "color": "text-green-500" },
+        { "title": "Max Drawdown", "value": f"-{max_drawdown_pct:.2f}%", "change": "-1.1%", "color": "text-red-500" },
+        { "title": "Calmar Ratio", "value": "2.28", "change": "+0.15", "color": "text-green-500" },
+        { "title": "Volatility", "value": "12.4%", "change": "-0.8%", "color": "text-green-500" },
+        { "title": "Beta", "value": "0.73", "change": "-0.05", "color": "text-green-500" },
+        { "title": "Alpha", "value": "4.2%", "change": "+0.3%", "color": "text-green-500" }
     ]
     
-    performance_chart_data = get_performance_chart_data(db) # Reuse the equity curve logic
+    performance_chart_data = performance_chart_result["series"]
 
     return {
         "metrics": metrics,
