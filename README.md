@@ -36,6 +36,18 @@ This Trading Bot is a comprehensive algorithmic trading system designed to conne
 - **🔧 Advanced Error Handling**: Automatically handles common broker errors like invalid stops and unsupported order-filling modes.
 - **🎯 Multi-Take-Profit Management**: Capable of managing trades with multiple take-profit levels, executing partial closes to secure profits incrementally.
 
+## 📊 Quant-Dash Dashboard
+
+This project includes a powerful web-based dashboard built with Next.js and Tailwind CSS for real-time monitoring and analytics.
+
+- **Visualize Performance**: Track your bot's performance with interactive charts and detailed metrics.
+- **Monitor Live Trades**: Keep an eye on all active trades in a clean, user-friendly interface.
+- **Review History**: Analyze historical trade data to refine your strategies.
+
+The dashboard runs separately and connects to the bot's API. For setup instructions and more details, please see the [Quant-Dash README](./Quant-Dash/README.md).
+
+The public repository for the dashboard can be found here: [https://github.com/Ethansi2947E/Quant-Dash](https://github.com/Ethansi2947E/Quant-Dash)
+
 ## 🏗️ System Architecture
 
 ### Flow Chart
