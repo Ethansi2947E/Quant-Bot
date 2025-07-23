@@ -119,14 +119,7 @@ class AlphaQuantScalperV1(SignalGenerator):
                 logger.debug(f"[{sym}] Missing or insufficient primary DataFrame data.")
                 continue
 
-            try:
-                last_timestamp = str(primary_df.index[-1])
-                bar_key = (sym, self.primary_timeframe)
-                if self.processed_bars.get(bar_key) == last_timestamp:
-                    continue
-                self.processed_bars[bar_key] = last_timestamp
-            except IndexError:
-                continue
+            last_timestamp = str(primary_df.index[-1])
 
             # --- 1. Calculate All Indicators & Proxies ---
             indicators = self._calculate_indicators(primary_df)

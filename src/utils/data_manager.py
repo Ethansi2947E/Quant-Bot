@@ -73,6 +73,31 @@ class DataManager:
         """
         return self.market_data_cache.get((symbol, timeframe))
 
+    def update_real_time_data(self, symbol: str, timeframe: str, tick: dict):
+        """
+        Updates the last candle in the cache with a new tick.
+        This is for real-time monitoring.
+        """
+        key = (symbol, timeframe)
+        if key not in self.market_data_cache:
+            return  # No data to update
+
+        df = self.market_data_cache[key]
+        if df.empty:
+            return
+
+        last_candle = df.iloc[-1].copy()
+        last_candle['close'] = tick['last']
+        last_candle['high'] = max(last_candle['high'], tick['last'])
+        last_candle['low'] = min(last_candle['low'], tick['last'])
+        
+        # In a real scenario, you might also update volume
+        # last_candle['volume'] += new_volume_since_last_tick
+
+        df.iloc[-1] = last_candle
+        self.market_data_cache[key] = df
+
+
     def register_timeframe(self, symbol: str, timeframe: str, lookback: int):
         """Stores the data requirements for a symbol/timeframe pair."""
         self.requirements[(symbol, timeframe)] = lookback

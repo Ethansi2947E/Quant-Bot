@@ -267,13 +267,7 @@ class GarbageAlgoStrategy(SignalGenerator):
                 logger.trace(f"[{sym}] Insufficient data for {self.primary_timeframe}. Have {len(primary_df)}, need {self.lookback}.")
                 continue
             
-            try:
-                last_timestamp = str(primary_df.index[-1])
-                if self.processed_bars.get((sym, self.primary_timeframe)) == last_timestamp:
-                    continue
-                self.processed_bars[(sym, self.primary_timeframe)] = last_timestamp
-            except IndexError:
-                continue
+            last_timestamp = str(primary_df.index[-1])
 
             try:
                 calculator = _GarbageAlgoCalculator(primary_df, self.params)

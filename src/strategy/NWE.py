@@ -206,13 +206,7 @@ class ExhaustionReversalStrategy(SignalGenerator):
                 logger.trace(f"[{sym}] Insufficient data for {self.primary_timeframe} to generate signal. Have {len(primary_df)}, need {self.lookback}.")
                 continue
             
-            try:
-                last_timestamp = str(primary_df.index[-1])
-                if self.processed_bars.get((sym, self.primary_timeframe)) == last_timestamp:
-                    continue # Skip if we've already processed this bar
-                self.processed_bars[(sym, self.primary_timeframe)] = last_timestamp
-            except IndexError:
-                continue
+            last_timestamp = str(primary_df.index[-1])
 
             logger.trace(f"[{sym}] Analyzing data for timestamp: {last_timestamp}")
 

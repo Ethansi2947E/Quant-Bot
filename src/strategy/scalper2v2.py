@@ -99,14 +99,7 @@ class AlphaFusionScalper2(SignalGenerator):
             if not isinstance(primary_df, pd.DataFrame) or primary_df.empty or len(primary_df) < 50:
                 continue
             
-            # Prevent re-processing the same bar
-            try:
-                last_timestamp = str(primary_df.index[-1])
-                if self.processed_bars.get((sym, self.primary_timeframe)) == last_timestamp:
-                    continue
-                self.processed_bars[(sym, self.primary_timeframe)] = last_timestamp
-            except IndexError:
-                continue
+            last_timestamp = str(primary_df.index[-1])
 
             # --- Core Logic Pipeline ---
             logger.debug(f"[{sym}] Analyzing bar with timestamp: {last_timestamp}")

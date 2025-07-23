@@ -179,16 +179,7 @@ class StrategyTemplate(SignalGenerator):
                 logger.debug(f"[{sym}] Missing or empty market data for required timeframes.")
                 continue
 
-            # --- 3. Prevent Re-processing the Same Bar ---
-            try:
-                last_timestamp = str(primary_df.index[-1])
-                bar_key = (sym, self.primary_timeframe)
-                if self.processed_bars.get(bar_key) == last_timestamp:
-                    continue # Skip if we've already seen this bar
-                self.processed_bars[bar_key] = last_timestamp
-            except IndexError:
-                logger.warning(f"[{sym}] Could not get last timestamp from primary_df.")
-                continue
+            last_timestamp = str(primary_df.index[-1])
 
             # --- Your Strategy's Logic Goes Here ---
             # Break down your logic into clear, testable steps using helper methods.
