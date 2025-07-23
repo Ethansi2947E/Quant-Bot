@@ -3,6 +3,8 @@ from sqlalchemy import func, desc
 from typing import Optional
 from . import models, schemas
 from datetime import datetime, timedelta
+import numpy as np
+from collections import defaultdict
 
 # Mapping for timeframe string to timedelta
 TIMEFRAME_DELTAS = {
@@ -238,53 +240,192 @@ def get_risk_analysis(db: Session):
     """
     Calculates and returns the data for the 'Risk Analysis' tab.
     """
-    # NOTE: These are simplified placeholders.
-    metrics = [
-        { "metric": "Value at Risk (95%)", "value": "-$1,250", "description": "Maximum expected loss over 1 day" },
-        { "metric": "Expected Shortfall", "value": "-$1,850", "description": "Average loss beyond VaR" },
-        { "metric": "Maximum Consecutive Losses", "value": 4, "description": "Longest losing streak" },
-        { "metric": "Recovery Factor", "value": 2.87, "description": "Net profit / Max drawdown" },
-        { "metric": "Ulcer Index", "value": 3.2, "description": "Measure of downside risk" },
-        { "metric": "Sterling Ratio", "value": 1.95, "description": "Return / Average drawdown" }
-    ]
-    
-    drawdown_chart = [
-        { "period": "Jan", "drawdown": -2.1 }, { "period": "Feb", "drawdown": -1.5 },
-        { "period": "Mar", "drawdown": -4.2 }, { "period": "Apr", "drawdown": -0.8 },
-        { "period": "May", "drawdown": -3.1 }, { "period": "Jun", "drawdown": -8.2 },
-    ]
-    
-    volatility_chart = [
-        { "period": "Week 1", "volatility": 8.5 }, { "period": "Week 2", "volatility": 12.3 },
-        { "period": "Week 3", "volatility": 15.7 }, { "period": "Week 4", "volatility": 9.2 },
-    ]
+    trades = db.query(models.Trade).order_by(models.Trade.close_time.asc()).all()
+    if not trades:
+        return {
+            "metrics": [],
+            "drawdownChart": [],
+            "volatilityChart": []
+        }
 
+    profits = [t.profit for t in trades]
+    
+    # --- Metric Calculations ---
+    # 1. Maximum Consecutive Losses
+    max_consecutive_losses = 0
+    current_consecutive_losses = 0
+    for profit in profits:
+        if profit < 0:
+            current_consecutive_losses += 1
+        else:
+            if current_consecutive_losses > max_consecutive_losses:
+                max_consecutive_losses = current_consecutive_losses
+            current_consecutive_losses = 0
+    if current_consecutive_losses > max_consecutive_losses:
+        max_consecutive_losses = current_consecutive_losses
+
+    # 2. Recovery Factor (based on max drawdown from performance chart logic)
+    # Re-use the equity curve logic to get the max drawdown value
+    initial_balance = 10000
+    total_profit = sum(profits)
+    
+    peak_equity = initial_balance
+    current_equity = initial_balance
+    max_drawdown_value = 0
+    for profit in profits:
+        current_equity += profit
+        if current_equity > peak_equity:
+            peak_equity = current_equity
+        drawdown = peak_equity - current_equity
+        if drawdown > max_drawdown_value:
+            max_drawdown_value = drawdown
+    
+    recovery_factor = total_profit / max_drawdown_value if max_drawdown_value > 0 else 0
+
+    # --- Chart Data Calculations ---
+    # 3. Monthly Drawdown Analysis
+    monthly_drawdowns = defaultdict(list)
+    for trade in trades:
+        month_key = trade.close_time.strftime('%Y-%m') # e.g., "2024-01"
+        monthly_drawdowns[month_key].append(trade.profit)
+
+    drawdown_chart_data = []
+    for month, month_profits in sorted(monthly_drawdowns.items()):
+        month_name = datetime.strptime(month, '%Y-%m').strftime('%b %Y')
+        
+        # Calculate max drawdown within this month
+        month_peak_equity = 0  # Start relative to this month's beginning
+        month_current_equity = 0
+        month_max_dd_value = 0
+        for profit in month_profits:
+            month_current_equity += profit
+            if month_current_equity > month_peak_equity:
+                month_peak_equity = month_current_equity
+            drawdown = month_peak_equity - month_current_equity
+            if drawdown > month_max_dd_value:
+                month_max_dd_value = drawdown
+        
+        # We'll express drawdown as a percentage of the *overall* initial balance for consistency
+        # A more complex approach might use the balance at the start of the month.
+        monthly_dd_pct = (month_max_dd_value / initial_balance) * 100 if initial_balance > 0 else 0
+        
+        drawdown_chart_data.append({ "period": month_name, "drawdown": -monthly_dd_pct })
+
+    # 4. Rolling Volatility
+    weekly_returns = defaultdict(list)
+    for trade in trades:
+        # Group trades by week number
+        week_key = trade.close_time.strftime('%Y-%U') # e.g., "2024-32"
+        weekly_returns[week_key].append(trade.profit)
+
+    volatility_chart_data = []
+    # Get the last 4 weeks of data, sorted by week
+    for week, week_profits in sorted(weekly_returns.items())[-4:]:
+        # Use numpy to calculate the standard deviation of profits for the week.
+        # Multiply by 100 to express as a percentage of initial balance for scale.
+        if len(week_profits) > 1:
+            # We need the week number to display on the chart
+            week_num = datetime.strptime(week + '-1', '%Y-%U-%w').isocalendar()[1]
+            # Volatility is the std dev of returns. Here we use profits as a proxy.
+            # Scale it to make it more readable in the chart.
+            volatility = np.std(week_profits) 
+            volatility_chart_data.append({ "period": f"Week {week_num}", "volatility": volatility })
+
+    # Placeholder metrics for complex calculations
+    metrics = [
+        { "metric": "Value at Risk (95%)", "value": "-$1,250", "description": "Maximum expected loss over 1 day (placeholder)" },
+        { "metric": "Expected Shortfall", "value": "-$1,850", "description": "Average loss beyond VaR (placeholder)" },
+        { "metric": "Maximum Consecutive Losses", "value": max_consecutive_losses, "description": "Longest losing streak" },
+        { "metric": "Recovery Factor", "value": f"{recovery_factor:.2f}", "description": "Net profit / Max drawdown" },
+        { "metric": "Ulcer Index", "value": "3.2", "description": "Measure of downside risk (placeholder)" },
+        { "metric": "Sterling Ratio", "value": "1.95", "description": "Return / Average drawdown (placeholder)" }
+    ]
+    
     return {
         "metrics": metrics,
-        "drawdownChart": drawdown_chart,
-        "volatilityChart": volatility_chart
+        "drawdownChart": drawdown_chart_data,
+        "volatilityChart": volatility_chart_data
     }
 
 def get_monthly_breakdown(db: Session):
     """
     Calculates and returns the data for the 'Monthly Breakdown' tab.
     """
-    # NOTE: These are simplified placeholders.
+    trades = db.query(models.Trade).order_by(models.Trade.close_time.asc()).all()
+    if not trades:
+        return { "yearlyStats": [], "monthlyData": [] }
+
+    # Group trades by month
+    monthly_data_agg = defaultdict(lambda: {
+        'profits': [],
+        'trades': 0,
+        'winning_trades': 0,
+        'daily_profits': defaultdict(float)
+    })
+
+    initial_balance = 10000
+    
+    for trade in trades:
+        month_key = trade.close_time.strftime('%Y-%m')
+        day_key = trade.close_time.strftime('%Y-%m-%d')
+        
+        agg = monthly_data_agg[month_key]
+        agg['profits'].append(trade.profit)
+        agg['trades'] += 1
+        if trade.profit > 0:
+            agg['winning_trades'] += 1
+        agg['daily_profits'][day_key] += trade.profit
+
+    # Process aggregated data into the final format
+    monthly_data_final = []
+    monthly_returns = []
+
+    for month, data in sorted(monthly_data_agg.items()):
+        month_name = datetime.strptime(month, '%Y-%m').strftime('%B %Y')
+        total_profit = sum(data['profits'])
+        
+        # Note: Return % is based on overall initial balance for simplicity.
+        # A more complex calculation would use the balance at the start of the month.
+        return_pct = (total_profit / initial_balance) * 100 if initial_balance > 0 else 0
+        monthly_returns.append({"month": month_name, "return": return_pct})
+
+        win_rate = (data['winning_trades'] / data['trades']) * 100 if data['trades'] > 0 else 0
+        
+        daily_pnl_pct = {day: (profit / initial_balance) * 100 for day, profit in data['daily_profits'].items()}
+        best_day_pct = max(daily_pnl_pct.values()) if daily_pnl_pct else 0
+        worst_day_pct = min(daily_pnl_pct.values()) if daily_pnl_pct else 0
+
+        monthly_data_final.append({
+            "month": month_name,
+            "return": round(return_pct, 2),
+            "trades": data['trades'],
+            "winRate": round(win_rate, 2),
+            "bestDay": round(best_day_pct, 2),
+            "worstDay": round(worst_day_pct, 2)
+        })
+
+    # Calculate Yearly Stats
+    if not monthly_returns:
+        return { "yearlyStats": [], "monthlyData": [] }
+
+    best_month = max(monthly_returns, key=lambda x: x['return'])
+    worst_month = min(monthly_returns, key=lambda x: x['return'])
+    positive_months = sum(1 for r in monthly_returns if r['return'] > 0)
+    positive_months_pct = (positive_months / len(monthly_returns)) * 100
+    
     yearly_stats = [
-        { "metric": "Best Month", "value": "June 2024 (+8.4%)" },
-        { "metric": "Worst Month", "value": "March 2024 (-1.5%)" },
-        { "metric": "Positive Months", "value": "5 out of 6 (83.3%)" },
+        { "metric": "Best Month", "value": f"{best_month['month']} (+{best_month['return']:.2f}%)" },
+        { "metric": "Worst Month", "value": f"{worst_month['month']} ({worst_month['return']:.2f}%)" },
+        { "metric": "Positive Months", "value": f"{positive_months} out of {len(monthly_returns)} ({positive_months_pct:.1f}%)" },
+        # Placeholders for more complex stats
+        { "metric": "Average Monthly Return", "value": f"{np.mean([r['return'] for r in monthly_returns]):.2f}%" },
+        { "metric": "Monthly Volatility", "value": f"{np.std([r['return'] for r in monthly_returns]):.2f}%" },
+        { "metric": "Consistency Score", "value": "N/A" },
     ]
     
-    monthly_data = [
-        { "month": "January 2024", "return": 4.2, "trades": 28, "winRate": 71.4, "bestDay": 2.1, "worstDay": -1.3 },
-        { "month": "February 2024", "return": 2.8, "trades": 24, "winRate": 66.7, "bestDay": 1.8, "worstDay": -0.9 },
-        { "month": "March 2024", "return": -1.5, "trades": 31, "winRate": 58.1, "bestDay": 1.5, "worstDay": -2.8 },
-    ]
-
     return {
         "yearlyStats": yearly_stats,
-        "monthlyData": monthly_data
+        "monthlyData": sorted(monthly_data_final, key=lambda x: datetime.strptime(x['month'], '%B %Y'), reverse=True)
     }
 
 def get_win_loss_analysis(db: Session):
