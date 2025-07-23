@@ -8,38 +8,31 @@ if project_root not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import dashboard, performance, win_loss, history, active_trades, signals
 from .database import engine, Base
-from . import models
+from .routers import dashboard, signals, active_trades, history, win_loss, performance
 
-# Create all tables in the database
-# This will check for the existence of tables and create them if they don't exist
-# It will now include the new 'signals' table.
-models.Base.metadata.create_all(bind=engine)
+# Create all database tables
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Set up CORS
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-]
+# Include all the routers
+app.include_router(dashboard.router)
+app.include_router(signals.router)
+app.include_router(active_trades.router)
+app.include_router(history.router)
+app.include_router(win_loss.router)
+app.include_router(performance.router)
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"], # In production, restrict this to your frontend's domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(dashboard.router)
-app.include_router(performance.router)
-app.include_router(win_loss.router)
-app.include_router(history.router)
-app.include_router(active_trades.router)
-app.include_router(signals.router)
-
 @app.get("/")
 def read_root():
-    return {"message": "Trading Bot API is running"} 
+    return {"message": "Welcome to the Quant-Dash API"} 
