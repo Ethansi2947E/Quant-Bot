@@ -487,37 +487,31 @@ def get_monthly_breakdown(db: Session, filters: dict):
         "monthlyData": sorted(monthly_data_final, key=lambda x: datetime.strptime(x['month'], '%B %Y'), reverse=True)
     }
 
-def get_win_loss_analysis(db: Session):
+def get_win_loss_analysis(db: Session, filters: dict):
     """
     Calculates and returns all data required for the Win/Loss Analysis page.
     """
-    trades = db.query(models.Trade).order_by(models.Trade.close_time.asc()).all()
+    trades = _get_filtered_trades(db, filters)
     if not trades:
         # Return a default structure if there's no data
         return {
-            "overview": { "winLossDistribution": [], "keyStatistics": {}, "streakAnalysis": [] },
+            "overview": { "winLossDistribution": [], "keyStatistics": {}, "streakAnalysis": {} },
             "trends": { "winRateOverTime": [], "monthlyDistribution": [] },
             "assetPerformance": [],
             "timingAnalysis": { "byHour": [], "bestHours": [], "mostActiveHours": [] }
         }
 
     # Overview Tab
-    winning_trades = []
-    for t in trades:
-        if t.profit is not None and t.profit > 0:
-            winning_trades.append(t)
-            
-    losing_trades = []
-    for t in trades:
-        if t.profit is not None and t.profit <= 0:
-            losing_trades.append(t)
+    winning_trades = [t for t in trades if t.profit > 0]
+    losing_trades = [t for t in trades if t.profit <= 0]
             
     win_loss_distribution = [
         { "name": "Winning Trades", "value": len(winning_trades) },
         { "name": "Losing Trades", "value": len(losing_trades) }
     ]
-    total_profit = sum(t.profit for t in winning_trades if t.profit is not None)
-    total_loss = abs(sum(t.profit for t in losing_trades if t.profit is not None))
+    
+    total_profit = sum(t.profit for t in winning_trades)
+    total_loss = abs(sum(t.profit for t in losing_trades))
     
     key_statistics = {
         "winRate": (len(winning_trades) / len(trades)) * 100 if trades else 0,
@@ -525,18 +519,112 @@ def get_win_loss_analysis(db: Session):
         "profitFactor": total_profit / total_loss if total_loss > 0 else 0,
         "averageWin": total_profit / len(winning_trades) if winning_trades else 0,
         "averageLoss": total_loss / len(losing_trades) if losing_trades else 0,
+        "riskRewardRatio": (total_profit / len(winning_trades)) / (total_loss / len(losing_trades)) if winning_trades and losing_trades and total_loss > 0 else 0
     }
     
-    # Placeholder for streak analysis as it's complex
-    streak_analysis = [
-        { "type": "Current Streak", "value": "N/A" },
-        { "type": "Longest Win Streak", "value": "N/A" },
-        { "type": "Longest Loss Streak", "value": "N/A" },
-    ]
+    # Streak Analysis
+    win_streaks = []
+    loss_streaks = []
+    current_win_streak = 0
+    current_loss_streak = 0
+    current_streak_type = None
 
-    # For other tabs, we will use placeholder data for now
-    # A full implementation would require more complex queries (e.g., grouping by month, asset, hour)
+    for trade in trades:
+        if trade.profit > 0:
+            if current_loss_streak > 0:
+                loss_streaks.append(current_loss_streak)
+            current_loss_streak = 0
+            current_win_streak += 1
+            current_streak_type = "win"
+        else:
+            if current_win_streak > 0:
+                win_streaks.append(current_win_streak)
+            current_win_streak = 0
+            current_loss_streak += 1
+            current_streak_type = "loss"
+            
+    # Add the final streak
+    if current_win_streak > 0:
+        win_streaks.append(current_win_streak)
+    if current_loss_streak > 0:
+        loss_streaks.append(current_loss_streak)
+
+    current_streak_value = f"{current_win_streak} Wins" if current_streak_type == 'win' else f"{current_loss_streak} Losses"
     
+    streak_analysis = {
+        "currentStreak": {"value": current_streak_value, "type": current_streak_type},
+        "longestWinStreak": max(win_streaks) if win_streaks else 0,
+        "longestLossStreak": max(loss_streaks) if loss_streaks else 0,
+        "averageWinStreak": np.mean(win_streaks) if win_streaks else 0,
+        "averageLossStreak": np.mean(loss_streaks) if loss_streaks else 0,
+    }
+
+    # --- Trends Tab ---
+    monthly_trends = defaultdict(lambda: {'wins': 0, 'losses': 0})
+    for trade in trades:
+        month_key = trade.close_time.strftime('%Y-%m')
+        if trade.profit > 0:
+            monthly_trends[month_key]['wins'] += 1
+        else:
+            monthly_trends[month_key]['losses'] += 1
+
+    win_rate_over_time = []
+    monthly_distribution = []
+    for month, data in sorted(monthly_trends.items()):
+        total = data['wins'] + data['losses']
+        win_rate = (data['wins'] / total) * 100 if total > 0 else 0
+        month_name = datetime.strptime(month, '%Y-%m').strftime('%b %Y')
+        win_rate_over_time.append({"date": month_name, "winRate": round(win_rate, 2)})
+        monthly_distribution.append({"date": month_name, "wins": data['wins'], "losses": data['losses']})
+
+    # --- Asset Performance Tab ---
+    asset_performance_agg = defaultdict(lambda: {'wins': 0, 'losses': 0, 'win_profits': 0, 'loss_profits': 0})
+    for trade in trades:
+        asset = trade.symbol
+        if trade.profit > 0:
+            asset_performance_agg[asset]['wins'] += 1
+            asset_performance_agg[asset]['win_profits'] += trade.profit
+        else:
+            asset_performance_agg[asset]['losses'] += 1
+            asset_performance_agg[asset]['loss_profits'] += trade.profit
+
+    asset_performance = []
+    for asset, data in asset_performance_agg.items():
+        total = data['wins'] + data['losses']
+        win_rate = (data['wins'] / total) * 100 if total > 0 else 0
+        avg_win = data['win_profits'] / data['wins'] if data['wins'] > 0 else 0
+        avg_loss = abs(data['loss_profits'] / data['losses']) if data['losses'] > 0 else 0
+        asset_performance.append({
+            "asset": asset,
+            "wins": data['wins'],
+            "losses": data['losses'],
+            "winRate": win_rate,
+            "avgWin": avg_win,
+            "avgLoss": avg_loss
+        })
+
+    # --- Timing Analysis Tab ---
+    hour_bins = {f"{h:02d}-{(h+4):02d}": {'wins': 0, 'losses': 0} for h in range(0, 24, 4)}
+    for trade in trades:
+        hour = trade.close_time.hour
+        bin_start = (hour // 4) * 4
+        bin_key = f"{bin_start:02d}-{(bin_start+4):02d}"
+        if trade.profit > 0:
+            hour_bins[bin_key]['wins'] += 1
+        else:
+            hour_bins[bin_key]['losses'] += 1
+            
+    timing_by_hour = []
+    for hour_range, data in hour_bins.items():
+        total = data['wins'] + data['losses']
+        win_rate = (data['wins'] / total) * 100 if total > 0 else 0
+        timing_by_hour.append({
+            "hour": hour_range,
+            "wins": data['wins'],
+            "losses": data['losses'],
+            "winRate": win_rate
+        })
+
     return {
         "overview": {
             "winLossDistribution": win_loss_distribution,
@@ -544,16 +632,15 @@ def get_win_loss_analysis(db: Session):
             "streakAnalysis": streak_analysis
         },
         "trends": {
-            "winRateOverTime": [{ "date": "Jan", "winRate": 72 }, { "date": "Feb", "winRate": 68 }],
-            "monthlyDistribution": [{ "date": "Jan", "wins": 18, "losses": 7 }]
+            "winRateOverTime": win_rate_over_time,
+            "monthlyDistribution": monthly_distribution
         },
-        "assetPerformance": [
-            { "asset": "BTC/USD", "wins": 45, "losses": 15, "winRate": 75, "avgWin": 2.3, "avgLoss": -1.8 }
-        ],
+        "assetPerformance": sorted(asset_performance, key=lambda x: x['wins'] + x['losses'], reverse=True),
         "timingAnalysis": {
-            "byHour": [{ "hour": "08-12", "wins": 42, "losses": 18, "winRate": 70 }],
-            "bestHours": [{ "hour": "20-24", "winRate": 90.6, "wins": 29, "losses": 3 }],
-            "mostActiveHours": [{ "hour": "08-12", "totalTrades": 60, "winRate": 70 }]
+            "byHour": timing_by_hour,
+            # Best hours and most active are derived on the frontend from the 'byHour' data
+            "bestHours": timing_by_hour,
+            "mostActiveHours": timing_by_hour
         }
     }
 
