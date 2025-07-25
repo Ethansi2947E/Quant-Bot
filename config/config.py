@@ -114,6 +114,15 @@ RISK_MANAGER_CONFIG = {
 
 # ================= Trade Exit Configuration =================
 TRADE_EXIT_CONFIG = {
+    'scalping': {
+        'enabled': True,
+        'profit_percentage': 0.6, # Close trade when 60% of TP is reached
+        'strategy_names': [
+            'AlphaFusionScalper',
+            'AlphaFusionScalper2',
+            'AlphaQuantScalperV1'
+        ]
+    },
     'partial_tp_ratio': 0.5,
     'tp_levels': [
         {'ratio': 0.5, 'size': 0.4},

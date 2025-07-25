@@ -46,6 +46,13 @@ class PositionManager:
 
         # State tracking for multi-TP partial closes
         self.managed_positions: Dict[int, Dict[str, Any]] = {}
+
+        # --- NEW: Scalping configuration ---
+        from config.config import TRADE_EXIT_CONFIG
+        self.scalping_config = TRADE_EXIT_CONFIG.get('scalping', {})
+        self.scalping_enabled = self.scalping_config.get('enabled', False)
+        self.scalping_profit_percentage = self.scalping_config.get('profit_percentage', 0.6) # 60%
+        self.scalping_strategy_names = self.scalping_config.get('strategy_names', [])
         
     def register_trade(self, signal: Dict[str, Any], trade_result: Dict[str, Any]):
         """
@@ -142,6 +149,15 @@ class PositionManager:
                         logger.warning(f"Skipping position with missing symbol or ticket: {position}")
                         continue
                     
+                    # --- NEW: Handle Scalp Profit Taking ---
+                    if self.scalping_enabled:
+                        is_scalp_trade = any(name in position.get('comment', '') for name in self.scalping_strategy_names)
+                        if is_scalp_trade:
+                            closed = await self._handle_scalp_profit_taking(position)
+                            if closed:
+                                continue # Skip to next position if closed
+                    # -------------------------------------
+
                     position_type = self._get_position_type(position)
                     current_sl = position.get("sl", 0.0)
                     current_tp = position.get("tp", 0.0)
@@ -198,6 +214,43 @@ class PositionManager:
         except Exception as e:
             logger.error(f"Error in manage_open_trades: {str(e)}")
             logger.error(traceback.format_exc())
+
+    async def _handle_scalp_profit_taking(self, position: Dict[str, Any]) -> bool:
+        """
+        Checks if a scalping trade is in significant profit and closes it.
+        Returns True if the position was closed, False otherwise.
+        """
+        ticket = position['ticket']
+        symbol = position['symbol']
+        direction = 'buy' if position['type'] == 0 else 'sell'
+        entry_price = position['open_price']
+        current_price = position['current_price']
+        tp = position.get('tp', 0.0)
+
+        if tp == 0.0:
+            return False # Cannot determine profit target
+
+        total_potential_profit = abs(tp - entry_price)
+        current_profit = (current_price - entry_price) if direction == 'buy' else (entry_price - current_price)
+
+        if total_potential_profit > 0 and (current_profit / total_potential_profit) >= self.scalping_profit_percentage:
+            logger.info(
+                f"SCALP PROFIT: Closing position {ticket} for {symbol}. "
+                f"Reached {current_profit/total_potential_profit:.1%} of TP."
+            )
+            close_result = self.mt5_handler.close_position(ticket)
+            if close_result:
+                logger.success(f"Successfully closed scalp trade {ticket}.")
+                await self._notify_trade_action(
+                    f"🔪 Scalp Profit Taken!\n"
+                    f"Closed {direction.upper()} {symbol} at {current_price:.5f}\n"
+                    f"Profit: ${position.get('profit', 0.0):.2f}"
+                )
+                return True
+            else:
+                logger.error(f"Failed to close scalp trade {ticket}.")
+        
+        return False
 
     async def _manage_multi_tp_positions(self):
         """Manages partial take-profit logic for registered positions."""

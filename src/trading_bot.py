@@ -236,7 +236,9 @@ class TradingBot:
         self.trade_counter = 0
         self.last_signal = {}  # Dictionary to track last signal timestamp and direction per symbol
         self.last_candle_timestamps = {} # Tracks the last seen candle timestamp for each symbol/timeframe
-        self.check_interval = 1  # Set check interval to 1 second for high-frequency polling
+        self.check_interval = 0.2  # Set check interval to 200ms for high-frequency polling
+        self.last_tick_times = {} # Tracks the last seen tick timestamp to avoid redundant analysis
+        self.last_analysis_time = {} # Tracks the last analysis time per symbol
         
         # Timezone handling
         self.ny_timezone = pytz.timezone('America/New_York')
@@ -251,6 +253,7 @@ class TradingBot:
         logger.info("TradingBot initialized with enhanced multi-timeframe analysis capabilities")
 
         self.main_loop_task = None
+        self.main_task = None # Renamed from main_loop_task
         self._monitor_trades_task = None
         self.data_fetch_task = None
         self.queue_processor_task = None
@@ -277,39 +280,74 @@ class TradingBot:
         
     async def live_tick_event_loop(self):
         """
-        High-frequency loop that processes live ticks.
+        High-frequency loop that processes live ticks and handles new candle events.
         """
-        logger.info("🚀 Starting live tick event loop...")
+        logger.info("🚀 Starting live tick and new candle event loop...")
 
         while not self.shutdown_requested:
             try:
                 if not self.mt5_handler.is_connected():
-                    logger.warning("MT5 disconnected. Pausing tick processing.")
+                    logger.warning("MT5 disconnected. Pausing event loop.")
                     await asyncio.sleep(10)
                     self.mt5_handler.initialize()
                     continue
 
-                for symbol in self.symbols:
-                    latest_tick = self.mt5_handler.get_last_tick(symbol)
-                    if latest_tick:
-                        # Update all relevant timeframes with the new tick
-                        for sg in self.signal_generators:
-                            if hasattr(sg, 'required_timeframes'):
-                                for timeframe in sg.required_timeframes:
-                                    self.data_manager.update_real_time_data(symbol, timeframe, latest_tick)
-                        
-                        # After updating data, run analysis
-                        asyncio.create_task(self.run_analysis_cycle_for_symbol(symbol))
+                # Step 1: Check for and load new closed candles first.
+                unique_pairs_to_monitor = set()
+                for sg in self.signal_generators:
+                    if hasattr(sg, 'required_timeframes'):
+                        for symbol in self.symbols:
+                            for timeframe in sg.required_timeframes:
+                                unique_pairs_to_monitor.add((symbol, timeframe))
+                
+                if unique_pairs_to_monitor:
+                    check_candle_tasks = [self._check_for_new_candle(s, t) for s, t in unique_pairs_to_monitor]
+                    await asyncio.gather(*check_candle_tasks)
 
-                await asyncio.sleep(self.check_interval) # Poll for new ticks
+                # Step 2: Process the latest ticks if they are new.
+                tick_processing_tasks = []
+                for symbol in self.symbols:
+                    tick_processing_tasks.append(self._process_live_tick_for_symbol(symbol))
+                
+                if tick_processing_tasks:
+                    await asyncio.gather(*tick_processing_tasks)
+
+                await asyncio.sleep(self.check_interval)
 
             except asyncio.CancelledError:
-                logger.info("Live tick event loop cancelled.")
+                logger.info("Live event loop cancelled.")
                 break
             except Exception as e:
-                logger.error(f"An error occurred in the live tick event loop: {e}")
+                logger.error(f"An error occurred in the live event loop: {e}")
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(5)
+
+    async def _process_live_tick_for_symbol(self, symbol: str):
+        """ Processes a single live tick for a symbol if it's new. """
+        latest_tick = self.mt5_handler.get_last_tick(symbol)
+        if not latest_tick:
+            return
+
+        last_known_tick_time = self.last_tick_times.get(symbol, 0)
+        
+        # MT5 tick time is in milliseconds
+        if latest_tick['time_msc'] > last_known_tick_time:
+            self.last_tick_times[symbol] = latest_tick['time_msc']
+
+            # Debounce analysis to avoid over-processing
+            now = time.time()
+            if (now - self.last_analysis_time.get(symbol, 0)) < self.check_interval:
+                return
+            self.last_analysis_time[symbol] = now
+
+            # Update all relevant timeframes with the new tick
+            for sg in self.signal_generators:
+                if hasattr(sg, 'required_timeframes'):
+                    for timeframe in sg.required_timeframes:
+                        self.data_manager.update_real_time_data(symbol, timeframe, latest_tick)
+            
+            # After updating data, run analysis
+            asyncio.create_task(self.run_realtime_analysis_for_symbol(symbol))
 
     async def tick_event_loop(self):
         """
@@ -380,32 +418,16 @@ class TradingBot:
             
             asyncio.create_task(self.run_analysis_cycle_for_symbol(symbol))
 
-    async def run_analysis_cycle_for_symbol(self, symbol: str):
-        """
-        Runs the full analysis pipeline for a single symbol using cached data.
-        """
-        logger.debug(f"Running analysis cycle for {symbol} on tick update...")
-
-        required_timeframes: set[str] = set()
-        for sg in self.signal_generators:
-            if hasattr(sg, 'required_timeframes'):
-                required_timeframes.update(getattr(sg, 'required_timeframes'))
-
-        if not required_timeframes:
-            return
-
+    async def _execute_analysis_for_symbol(self, symbol: str, market_data_for_symbol: Dict[str, pd.DataFrame]):
+        """Executes the signal generation and processing part of the analysis."""
         try:
-            market_data_for_symbol = {}
-            for timeframe in required_timeframes:
-                cached_data = self.data_manager.get_market_data(symbol, timeframe)
-                if cached_data is not None and not cached_data.empty:
-                    market_data_for_symbol[timeframe] = cached_data
-            
             if not market_data_for_symbol:
+                logger.warning(f"No market data provided for {symbol} analysis.")
                 return
 
             all_signals: list[dict] = []
             for sg in self.signal_generators:
+                logger.debug(f"Executing signal generator '{sg.name}' for {symbol}...")
                 try:
                     signals = await sg.generate_signals(
                         market_data={symbol: market_data_for_symbol},
@@ -419,9 +441,66 @@ class TradingBot:
             
             if all_signals:
                 await self.process_signals(all_signals)
+        except Exception as e:
+            logger.error(f"Error during analysis execution for {symbol}: {e}")
+            logger.error(traceback.format_exc())
+
+    async def run_analysis_cycle_for_symbol(self, symbol: str):
+        """
+        Runs the full analysis pipeline for a single symbol, including fetching fresh data.
+        """
+        logger.debug(f"Running full analysis cycle for {symbol}...")
+        
+        required_timeframes: set[str] = set()
+        for sg in self.signal_generators:
+            if hasattr(sg, 'required_timeframes'):
+                required_timeframes.update(getattr(sg, 'required_timeframes'))
+        
+        if not required_timeframes:
+            return
+
+        try:
+            for timeframe in required_timeframes:
+                lookback = self.data_manager.requirements.get((symbol, timeframe), 100)
+                self.data_manager.update_data(symbol, timeframe, force=True, num_candles=lookback)
+
+            market_data_for_symbol = {}
+            for timeframe in required_timeframes:
+                cached_data = self.data_manager.get_market_data(symbol, timeframe)
+                if cached_data is not None and not cached_data.empty:
+                    market_data_for_symbol[timeframe] = cached_data
+
+            await self._execute_analysis_for_symbol(symbol, market_data_for_symbol)
 
         except Exception as e:
-            logger.error(f"Error during analysis cycle for {symbol}: {e}")
+            logger.error(f"Error during full analysis cycle for {symbol}: {e}")
+            logger.error(traceback.format_exc())
+
+    async def run_realtime_analysis_for_symbol(self, symbol: str):
+        """
+        Runs a lightweight analysis cycle for a symbol using cached, real-time data.
+        """
+        logger.debug(f"Running real-time analysis for {symbol} on tick update...")
+
+        required_timeframes: set[str] = set()
+        for sg in self.signal_generators:
+            if hasattr(sg, 'required_timeframes'):
+                required_timeframes.update(getattr(sg, 'required_timeframes'))
+        
+        if not required_timeframes:
+            return
+
+        try:
+            market_data_for_symbol = {}
+            for timeframe in required_timeframes:
+                cached_data = self.data_manager.get_market_data(symbol, timeframe)
+                if cached_data is not None and not cached_data.empty:
+                    market_data_for_symbol[timeframe] = cached_data
+
+            await self._execute_analysis_for_symbol(symbol, market_data_for_symbol)
+
+        except Exception as e:
+            logger.error(f"Error during real-time analysis for {symbol}: {e}")
             logger.error(traceback.format_exc())
 
     async def _initialize_signal_generators(self):
@@ -498,7 +577,7 @@ class TradingBot:
         Performs an initial data fetch and analysis for all required symbols.
         This "warms up" the bot with historical data before live monitoring begins.
         """
-        logger.info("🔥 Performing startup data warmup and initial analysis...")
+        logger.info("�� Performing startup data warmup and initial analysis...")
 
         unique_symbols = set(self.symbols)
         if not unique_symbols:
@@ -601,10 +680,10 @@ class TradingBot:
         try:
             while self.running and not self.shutdown_requested:
                 # Check if main loop has exited
-                if self.main_loop_task is not None and self.main_loop_task.done():
+                if self.main_task is not None and self.main_task.done():
                     # If main loop exited with an error, log it
-                    if self.main_loop_task.exception():
-                        logger.error(f"Main loop exited with an error: {self.main_loop_task.exception()}")
+                    if self.main_task.exception():
+                        logger.error(f"Main loop exited with an error: {self.main_task.exception()}")
                         logger.error(traceback.format_exc())
                     else:
                         logger.info("Main loop completed normally")

@@ -702,7 +702,7 @@ class SignalProcessor:
                 stop_loss=stop_loss,
                 take_profit=take_profit_single, # Pass single TP for backward compatibility/clarity
                 take_profits=take_profits_list, # Pass the list for new logic
-                comment=signal.get('strategy_name', 'N/A')
+                comment=f"{signal.get('strategy_name', 'N/A')}" # Pass strategy name in comment
             )
 
             if trade_result and 'ticket' in trade_result and trade_result['ticket'] > 0:
