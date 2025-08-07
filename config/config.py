@@ -66,12 +66,13 @@ TRADING_CONFIG = {
     "close_positions_on_shutdown": False,
     "signal_generators": [
        # "MintAlgoStrategy",
-        "SuperT",
-        "GarbageAlgoStrategy",
-        "ExhaustionReversalStrategy",
-        "AlphaFusionScalper",
-        "AlphaFusionScalper2",
-        "AlphaQuantScalperV1",
+        #"SuperT",
+        #"GarbageAlgoStrategy",
+        #"ExhaustionReversalStrategy",
+        #"AlphaFusionScalper",
+        #"AlphaFusionScalper2",
+        #"AlphaQuantScalperV1",
+        "MeanReversionScalper",
         #"LuxAlgoPremiumStrategy"
     ],
 }
@@ -120,7 +121,8 @@ TRADE_EXIT_CONFIG = {
         'strategy_names': [
             'AlphaFusionScalper',
             'AlphaFusionScalper2',
-            'AlphaQuantScalperV1'
+            'AlphaQuantScalperV1',
+            'MeanReversionScalper'
         ]
     },
     'partial_tp_ratio': 0.5,
