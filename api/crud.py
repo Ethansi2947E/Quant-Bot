@@ -720,6 +720,10 @@ def get_strategies_overview(db: Session, filters: Dict[str, Any]):
         sorted_by_pnl = sorted(data["pnlPerSymbol"].items(), key=lambda kv: kv[1], reverse=True)
         best_pair = sorted_by_pnl[0] if sorted_by_pnl else ("N/A", 0)
         worst_pair = sorted_by_pnl[-1] if len(sorted_by_pnl) > 1 else ("N/A", 0)
+        
+        # Get trade counts for best and worst pairs
+        best_pair_trades = data["symbolCounts"].get(best_pair[0], 0) if best_pair[0] != "N/A" else 0
+        worst_pair_trades = data["symbolCounts"].get(worst_pair[0], 0) if worst_pair[0] != "N/A" else 0
 
         overview_list.append({
             "id": data["id"],
@@ -730,8 +734,8 @@ def get_strategies_overview(db: Session, filters: Dict[str, Any]):
             "totalTrades": data["totalTrades"],
             "status": "active",
             "topPairs": top_pairs,
-            "bestPair": {"symbol": best_pair[0], "pnl": best_pair[1], "trades": int(data["symbolCounts"].get(best_pair[0], 0))},
-            "worstPair": {"symbol": worst_pair[0], "pnl": worst_pair[1], "trades": int(data["symbolCounts"].get(worst_pair[0], 0))},
+            "bestPair": {"symbol": best_pair[0], "pnl": best_pair[1], "trades": best_pair_trades},
+            "worstPair": {"symbol": worst_pair[0], "pnl": worst_pair[1], "trades": worst_pair_trades},
             "lastTrade": (data["lastTrade"].strftime('%Y-%m-%d %H:%M:%S') if data["lastTrade"] else None),
         })
 
