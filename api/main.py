@@ -9,7 +9,7 @@ if project_root not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .routers import dashboard, signals, active_trades, history, win_loss, performance
+from .routers import dashboard, signals, active_trades, history, win_loss, performance, strategies
 
 # Create all database tables
 Base.metadata.create_all(bind=engine)
@@ -23,6 +23,7 @@ app.include_router(active_trades.router)
 app.include_router(history.router)
 app.include_router(win_loss.router)
 app.include_router(performance.router)
+app.include_router(strategies.router)
 
 # Add CORS middleware
 app.add_middleware(

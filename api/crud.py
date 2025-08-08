@@ -5,6 +5,7 @@ from . import models
 from datetime import datetime, timedelta
 import numpy as np
 from collections import defaultdict
+from typing import Dict, List, Any
 
 # Mapping for timeframe string to timedelta
 TIMEFRAME_DELTAS = {
@@ -649,3 +650,183 @@ def get_signals(db: Session, skip: int = 0, limit: int = 20):
     Retrieves a paginated list of the most recent trading signals.
     """
     return db.query(models.Signal).order_by(models.Signal.timestamp.desc()).offset(skip).limit(limit).all() 
+
+
+# ----------------------------
+# Strategies (grouped by comment)
+# ----------------------------
+def _apply_common_filters(query, filters: Dict[str, Any]):
+    asset = filters.get("asset")
+    if asset and asset != "All Assets":
+        query = query.filter(models.Trade.symbol == asset)
+
+    start_date_str = filters.get("start_date")
+    if start_date_str:
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+        query = query.filter(models.Trade.close_time >= start_date)
+
+    end_date_str = filters.get("end_date")
+    if end_date_str:
+        end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+        query = query.filter(models.Trade.close_time <= end_date)
+
+    return query
+
+
+def get_strategies_overview(db: Session, filters: Dict[str, Any]):
+    """
+    Aggregate trades by strategy name parsed from Trade.comment.
+
+    Returns a list of strategies with aggregated metrics similar to the frontend overview card needs.
+    """
+    base_query = db.query(models.Trade)
+    base_query = _apply_common_filters(base_query, filters)
+
+    trades: List[models.Trade] = base_query.order_by(models.Trade.close_time.asc()).all()
+
+    strategies: Dict[str, Dict[str, Any]] = {}
+    for t in trades:
+        strategy_name = (t.comment or "Unspecified").strip()
+        if strategy_name not in strategies:
+            strategies[strategy_name] = {
+                "id": strategy_name,
+                "name": strategy_name,
+                "description": "",
+                "totalPnL": 0.0,
+                "totalTrades": 0,
+                "wins": 0,
+                "lastTrade": None,
+                "symbolCounts": defaultdict(int),
+                "pnlPerSymbol": defaultdict(float),
+            }
+
+        s = strategies[strategy_name]
+        s["totalPnL"] += float(t.profit or 0.0)
+        s["totalTrades"] += 1
+        if float(t.profit or 0.0) > 0:
+            s["wins"] += 1
+        if t.close_time:
+            s["lastTrade"] = max(s["lastTrade"], t.close_time) if s["lastTrade"] else t.close_time
+        s["symbolCounts"][t.symbol] += 1
+        s["pnlPerSymbol"][t.symbol] += float(t.profit or 0.0)
+
+    overview_list: List[Dict[str, Any]] = []
+    for name, data in strategies.items():
+        total_trades = max(1, data["totalTrades"])  # avoid div by zero
+        win_rate = (data["wins"] / total_trades) * 100.0
+        top_pairs = [sym for sym, _ in sorted(data["symbolCounts"].items(), key=lambda kv: kv[1], reverse=True)[:3]]
+        
+        # Determine best and worst performing pairs by PnL
+        sorted_by_pnl = sorted(data["pnlPerSymbol"].items(), key=lambda kv: kv[1], reverse=True)
+        best_pair = sorted_by_pnl[0] if sorted_by_pnl else ("N/A", 0)
+        worst_pair = sorted_by_pnl[-1] if len(sorted_by_pnl) > 1 else ("N/A", 0)
+
+        overview_list.append({
+            "id": data["id"],
+            "name": data["name"],
+            "description": data["description"],
+            "totalPnL": data["totalPnL"],
+            "winRate": round(win_rate, 2),
+            "totalTrades": data["totalTrades"],
+            "status": "active",
+            "topPairs": top_pairs,
+            "bestPair": {"symbol": best_pair[0], "pnl": best_pair[1], "trades": int(data["symbolCounts"].get(best_pair[0], 0))},
+            "worstPair": {"symbol": worst_pair[0], "pnl": worst_pair[1], "trades": int(data["symbolCounts"].get(worst_pair[0], 0))},
+            "lastTrade": (data["lastTrade"].strftime('%Y-%m-%d %H:%M:%S') if data["lastTrade"] else None),
+        })
+
+    return {"strategies": overview_list}
+
+
+def get_strategy_details(db: Session, strategy: str, filters: Dict[str, Any]):
+    """
+    Detailed metrics, equity curve and trade list for a single strategy (by comment).
+    """
+    base_query = db.query(models.Trade).filter(models.Trade.comment == strategy)
+    base_query = _apply_common_filters(base_query, filters)
+
+    trades: List[models.Trade] = base_query.order_by(models.Trade.close_time.asc()).all()
+
+    # Metrics
+    total_trades = len(trades)
+    total_pnl = float(sum(float(t.profit or 0.0) for t in trades))
+    wins = sum(1 for t in trades if float(t.profit or 0.0) > 0)
+    win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+
+    # Build equity curve (strategy-level). Use initial balance baseline.
+    initial_balance = 10000.0
+    current_equity = initial_balance
+    peak_equity = initial_balance
+    max_drawdown_value = 0.0
+    equity_curve: List[Dict[str, Any]] = []
+
+    # Add starting point
+    first_date = (trades[0].close_time or trades[0].open_time) if trades else datetime.utcnow()
+    equity_curve.append({
+        "date": (first_date - timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S'),
+        "equity": current_equity,
+        "drawdown": 0.0,
+    })
+
+    for t in trades:
+        profit_value = float(t.profit or 0.0)
+        current_equity += profit_value
+        if current_equity > peak_equity:
+            peak_equity = current_equity
+        drawdown_value = peak_equity - current_equity
+        if drawdown_value > max_drawdown_value:
+            max_drawdown_value = drawdown_value
+        current_drawdown_pct = (drawdown_value / peak_equity) * 100.0 if peak_equity > 0 else 0.0
+        equity_curve.append({
+            "date": (t.close_time or t.open_time).strftime('%Y-%m-%d %H:%M:%S'),
+            "equity": current_equity,
+            "drawdown": -current_drawdown_pct,
+        })
+
+    max_drawdown = -((max_drawdown_value / peak_equity) * 100.0) if peak_equity > 0 else 0.0
+
+    # Sharpe ratio (simple, based on daily aggregated profits relative to initial balance)
+    daily_profits = defaultdict(float)
+    for t in trades:
+        day_key = (t.close_time or t.open_time).date()
+        daily_profits[day_key] += float(t.profit or 0.0)
+    daily_returns = [(p / initial_balance) for p in daily_profits.values()] if daily_profits else []
+    annualized_volatility = float(np.std(daily_returns) * np.sqrt(252)) if len(daily_returns) > 1 else 0.0
+    mean_daily_return = float(np.mean(daily_returns)) if daily_returns else 0.0
+    sharpe_ratio = (mean_daily_return * 252) / annualized_volatility if annualized_volatility > 0 else 0.0
+
+    # Trade list mapped for frontend, limited to the last 10
+    trade_rows: List[Dict[str, Any]] = []
+    # Sort trades by close time descending to get the most recent ones
+    recent_trades = sorted(trades, key=lambda t: t.close_time or t.open_time, reverse=True)[:10]
+
+    for t in recent_trades:
+        direction = "Long" if (t.order_type or '').lower() == "buy" else "Short"
+        trade_rows.append({
+            "id": t.id,
+            "date": (t.close_time or t.open_time).strftime('%Y-%m-%d %H:%M:%S'),
+            "symbol": t.symbol,
+            "direction": direction,
+            "entryPrice": float(t.open_price or 0.0),
+            "exitPrice": float(t.close_price) if t.close_price is not None else float(t.open_price or 0.0),
+            "pnL": float(t.profit or 0.0),
+            "notes": t.comment or "",
+        })
+
+    details = {
+        "strategy": {
+            "id": strategy,
+            "name": strategy,
+            "description": "",
+            "totalPnL": total_pnl,
+            "winRate": round(win_rate, 2),
+            "totalTrades": total_trades,
+            "maxDrawdown": round(max_drawdown, 2),
+            "sharpeRatio": round(float(sharpe_ratio), 2) if isinstance(sharpe_ratio, (int, float, np.floating)) else 0.0,
+            "status": "active",
+        },
+        "equity": equity_curve,
+        "trades": trade_rows,
+    }
+
+    return details
