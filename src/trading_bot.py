@@ -353,7 +353,7 @@ class TradingBot:
         """
         High-frequency loop that checks for new candle events.
         """
-        logger.info("🚀 Starting tick event loop for new candle detection...")
+        logger.info("🚀 Starting bar-close event loop for new candle detection...")
         
         # Determine the unique set of symbol/timeframe pairs to monitor
         unique_pairs_to_monitor = set()
@@ -630,9 +630,15 @@ class TradingBot:
                 await self.register_telegram_commands()
                 logger.info("Telegram commands registered")
             
-            # --- REPLACE OLD MAIN LOOP WITH TICK EVENT LOOP ---
+            # --- Select execution loop based on config ---
             await self._prime_last_candle_timestamps()
-            self.main_task = asyncio.create_task(self.live_tick_event_loop())
+            execution_mode = self.trading_config.get("execution_mode", "bar").lower()
+            if execution_mode == "tick":
+                logger.info("[STARTUP] Execution mode: tick (real-time)")
+                self.main_task = asyncio.create_task(self.live_tick_event_loop())
+            else:
+                logger.info("[STARTUP] Execution mode: bar (closed-candle)")
+                self.main_task = asyncio.create_task(self.tick_event_loop())
             self.trade_monitor_task = asyncio.create_task(self._monitor_trades_loop())
             self.shutdown_monitor_task = asyncio.create_task(self._monitor_shutdown())
             
@@ -643,6 +649,7 @@ class TradingBot:
                 "<b>📊 Symbols:</b> <code>{symbols}</code>\n"
                 "<b>🧠 Strategy:</b> <code>{strategy}</code>\n"
                 "<b>⚙️ Trading Enabled:</b> {enabled}\n"
+                "<b>⏱️ Execution Mode:</b> <code>{exec_mode}</code>\n"
                 "\n"
                 "<b>ℹ️ Tip:</b> Use /start in this chat to view the Telegram command keyboard and available bot commands.\n"
                 "\n"
@@ -651,6 +658,7 @@ class TradingBot:
                 symbols=', '.join(self.symbols),
                 strategy=(self.signal_generators[0].__class__.__name__ if self.signal_generators else 'None'),
                 enabled='✅' if self.trading_enabled else '❌',
+                exec_mode=self.trading_config.get("execution_mode", "bar")
             )
             
             # Send notification directly through signal processor instead of using the wrapper method

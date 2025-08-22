@@ -53,6 +53,11 @@ TRADING_CONFIG = {
     "allow_position_additions": False,
     "position_addition_threshold": 0.5,
 
+    # --- Execution Mode ---
+    # 'bar' -> analyze on closed candles (recommended)
+    # 'tick' -> analyze on new ticks (real-time)
+    "execution_mode": os.getenv("EXECUTION_MODE", "bar"),
+
     # --- Enhanced Data Management ---
 
     "data_management": {
@@ -88,7 +93,7 @@ TELEGRAM_CONFIG = {
 LOG_CONFIG = {
     "use_file_logging": os.getenv("LOG_TO_FILE", "False").lower() == "true",
     "log_file_path": BASE_DIR / "logs/trading_bot.log",
-    "level": "TRACE", # DEBUG, INFO, TRACE
+    "level": "INFO", # DEBUG, INFO, TRACE
     "rotation": "10 MB",
     "retention": "10 days",
     "compression": "zip",

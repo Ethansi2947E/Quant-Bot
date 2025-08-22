@@ -7,7 +7,6 @@ Main entry point for the trading bot system.
 """
 
 import os
-import sys
 import asyncio
 import logging
 import traceback
