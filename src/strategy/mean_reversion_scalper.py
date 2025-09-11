@@ -122,6 +122,26 @@ class MeanReversionScalper(SignalGenerator):
         """
         return [self.primary_timeframe]
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """(Backtesting Only) Pre-calculates all indicators for the entire dataset."""
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        prepared_data = market_data.copy()
+
+        for sym, frames in prepared_data.items():
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                # Calculate all indicators and add them to the DataFrame
+                df['adx'] = self._calculate_adx(df)
+                upper, middle, lower = self._calculate_bollinger_bands(df)
+                df['bb_upper'] = upper
+                df['bb_middle'] = middle
+                df['bb_lower'] = lower
+                df['atr'] = self._calculate_atr(df)
+                df.dropna(inplace=True)
+                frames[self.primary_timeframe] = df
+        
+        return prepared_data
+
     async def initialize(self) -> bool:
         """Initialize the strategy."""
         logger.info(f"🔌 Initializing {self.name} for {self.primary_timeframe} timeframe")
@@ -186,72 +206,77 @@ class MeanReversionScalper(SignalGenerator):
             self.processed_bars[key] = last_timestamp
 
             logger.info(f"🔍 [{sym}] Analyzing new {self.primary_timeframe} bar at {last_timestamp}")
+
+            # --- Indicator Calculation ---
+            # For backtesting, indicators are pre-calculated. For live, they are calculated here.
+            indicator_cols = ['adx', 'bb_lower', 'bb_middle']
+            if not all(col in primary_df.columns for col in indicator_cols):
+                primary_df['adx'] = self._calculate_adx(primary_df)
+                upper, middle, lower = self._calculate_bollinger_bands(primary_df)
+                primary_df['bb_upper'] = upper
+                primary_df['bb_middle'] = middle
+                primary_df['bb_lower'] = lower
+                primary_df['atr'] = self._calculate_atr(primary_df)
+                primary_df.dropna(inplace=True)
             
-            # Step 1: Check ADX condition (trend strength filter)
-            logger.info(f"📊 [{sym}] Step 1: Checking ADX trend strength condition...")
-            if not self._check_adx_condition(primary_df):
-                logger.info(f"❌ [{sym}] ADX condition FAILED - trend too strong for mean reversion")
+            # Re-check length after dropping NaNs
+            if len(primary_df) < max(self.bb_period, self.atr_period, self.adx_period) + 10:
                 continue
-            logger.info(f"✅ [{sym}] ADX condition PASSED - weak trend detected")
+
+            # Get the latest candle data
+            last_candle = primary_df.iloc[-1]
+
+            # Step 1: Check ADX condition (trend strength filter)
+            current_adx = last_candle['adx']
+            if current_adx >= self.adx_threshold:
+                logger.info(f"❌ [{sym}] ADX condition FAILED ({current_adx:.2f} >= {self.adx_threshold})")
+                continue
+            logger.info(f"✅ [{sym}] ADX condition PASSED ({current_adx:.2f} < {self.adx_threshold})")
 
             # Step 2: Check for Bollinger Band overextension
-            logger.info(f"📈 [{sym}] Step 2: Checking Bollinger Band overextension...")
-            bb_signal = self._check_bollinger_overextension(primary_df)
-            if not bb_signal['is_overextended']:
-                logger.info(f"❌ [{sym}] BB overextension FAILED - price not touching lower band")
-                logger.debug(f"   Current low: {bb_signal.get('current_low', 'N/A'):.5f}, Lower BB: {bb_signal.get('lower_bb', 'N/A'):.5f}")
+            current_low = last_candle['low']
+            current_lower_bb = last_candle['bb_lower']
+            if current_low > current_lower_bb:
+                logger.info(f"❌ [{sym}] BB overextension FAILED (Low {current_low:.5f} > Lower BB {current_lower_bb:.5f})")
                 continue
-            logger.info(f"✅ [{sym}] BB overextension PASSED - price touched lower Bollinger Band")
-            logger.info(f"   📍 Current low: {bb_signal['current_low']:.5f}, Lower BB: {bb_signal['lower_bb']:.5f}")
+            logger.info(f"✅ [{sym}] BB overextension PASSED (Low {current_low:.5f} <= Lower BB {current_lower_bb:.5f})")
 
             # Step 3: Check for reversal confirmation (candle closes in top 33% of range)
-            logger.info(f"🕯️ [{sym}] Step 3: Checking reversal confirmation (candle close position)...")
-            reversal_confirmed = self._check_reversal_confirmation(primary_df)
-            if not reversal_confirmed['confirmed']:
-                logger.info(f"❌ [{sym}] Reversal confirmation FAILED - candle didn't close in top 33%")
-                logger.info(f"   📊 Close position in range: {reversal_confirmed.get('close_position', 0):.1%} (need >67%)")
+            candle_high = last_candle['high']
+            candle_close = last_candle['close']
+            candle_range = candle_high - current_low
+            close_position = (candle_close - current_low) / candle_range if candle_range > 0 else 0
+            if close_position <= self.reversal_threshold:
+                logger.info(f"❌ [{sym}] Reversal confirmation FAILED (Close position {close_position:.1%})")
                 continue
-            logger.info(f"✅ [{sym}] Reversal confirmation PASSED - strong rejection of lower levels")
-            logger.info(f"   📊 Close position in range: {reversal_confirmed['close_position']:.1%}")
+            logger.info(f"✅ [{sym}] Reversal confirmation PASSED (Close position {close_position:.1%})")
 
             # Step 4: Calculate trade parameters
-            logger.info(f"🧮 [{sym}] Step 4: Calculating trade parameters...")
-            trade_params = self._calculate_trade_parameters(primary_df, bb_signal)
-            if not trade_params:
-                logger.warning(f"❌ [{sym}] Failed to calculate valid trade parameters")
-                continue
-            
-            logger.info(f"📋 [{sym}] Trade parameters calculated successfully:")
-            logger.info(f"   💰 Entry: {trade_params['entry']:.5f}")
-            logger.info(f"   🛑 Stop Loss: {trade_params['stop_loss']:.5f}")
-            logger.info(f"   🎯 Take Profit: {trade_params['take_profit']:.5f}")
-            logger.info(f"   ⚖️ Risk/Reward Ratio: {trade_params['risk_reward_ratio']:.2f}")
-            logger.info(f"   📏 ATR: {trade_params['atr_value']:.5f}")
+            entry_price = candle_close
+            current_atr = last_candle['atr']
+            stop_loss = current_low - (self.atr_stop_multiplier * current_atr)
+            take_profit = last_candle['bb_middle']
+            risk = entry_price - stop_loss
+            reward = take_profit - entry_price
+            risk_reward_ratio = reward / risk if risk > 0 else 0
 
             # Step 5: Create signal dictionary
             logger.info(f"📝 [{sym}] Step 5: Creating signal dictionary...")
             signal_details = {
-                # Essential fields
                 "symbol": sym,
-                "direction": "buy",  # Always long for this strategy
-                "entry_price": trade_params['entry'],
-                "stop_loss": trade_params['stop_loss'],
-                "take_profit": trade_params['take_profit'],
-
-                # Informational fields
+                "direction": "buy",
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
                 "timeframe": self.primary_timeframe,
                 "strategy_name": self.name,
                 "confidence": 0.80,
                 "description": "Mean reversion scalp on Bollinger Band overextension",
                 "detailed_reasoning": [
-                    f"ADX({self.adx_period}) = {bb_signal['adx_value']:.2f} < {self.adx_threshold}",
-                    f"Price touched lower BB: {bb_signal['lower_bb']:.5f}",
-                    f"Reversal confirmation: {reversal_confirmed['close_position']:.1%} of range",
-                    f"Stop loss: {trade_params['stop_loss']:.5f}",
-                    f"Take profit: {trade_params['take_profit']:.5f}"
+                    f"ADX({self.adx_period}) = {current_adx:.2f} < {self.adx_threshold}",
+                    f"Price touched lower BB: {current_lower_bb:.5f}",
+                    f"Reversal confirmation: {close_position:.1%} of range",
                 ],
-
-                # Additional fields
                 "pattern": "BB Mean Reversion",
                 "signal_timestamp": str(primary_df.index[-1]),
             }

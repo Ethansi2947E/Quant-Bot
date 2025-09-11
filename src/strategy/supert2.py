@@ -252,6 +252,20 @@ class GarbageAlgoStrategy(SignalGenerator):
     def required_timeframes(self) -> List[str]:
         return [self.primary_timeframe]
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """(Backtesting Only) Pre-calculates all indicators for the entire dataset."""
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        prepared_data = market_data.copy()
+
+        for sym, frames in prepared_data.items():
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                calculator = _GarbageAlgoCalculator(df.copy(), self.params)
+                prepared_df = calculator.calculate_all_indicators()
+                frames[self.primary_timeframe] = prepared_df
+        
+        return prepared_data
+
     async def generate_signals(self, market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None, **kwargs) -> List[Dict]:
         if market_data is None: market_data = {}
         signals = []
@@ -269,12 +283,18 @@ class GarbageAlgoStrategy(SignalGenerator):
             
             last_timestamp = str(primary_df.index[-1])
 
-            try:
-                calculator = _GarbageAlgoCalculator(primary_df, self.params)
-                results = calculator.calculate_all_indicators()
-            except Exception as e:
-                logger.error(f"[{sym}] Error calculating indicators for {self.name}: {e}")
-                continue
+            # Check if indicators are already present (from backtester)
+            indicator_cols = ['supertrend', 'adx', 'bull', 'bear']
+            if all(col in primary_df.columns for col in indicator_cols):
+                results = primary_df
+            else:
+                # Calculate indicators on the fly for live trading
+                try:
+                    calculator = _GarbageAlgoCalculator(primary_df, self.params)
+                    results = calculator.calculate_all_indicators()
+                except Exception as e:
+                    logger.error(f"[{sym}] Error calculating indicators for {self.name}: {e}")
+                    continue
             
             last = results.iloc[-1]
             

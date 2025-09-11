@@ -631,6 +631,20 @@ class SuperT(SignalGenerator):
     def required_timeframes(self) -> List[str]:
         return [self.primary_timeframe]
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """(Backtesting Only) Pre-calculates all indicators for the entire dataset."""
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        prepared_data = market_data.copy()
+
+        for sym, frames in prepared_data.items():
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                lux_algo = Supertrend(df.copy())
+                prepared_df = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
+                frames[self.primary_timeframe] = prepared_df
+        
+        return prepared_data
+
     async def generate_signals(
         self, market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None, **kwargs
     ) -> List[Dict]:
@@ -649,15 +663,19 @@ class SuperT(SignalGenerator):
 
             logger.debug(f"[{sym}] Analyzing data for timestamp: {last_timestamp}")
 
-            try:
-                lux_algo = Supertrend(primary_df.copy())
-                # Pass strategy params to the indicator calculation
-                results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
-            except Exception as e:
-                logger.error(f"[{sym}] Error calculating indicators: {e}")
-                continue
+            # Check if indicators are already present (from backtester)
+            indicator_cols = ['supertrend', 'bull_signal', 'bear_signal', 'sma13']
+            if all(col in primary_df.columns for col in indicator_cols):
+                results = primary_df
+            else:
+                # Calculate indicators on the fly for live trading
+                try:
+                    lux_algo = Supertrend(primary_df.copy())
+                    results = lux_algo.calculate_all_indicators(sensitivity=self.params['supertrend_factor'])
+                except Exception as e:
+                    logger.error(f"[{sym}] Error calculating indicators: {e}")
+                    continue
             
-            # --- CORRECTION: Use the pre-calculated results from the LuxAlgo class ---
             last = results.iloc[-1]
             
             # --- Structured Logging ---

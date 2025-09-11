@@ -79,6 +79,20 @@ class AlphaFusionScalper2(SignalGenerator):
     def required_timeframes(self) -> List[str]:
         return [self.primary_timeframe]
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """(Backtesting Only) Pre-calculates all indicators for the entire dataset."""
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        prepared_data = market_data.copy()
+
+        for sym, frames in prepared_data.items():
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                # Calculate all indicators using the existing helper method
+                prepared_df = self._calculate_indicators(df.copy())
+                frames[self.primary_timeframe] = prepared_df
+        
+        return prepared_data
+
     async def initialize(self) -> bool:
         logger.info(f"🔌 Initializing {self.name} v{self.version}")
         return True
@@ -103,7 +117,15 @@ class AlphaFusionScalper2(SignalGenerator):
 
             # --- Core Logic Pipeline ---
             logger.debug(f"[{sym}] Analyzing bar with timestamp: {last_timestamp}")
-            df = self._calculate_indicators(primary_df.copy())
+            
+            # Check if indicators are already present (from backtester)
+            indicator_cols = ['SMA_10', 'EMA_30', 'EMA_34_HIGH', 'RSI_14', 'EMA_34_SLOPE']
+            if all(col in primary_df.columns for col in indicator_cols):
+                df = primary_df
+            else:
+                # Calculate indicators on the fly for live trading
+                df = self._calculate_indicators(primary_df.copy())
+
             if df.empty: continue
 
             direction, entry_type = self._find_entry_signal(df, sym, last_timestamp)

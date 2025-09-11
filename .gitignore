@@ -67,6 +67,7 @@ exports/
 
 # Cursor
 .cursor/ 
+data/
 
 # IDE
 .idea/

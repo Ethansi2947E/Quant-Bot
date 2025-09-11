@@ -100,6 +100,26 @@ class AlphaQuantScalperV1(SignalGenerator):
         # This strategy operates purely on the primary timeframe but could be extended.
         return [self.primary_timeframe]
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """(Backtesting Only) Pre-calculates all indicators for the entire dataset."""
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        prepared_data = market_data.copy()
+
+        for sym, frames in prepared_data.items():
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                # Calculate all indicators and add them to the DataFrame
+                df['ema_fast'] = talib.EMA(df['close'], timeperiod=self.fast_ema_period)
+                df['ema_slow'] = talib.EMA(df['close'], timeperiod=self.slow_ema_period)
+                df['rsi'] = talib.RSI(df['close'], timeperiod=self.rsi_period)
+                df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+                df = self._get_daily_vwap(df)
+                df['volume_pressure_ratio'] = self._get_volume_pressure_proxy(df, self.imb_proxy_lookback)
+                df.dropna(inplace=True)
+                frames[self.primary_timeframe] = df
+        
+        return prepared_data
+
     async def generate_signals(
         self,
         market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
@@ -122,7 +142,25 @@ class AlphaQuantScalperV1(SignalGenerator):
             last_timestamp = str(primary_df.index[-1])
 
             # --- 1. Calculate All Indicators & Proxies ---
-            indicators = self._calculate_indicators(primary_df)
+            # Check if indicators are already present (from backtester)
+            indicator_cols = ['ema_fast', 'ema_slow', 'rsi', 'vwap', 'volume_pressure_ratio']
+            if all(col in primary_df.columns for col in indicator_cols):
+                data_with_indicators = primary_df
+            else:
+                # Calculate indicators on the fly for live trading
+                data_with_indicators = primary_df.copy()
+                data_with_indicators['ema_fast'] = talib.EMA(data_with_indicators['close'], timeperiod=self.fast_ema_period)
+                data_with_indicators['ema_slow'] = talib.EMA(data_with_indicators['close'], timeperiod=self.slow_ema_period)
+                data_with_indicators['rsi'] = talib.RSI(data_with_indicators['close'], timeperiod=self.rsi_period)
+                data_with_indicators['atr'] = talib.ATR(data_with_indicators['high'], data_with_indicators['low'], data_with_indicators['close'], timeperiod=14)
+                data_with_indicators = self._get_daily_vwap(data_with_indicators)
+                data_with_indicators['volume_pressure_ratio'] = self._get_volume_pressure_proxy(data_with_indicators, self.imb_proxy_lookback)
+                data_with_indicators.dropna(inplace=True)
+
+            if data_with_indicators.empty:
+                continue
+
+            indicators = self._get_last_indicator_values(data_with_indicators)
             if not indicators:
                 continue
             
@@ -247,30 +285,14 @@ class AlphaQuantScalperV1(SignalGenerator):
     # --- HELPER METHODS for calculating indicators and proxies ---
     # ==============================================================================
 
-    def _calculate_indicators(self, df: pd.DataFrame) -> Dict:
-        """Calculates all necessary indicators and returns them in a dictionary."""
-        # Work on a copy to avoid SettingWithCopyWarning and other side effects.
-        data = df.copy()
+    def _get_last_indicator_values(self, df: pd.DataFrame) -> Dict:
+        """Extracts the most recent indicator values from a DataFrame."""
         try:
-            # Standard Indicators
-            data['ema_fast'] = talib.EMA(data['close'].to_numpy(dtype=float), timeperiod=self.fast_ema_period)
-            data['ema_slow'] = talib.EMA(data['close'].to_numpy(dtype=float), timeperiod=self.slow_ema_period)
-            data['rsi'] = talib.RSI(data['close'].to_numpy(dtype=float), timeperiod=self.rsi_period)
-            data['atr'] = talib.ATR(data['high'].to_numpy(dtype=float), data['low'].to_numpy(dtype=float), data['close'].to_numpy(dtype=float), timeperiod=14)
-            
-            # Custom VWAP Calculation
-            data = self._get_daily_vwap(data)
-            
-            # Custom Order Book Imbalance Proxy
-            data['volume_pressure_ratio'] = self._get_volume_pressure_proxy(data, self.imb_proxy_lookback)
-
-            # Key Levels (Proxy for Volume Profile Nodes)
-            last_swing_high = data['high'].iloc[-self.swing_lookback_period:-1].max()
-            last_swing_low = data['low'].iloc[-self.swing_lookback_period:-1].min()
-            
-            last_candle = data.iloc[-1]
+            last_candle = df.iloc[-1]
             atr = last_candle['atr']
-            
+            last_swing_high = df['high'].iloc[-self.swing_lookback_period:-1].max()
+            last_swing_low = df['low'].iloc[-self.swing_lookback_period:-1].min()
+
             return {
                 "close": last_candle['close'],
                 "vwap": last_candle['vwap'],
@@ -285,7 +307,7 @@ class AlphaQuantScalperV1(SignalGenerator):
                 "is_near_resistance": abs(last_candle['close'] - last_swing_high) <= atr * 0.5
             }
         except Exception as e:
-            logger.error(f"Error calculating indicators: {e}")
+            logger.error(f"Error extracting last indicator values: {e}")
             return {}
 
     def _get_daily_vwap(self, df: pd.DataFrame) -> pd.DataFrame:

@@ -131,6 +131,43 @@ class StrategyTemplate(SignalGenerator):
         logger.info(f"🔌 Initializing {self.name}")
         return True
 
+    def prepare_data(self, market_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        (Backtesting Only) Pre-calculates all indicators for the entire dataset.
+
+        This method is called once by the backtesting engine before the main loop.
+        It should take the raw historical data and add all necessary indicator columns.
+        This allows for a highly efficient, vectorized calculation of indicators,
+        making the backtest significantly faster.
+
+        Args:
+            market_data (Dict): The complete historical data for all required symbols and timeframes.
+
+        Returns:
+            Dict: The same data structure, but with all indicator columns added to the DataFrames.
+        """
+        logger.info(f"[{self.name}] Preparing data for backtesting...")
+        
+        prepared_data = market_data.copy()
+        
+        for sym, frames in prepared_data.items():
+            # Example for primary timeframe. You would do this for all required timeframes.
+            if self.primary_timeframe in frames:
+                df = frames[self.primary_timeframe]
+                
+                # --- Add Your Indicator Calculations Here ---
+                # Example: Calculate a simple moving average
+                df['sma'] = talib.SMA(df['close'], timeperiod=self.ma_period)
+                df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+                
+                # Ensure no NaN values are left after calculations
+                df.dropna(inplace=True)
+                
+                frames[self.primary_timeframe] = df
+                logger.debug(f"[{sym}] Added 'sma' and 'atr' columns to {self.primary_timeframe} data.")
+
+        return prepared_data
+
     async def generate_signals(
         self,
         market_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
